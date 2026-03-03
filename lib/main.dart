@@ -3,6 +3,7 @@ import 'db_helper.dart';
 import 'step1_school.dart';
 import 'step2_mentor.dart';
 import 'step3_team.dart';
+import 'step4_run.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -26,7 +27,7 @@ class MyApp extends StatelessWidget {
       title: 'RoboVenture Scoring',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF3D1A8C)),
         useMaterial3: true,
       ),
       home: const RegistrationFlow(),
@@ -58,43 +59,42 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
         return Step1School(
           onSkip: () => _goToStep(2),
           onRegistered: (schoolId) {
-            _schoolId = schoolId;
-            print('✅ School registered with ID: $schoolId');
-            _goToStep(2);
+            setState(() {
+              _schoolId = schoolId;
+              _goToStep(2);
+            });
           },
         );
       case 2:
         return Step2Mentor(
           onSkip: () => _goToStep(3),
           onRegistered: (mentorId) {
-            _mentorId = mentorId;
-            print('✅ Mentor registered with ID: $mentorId');
-            _goToStep(3);
+            setState(() {
+              _mentorId = mentorId;
+              _goToStep(3);
+            });
           },
         );
       case 3:
         return Step3Team(
           onSkip: () => _goToStep(4),
           onRegistered: (teamId) {
-            _teamId = teamId;
-            print('✅ Team registered with ID: $teamId');
-            _goToStep(4);
+            setState(() {
+              _teamId = teamId;
+              _goToStep(4);
+            });
           },
         );
       case 4:
-        // Step 4 placeholder - replace with Step4 widget when ready
-        return Scaffold(
-          body: Center(
-            child: Text(
-              'Step 4 - Coming Soon\nSchool ID: $_schoolId\nMentor ID: $_mentorId\nTeam ID: $_teamId',
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 20),
-            ),
-          ),
+        // Passing the IDs here removes the "unused_field" warnings
+        return Step4Run(
+          schoolId: _schoolId,
+          mentorId: _mentorId,
+          teamId: _teamId,
         );
       default:
         return const Scaffold(
-          body: Center(child: Text('Done!')),
+          body: Center(child: Text('Registration Flow Completed')),
         );
     }
   }
