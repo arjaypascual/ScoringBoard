@@ -4,8 +4,14 @@ import 'db_helper.dart';
 class Step1School extends StatefulWidget {
   final VoidCallback onSkip;
   final void Function(int schoolId) onRegistered;
+  final VoidCallback? onBack; // null = no back button (first step)
 
-  const Step1School({super.key, required this.onSkip, required this.onRegistered});
+  const Step1School({
+    super.key,
+    required this.onSkip,
+    required this.onRegistered,
+    this.onBack,
+  });
 
   @override
   State<Step1School> createState() => _Step1SchoolState();
@@ -48,16 +54,14 @@ class _Step1SchoolState extends State<Step1School> {
     try {
       final conn = await DBHelper.getConnection();
 
-      // Insert school
       await conn.execute(
         "INSERT INTO tbl_school (school_name, school_region) VALUES (:name, :region)",
         {
-          "name": _nameController.text.trim(),
+          "name":   _nameController.text.trim(),
           "region": _selectedRegion,
         },
       );
 
-      // Get the new school ID
       final result = await conn.execute("SELECT LAST_INSERT_ID() as id");
       final schoolId = int.parse(
         result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0',
@@ -70,7 +74,6 @@ class _Step1SchoolState extends State<Step1School> {
         ),
       );
 
-      // Go to next step
       widget.onRegistered(schoolId);
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -82,15 +85,18 @@ class _Step1SchoolState extends State<Step1School> {
   }
 
   @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFDDDDDD),
       body: Column(
         children: [
-          // ── HEADER ──
           _buildHeader(),
-
-          // ── FORM CARD ──
           Expanded(
             child: Center(
               child: Container(
@@ -113,11 +119,10 @@ class _Step1SchoolState extends State<Step1School> {
                     Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // Step indicator
                         _buildStepIndicator(),
                         const SizedBox(height: 36),
 
-                        // School Name field
+                        // School Name
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -131,7 +136,7 @@ class _Step1SchoolState extends State<Step1School> {
                         ),
                         const SizedBox(height: 20),
 
-                        // School Region dropdown
+                        // School Region
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -142,7 +147,6 @@ class _Step1SchoolState extends State<Step1School> {
                         ),
                         const SizedBox(height: 24),
 
-                        // Note
                         const Text(
                           'Note: If the school is already registered, you may skip this step.',
                           style: TextStyle(
@@ -157,7 +161,6 @@ class _Step1SchoolState extends State<Step1School> {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            // SKIP
                             OutlinedButton(
                               onPressed: widget.onSkip,
                               style: OutlinedButton.styleFrom(
@@ -178,8 +181,6 @@ class _Step1SchoolState extends State<Step1School> {
                               ),
                             ),
                             const SizedBox(width: 24),
-
-                            // REGISTER
                             ElevatedButton(
                               onPressed: _isLoading ? null : _register,
                               style: ElevatedButton.styleFrom(
@@ -211,6 +212,19 @@ class _Step1SchoolState extends State<Step1School> {
                       ],
                     ),
 
+                    // Back button (only shown when onBack is provided)
+                    if (widget.onBack != null)
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        child: IconButton(
+                          icon: const Icon(Icons.arrow_back_ios_new,
+                              color: Color(0xFF3D1A8C)),
+                          tooltip: 'Back',
+                          onPressed: widget.onBack,
+                        ),
+                      ),
+
                     // Close button
                     Positioned(
                       top: 0,
@@ -239,7 +253,6 @@ class _Step1SchoolState extends State<Step1School> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Makeblock
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -247,52 +260,38 @@ class _Step1SchoolState extends State<Step1School> {
                 text: const TextSpan(
                   children: [
                     TextSpan(
-                      text: 'Make',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold),
-                    ),
+                        text: 'Make',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold)),
                     TextSpan(
-                      text: 'bl',
-                      style: TextStyle(
-                          color: Color(0xFF00CFFF),
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold),
-                    ),
+                        text: 'bl',
+                        style: TextStyle(
+                            color: Color(0xFF00CFFF),
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold)),
                     TextSpan(
-                      text: 'ock',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold),
-                    ),
+                        text: 'ock',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold)),
                   ],
                 ),
               ),
-              const Text(
-                'Construct Your Dreams',
-                style: TextStyle(color: Colors.white54, fontSize: 10),
-              ),
+              const Text('Construct Your Dreams',
+                  style: TextStyle(color: Colors.white54, fontSize: 10)),
             ],
           ),
-
-          // Center logo
-          Image.asset(
-            'assets/images/CenterLogo.png',
-            height: 100,
-            fit: BoxFit.contain,
-          ),
-
-          // CREOTEC
-          const Text(
-            'CREOTEC',
-            style: TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 3),
-          ),
+          Image.asset('assets/images/CenterLogo.png',
+              height: 100, fit: BoxFit.contain),
+          const Text('CREOTEC',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 3)),
         ],
       ),
     );
@@ -314,13 +313,16 @@ class _Step1SchoolState extends State<Step1School> {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: isActive ? const Color(0xFF3D1A8C) : Colors.white,
-                border: Border.all(color: const Color(0xFF3D1A8C), width: 2),
+                border:
+                    Border.all(color: const Color(0xFF3D1A8C), width: 2),
               ),
               child: Center(
                 child: Text(
                   '$step',
                   style: TextStyle(
-                    color: isActive ? Colors.white : const Color(0xFF3D1A8C),
+                    color: isActive
+                        ? Colors.white
+                        : const Color(0xFF3D1A8C),
                     fontWeight: FontWeight.bold,
                     fontSize: 16,
                   ),
@@ -329,10 +331,9 @@ class _Step1SchoolState extends State<Step1School> {
             ),
             if (step < 4)
               Container(
-                width: 120,
-                height: 2,
-                color: const Color(0xFFCCCCCC),
-              ),
+                  width: 120,
+                  height: 2,
+                  color: const Color(0xFFCCCCCC)),
           ],
         );
       }),
@@ -343,10 +344,9 @@ class _Step1SchoolState extends State<Step1School> {
   Widget _fieldLabel(String text) {
     return SizedBox(
       width: 160,
-      child: Text(
-        text,
-        style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14),
-      ),
+      child: Text(text,
+          style:
+              const TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
     );
   }
 
@@ -361,7 +361,8 @@ class _Step1SchoolState extends State<Step1School> {
         controller: controller,
         decoration: InputDecoration(
           hintText: hint,
-          hintStyle: const TextStyle(color: Colors.black26, fontSize: 13),
+          hintStyle:
+              const TextStyle(color: Colors.black26, fontSize: 13),
           contentPadding:
               const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           enabledBorder: OutlineInputBorder(

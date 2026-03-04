@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 import 'db_helper.dart';
+import 'landing_page.dart';
 import 'step1_school.dart';
 import 'step2_mentor.dart';
 import 'step3_team.dart';
-import 'step4_run.dart';
+import 'step4_player.dart';
+import 'generate_schedule.dart';
+import 'schedule_viewer.dart';
+import 'standings.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -24,17 +28,18 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'RoboVenture Scoring',
+      title: 'RoboVenture',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF3D1A8C)),
         useMaterial3: true,
       ),
-      home: const RegistrationFlow(),
+      home: const LandingPage(), // ← starts at landing page
     );
   }
 }
 
+// ── Registration Flow (launched from LandingPage → REGISTRATION button) ──────
 class RegistrationFlow extends StatefulWidget {
   const RegistrationFlow({super.key});
 
@@ -44,37 +49,30 @@ class RegistrationFlow extends StatefulWidget {
 
 class _RegistrationFlowState extends State<RegistrationFlow> {
   int _currentStep = 1;
-  int? _schoolId;
-  int? _mentorId;
   int? _teamId;
 
-  void _goToStep(int step) {
-    setState(() => _currentStep = step);
-  }
+  void _goToStep(int step) => setState(() => _currentStep = step);
 
   @override
   Widget build(BuildContext context) {
     switch (_currentStep) {
+      // ── Step 1: School ────────────────────────────────────────────────
       case 1:
         return Step1School(
-          onSkip: () => _goToStep(2),
-          onRegistered: (schoolId) {
-            setState(() {
-              _schoolId = schoolId;
-              _goToStep(2);
-            });
-          },
+          onSkip:       () => _goToStep(2),
+          onRegistered: (_) => _goToStep(2),
+          onBack:       () => Navigator.of(context).pop(), // back to landing
         );
+
+      // ── Step 2: Mentor ────────────────────────────────────────────────
       case 2:
         return Step2Mentor(
-          onSkip: () => _goToStep(3),
-          onRegistered: (mentorId) {
-            setState(() {
-              _mentorId = mentorId;
-              _goToStep(3);
-            });
-          },
+          onSkip:       () => _goToStep(3),
+          onRegistered: (_) => _goToStep(3),
+          onBack:       () => _goToStep(1),
         );
+
+      // ── Step 3: Team ──────────────────────────────────────────────────
       case 3:
         return Step3Team(
           onSkip: () => _goToStep(4),
@@ -84,17 +82,40 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
               _goToStep(4);
             });
           },
+          onBack: () => _goToStep(2),
         );
+
+      // ── Step 4: Players ───────────────────────────────────────────────
       case 4:
-        // Passing the IDs here removes the "unused_field" warnings
-        return Step4Run(
-          schoolId: _schoolId,
-          mentorId: _mentorId,
+        return Step4Player(
           teamId: _teamId,
+          onDone: () => _goToStep(5),
+          onBack: () => _goToStep(3),
         );
+
+      // ── Step 5: Generate Schedule ─────────────────────────────────────
+      case 5:
+        return GenerateSchedule(
+          onBack:      () => _goToStep(4),
+          onGenerated: () => _goToStep(6),
+        );
+
+      // ── Step 6: Schedule Viewer ───────────────────────────────────────
+      case 6:
+        return ScheduleViewer(
+          onRegister:  () => _goToStep(1),
+          onStandings: () => _goToStep(7),
+        );
+
+      // ── Step 7: Standings ─────────────────────────────────────────────
+      case 7:
+        return Standings(
+          onBack: () => _goToStep(6),
+        );
+
       default:
         return const Scaffold(
-          body: Center(child: Text('Registration Flow Completed')),
+          body: Center(child: Text('Flow Completed')),
         );
     }
   }

@@ -4,19 +4,25 @@ import 'db_helper.dart';
 class Step2Mentor extends StatefulWidget {
   final VoidCallback onSkip;
   final void Function(int mentorId) onRegistered;
+  final VoidCallback? onBack;
 
-  const Step2Mentor({super.key, required this.onSkip, required this.onRegistered});
+  const Step2Mentor({
+    super.key,
+    required this.onSkip,
+    required this.onRegistered,
+    this.onBack,
+  });
 
   @override
   State<Step2Mentor> createState() => _Step2MentorState();
 }
 
 class _Step2MentorState extends State<Step2Mentor> {
-  final _nameController = TextEditingController();
+  final _nameController    = TextEditingController();
   final _contactController = TextEditingController();
   int? _selectedSchoolId;
   List<Map<String, dynamic>> _schools = [];
-  bool _isLoading = false;
+  bool _isLoading        = false;
   bool _isLoadingSchools = true;
 
   @override
@@ -29,14 +35,16 @@ class _Step2MentorState extends State<Step2Mentor> {
     try {
       final schools = await DBHelper.getSchools();
       setState(() {
-        _schools = schools;
+        _schools        = schools;
         _isLoadingSchools = false;
       });
     } catch (e) {
       setState(() => _isLoadingSchools = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('❌ Failed to load schools: $e'), backgroundColor: Colors.red),
+          SnackBar(
+              content: Text('❌ Failed to load schools: $e'),
+              backgroundColor: Colors.red),
         );
       }
     }
@@ -59,16 +67,15 @@ class _Step2MentorState extends State<Step2Mentor> {
       await conn.execute(
         "INSERT INTO tbl_mentor (mentor_name, mentor_number, school_id) VALUES (:name, :number, :schoolId)",
         {
-          "name": _nameController.text.trim(),
-          "number": _contactController.text.trim(),
+          "name":     _nameController.text.trim(),
+          "number":   _contactController.text.trim(),
           "schoolId": _selectedSchoolId,
         },
       );
 
-      final result = await conn.execute("SELECT LAST_INSERT_ID() as id");
+      final result   = await conn.execute("SELECT LAST_INSERT_ID() as id");
       final mentorId = int.parse(
-        result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0',
-      );
+          result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0');
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -80,7 +87,8 @@ class _Step2MentorState extends State<Step2Mentor> {
       widget.onRegistered(mentorId);
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('❌ Error: $e'), backgroundColor: Colors.red),
+        SnackBar(
+            content: Text('❌ Error: $e'), backgroundColor: Colors.red),
       );
     } finally {
       setState(() => _isLoading = false);
@@ -109,7 +117,8 @@ class _Step2MentorState extends State<Step2Mentor> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: const Color(0xFF3D1A8C), width: 2),
+                  border:
+                      Border.all(color: const Color(0xFF3D1A8C), width: 2),
                   boxShadow: [
                     BoxShadow(
                       color: Colors.black.withOpacity(0.15),
@@ -133,9 +142,8 @@ class _Step2MentorState extends State<Step2Mentor> {
                             _fieldLabel('MENTOR NAME:'),
                             const SizedBox(width: 16),
                             _textField(
-                              hint: 'Enter mentor name',
-                              controller: _nameController,
-                            ),
+                                hint: 'Enter mentor name',
+                                controller: _nameController),
                           ],
                         ),
                         const SizedBox(height: 20),
@@ -155,7 +163,7 @@ class _Step2MentorState extends State<Step2Mentor> {
                         ),
                         const SizedBox(height: 20),
 
-                        // School Name dropdown
+                        // School dropdown
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -180,52 +188,64 @@ class _Step2MentorState extends State<Step2Mentor> {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            // SKIP
                             OutlinedButton(
                               onPressed: widget.onSkip,
                               style: OutlinedButton.styleFrom(
-                                side: const BorderSide(color: Color(0xFF3D1A8C), width: 2),
-                                padding: const EdgeInsets.symmetric(horizontal: 44, vertical: 14),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                side: const BorderSide(
+                                    color: Color(0xFF3D1A8C), width: 2),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 44, vertical: 14),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8)),
                               ),
-                              child: const Text(
-                                'SKIP',
-                                style: TextStyle(
-                                  color: Color(0xFF3D1A8C),
-                                  fontWeight: FontWeight.bold,
-                                  letterSpacing: 1,
-                                ),
-                              ),
+                              child: const Text('SKIP',
+                                  style: TextStyle(
+                                    color: Color(0xFF3D1A8C),
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 1,
+                                  )),
                             ),
                             const SizedBox(width: 24),
-
-                            // REGISTER
                             ElevatedButton(
                               onPressed: _isLoading ? null : _register,
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: const Color(0xFF00CFFF),
-                                padding: const EdgeInsets.symmetric(horizontal: 44, vertical: 14),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 44, vertical: 14),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8)),
                               ),
                               child: _isLoading
                                   ? const SizedBox(
                                       width: 20,
                                       height: 20,
-                                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                                    )
-                                  : const Text(
-                                      'REGISTER',
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white))
+                                  : const Text('REGISTER',
                                       style: TextStyle(
                                         color: Colors.white,
                                         fontWeight: FontWeight.bold,
                                         letterSpacing: 1,
-                                      ),
-                                    ),
+                                      )),
                             ),
                           ],
                         ),
                       ],
                     ),
+
+                    // Back button
+                    if (widget.onBack != null)
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        child: IconButton(
+                          icon: const Icon(Icons.arrow_back_ios_new,
+                              color: Color(0xFF3D1A8C)),
+                          tooltip: 'Back',
+                          onPressed: widget.onBack,
+                        ),
+                      ),
 
                     // Close button
                     Positioned(
@@ -255,52 +275,43 @@ class _Step2MentorState extends State<Step2Mentor> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Makeblock
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               RichText(
-                text: const TextSpan(
-                  children: [
-                    TextSpan(
+                text: const TextSpan(children: [
+                  TextSpan(
                       text: 'Make',
-                      style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
-                    ),
-                    TextSpan(
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold)),
+                  TextSpan(
                       text: 'bl',
-                      style: TextStyle(color: Color(0xFF00CFFF), fontSize: 22, fontWeight: FontWeight.bold),
-                    ),
-                    TextSpan(
+                      style: TextStyle(
+                          color: Color(0xFF00CFFF),
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold)),
+                  TextSpan(
                       text: 'ock',
-                      style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold)),
+                ]),
               ),
-              const Text(
-                'Construct Your Dreams',
-                style: TextStyle(color: Colors.white54, fontSize: 10),
-              ),
+              const Text('Construct Your Dreams',
+                  style: TextStyle(color: Colors.white54, fontSize: 10)),
             ],
           ),
-
-          // Center logo
-          Image.asset(
-            'assets/images/CenterLogo.png',
-            height: 80,
-            fit: BoxFit.contain,
-          ),
-
-          // CREOTEC
-          const Text(
-            'CREOTEC',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 3,
-            ),
-          ),
+          Image.asset('assets/images/CenterLogo.png',
+              height: 80, fit: BoxFit.contain),
+          const Text('CREOTEC',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 3)),
         ],
       ),
     );
@@ -311,9 +322,9 @@ class _Step2MentorState extends State<Step2Mentor> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: List.generate(4, (index) {
-        final step = index + 1;
+        final step    = index + 1;
         final isActive = step == 2;
-        final isDone = step < 2;
+        final isDone   = step < 2;
 
         return Row(
           children: [
@@ -322,27 +333,32 @@ class _Step2MentorState extends State<Step2Mentor> {
               height: 44,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: isActive || isDone ? const Color(0xFF3D1A8C) : Colors.white,
-                border: Border.all(color: const Color(0xFF3D1A8C), width: 2),
+                color: isActive || isDone
+                    ? const Color(0xFF3D1A8C)
+                    : Colors.white,
+                border:
+                    Border.all(color: const Color(0xFF3D1A8C), width: 2),
               ),
               child: Center(
                 child: isDone
                     ? const Icon(Icons.check, color: Colors.white, size: 20)
-                    : Text(
-                        '$step',
+                    : Text('$step',
                         style: TextStyle(
-                          color: isActive ? Colors.white : const Color(0xFF3D1A8C),
+                          color: isActive
+                              ? Colors.white
+                              : const Color(0xFF3D1A8C),
                           fontWeight: FontWeight.bold,
                           fontSize: 16,
-                        ),
-                      ),
+                        )),
               ),
             ),
             if (step < 4)
               Container(
                 width: 120,
                 height: 2,
-                color: isDone ? const Color(0xFF3D1A8C) : const Color(0xFFCCCCCC),
+                color: isDone
+                    ? const Color(0xFF3D1A8C)
+                    : const Color(0xFFCCCCCC),
               ),
           ],
         );
@@ -354,10 +370,9 @@ class _Step2MentorState extends State<Step2Mentor> {
   Widget _fieldLabel(String text) {
     return SizedBox(
       width: 160,
-      child: Text(
-        text,
-        style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14),
-      ),
+      child: Text(text,
+          style:
+              const TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
     );
   }
 
@@ -374,15 +389,18 @@ class _Step2MentorState extends State<Step2Mentor> {
         keyboardType: keyboardType,
         decoration: InputDecoration(
           hintText: hint,
-          hintStyle: const TextStyle(color: Colors.black26, fontSize: 13),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          hintStyle:
+              const TextStyle(color: Colors.black26, fontSize: 13),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(6),
             borderSide: const BorderSide(color: Color(0xFFAAAAAA)),
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(6),
-            borderSide: const BorderSide(color: Color(0xFF3D1A8C), width: 2),
+            borderSide:
+                const BorderSide(color: Color(0xFF3D1A8C), width: 2),
           ),
         ),
       ),
@@ -397,34 +415,34 @@ class _Step2MentorState extends State<Step2Mentor> {
         child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
       );
     }
-
     return SizedBox(
       width: 340,
       height: 42,
       child: DropdownButtonFormField<int>(
         value: _selectedSchoolId,
-        hint: const Text('Select school', style: TextStyle(color: Colors.black26, fontSize: 13)),
+        hint: const Text('Select school',
+            style: TextStyle(color: Colors.black26, fontSize: 13)),
         isExpanded: true,
         items: _schools.map((s) {
           return DropdownMenuItem<int>(
             value: int.tryParse(s['school_id'].toString()),
-            child: Text(
-              s['school_name'] ?? '',
-              style: const TextStyle(fontSize: 13),
-              overflow: TextOverflow.ellipsis,
-            ),
+            child: Text(s['school_name'] ?? '',
+                style: const TextStyle(fontSize: 13),
+                overflow: TextOverflow.ellipsis),
           );
         }).toList(),
         onChanged: (v) => setState(() => _selectedSchoolId = v),
         decoration: InputDecoration(
-          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(6),
             borderSide: const BorderSide(color: Color(0xFFAAAAAA)),
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(6),
-            borderSide: const BorderSide(color: Color(0xFF3D1A8C), width: 2),
+            borderSide:
+                const BorderSide(color: Color(0xFF3D1A8C), width: 2),
           ),
         ),
       ),

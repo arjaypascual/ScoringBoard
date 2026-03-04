@@ -12,6 +12,8 @@ dependencies:
     sdk: flutter
   mysql_client: ^0.0.27
   cupertino_icons: ^1.0.8
+  pdf: ^3.10.8
+  printing: ^5.12.0
 
 dev_dependencies:
   flutter_test:

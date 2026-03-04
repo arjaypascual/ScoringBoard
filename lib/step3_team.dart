@@ -4,8 +4,14 @@ import 'db_helper.dart';
 class Step3Team extends StatefulWidget {
   final VoidCallback onSkip;
   final void Function(int teamId) onRegistered;
+  final VoidCallback? onBack;
 
-  const Step3Team({super.key, required this.onSkip, required this.onRegistered});
+  const Step3Team({
+    super.key,
+    required this.onSkip,
+    required this.onRegistered,
+    this.onBack,
+  });
 
   @override
   State<Step3Team> createState() => _Step3TeamState();
@@ -17,8 +23,8 @@ class _Step3TeamState extends State<Step3Team> {
   int? _selectedCategoryId;
   int? _selectedMentorId;
   List<Map<String, dynamic>> _categories = [];
-  List<Map<String, dynamic>> _mentors = [];
-  bool _isLoading = false;
+  List<Map<String, dynamic>> _mentors    = [];
+  bool _isLoading     = false;
   bool _isLoadingData = true;
 
   @override
@@ -30,21 +36,23 @@ class _Step3TeamState extends State<Step3Team> {
   Future<void> _loadData() async {
     try {
       final categories = await DBHelper.getCategories();
-      final conn = await DBHelper.getConnection();
+      final conn       = await DBHelper.getConnection();
       final mentorResult = await conn.execute(
         "SELECT mentor_id, mentor_name FROM tbl_mentor ORDER BY mentor_name"
       );
       final mentors = mentorResult.rows.map((r) => r.assoc()).toList();
       setState(() {
-        _categories = categories;
-        _mentors = mentors;
+        _categories    = categories;
+        _mentors       = mentors;
         _isLoadingData = false;
       });
     } catch (e) {
       setState(() => _isLoadingData = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('❌ Failed to load data: $e'), backgroundColor: Colors.red),
+          SnackBar(
+              content: Text('❌ Failed to load data: $e'),
+              backgroundColor: Colors.red),
         );
       }
     }
@@ -69,17 +77,16 @@ class _Step3TeamState extends State<Step3Team> {
         """INSERT INTO tbl_team (team_name, team_ispresent, mentor_id, category_id)
            VALUES (:name, :present, :mentorId, :categoryId)""",
         {
-          "name": _nameController.text.trim(),
-          "present": _isPresent! ? 1 : 0,
-          "mentorId": _selectedMentorId,
+          "name":       _nameController.text.trim(),
+          "present":    _isPresent! ? 1 : 0,
+          "mentorId":   _selectedMentorId,
           "categoryId": _selectedCategoryId,
         },
       );
 
       final result = await conn.execute("SELECT LAST_INSERT_ID() as id");
       final teamId = int.parse(
-        result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0',
-      );
+          result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0');
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -91,7 +98,8 @@ class _Step3TeamState extends State<Step3Team> {
       widget.onRegistered(teamId);
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('❌ Error: $e'), backgroundColor: Colors.red),
+        SnackBar(
+            content: Text('❌ Error: $e'), backgroundColor: Colors.red),
       );
     } finally {
       setState(() => _isLoading = false);
@@ -119,7 +127,8 @@ class _Step3TeamState extends State<Step3Team> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: const Color(0xFF3D1A8C), width: 2),
+                  border:
+                      Border.all(color: const Color(0xFF3D1A8C), width: 2),
                   boxShadow: [
                     BoxShadow(
                       color: Colors.black.withOpacity(0.15),
@@ -143,9 +152,8 @@ class _Step3TeamState extends State<Step3Team> {
                             _fieldLabel('TEAM NAME:'),
                             const SizedBox(width: 16),
                             _textField(
-                              hint: 'Enter team name',
-                              controller: _nameController,
-                            ),
+                                hint: 'Enter team name',
+                                controller: _nameController),
                           ],
                         ),
                         const SizedBox(height: 20),
@@ -160,40 +168,46 @@ class _Step3TeamState extends State<Step3Team> {
                               width: 340,
                               child: Row(
                                 children: [
-                                  // YES
                                   GestureDetector(
-                                    onTap: () => setState(() => _isPresent = true),
-                                    child: Row(
-                                      children: [
-                                        Checkbox(
-                                          value: _isPresent == true,
-                                          onChanged: (v) => setState(() => _isPresent = true),
-                                          activeColor: const Color(0xFF3D1A8C),
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(3),
-                                          ),
-                                        ),
-                                        const Text('YES', style: TextStyle(fontWeight: FontWeight.bold)),
-                                      ],
-                                    ),
+                                    onTap: () =>
+                                        setState(() => _isPresent = true),
+                                    child: Row(children: [
+                                      Checkbox(
+                                        value: _isPresent == true,
+                                        onChanged: (_) => setState(
+                                            () => _isPresent = true),
+                                        activeColor:
+                                            const Color(0xFF3D1A8C),
+                                        shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(3)),
+                                      ),
+                                      const Text('YES',
+                                          style: TextStyle(
+                                              fontWeight:
+                                                  FontWeight.bold)),
+                                    ]),
                                   ),
                                   const SizedBox(width: 24),
-                                  // NO
                                   GestureDetector(
-                                    onTap: () => setState(() => _isPresent = false),
-                                    child: Row(
-                                      children: [
-                                        Checkbox(
-                                          value: _isPresent == false,
-                                          onChanged: (v) => setState(() => _isPresent = false),
-                                          activeColor: const Color(0xFF3D1A8C),
-                                          shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(3),
-                                          ),
-                                        ),
-                                        const Text('NO', style: TextStyle(fontWeight: FontWeight.bold)),
-                                      ],
-                                    ),
+                                    onTap: () =>
+                                        setState(() => _isPresent = false),
+                                    child: Row(children: [
+                                      Checkbox(
+                                        value: _isPresent == false,
+                                        onChanged: (_) => setState(
+                                            () => _isPresent = false),
+                                        activeColor:
+                                            const Color(0xFF3D1A8C),
+                                        shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(3)),
+                                      ),
+                                      const Text('NO',
+                                          style: TextStyle(
+                                              fontWeight:
+                                                  FontWeight.bold)),
+                                    ]),
                                   ),
                                 ],
                               ),
@@ -209,30 +223,51 @@ class _Step3TeamState extends State<Step3Team> {
                             _fieldLabel('CATEGORY:'),
                             const SizedBox(width: 16),
                             _isLoadingData
-                                ? const SizedBox(width: 340, height: 42, child: Center(child: CircularProgressIndicator(strokeWidth: 2)))
+                                ? const SizedBox(
+                                    width: 340,
+                                    height: 42,
+                                    child: Center(
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2)))
                                 : SizedBox(
                                     width: 340,
                                     height: 42,
                                     child: DropdownButtonFormField<int>(
                                       value: _selectedCategoryId,
-                                      hint: const Text('Choose category', style: TextStyle(color: Colors.black26, fontSize: 13)),
+                                      hint: const Text('Choose category',
+                                          style: TextStyle(
+                                              color: Colors.black26,
+                                              fontSize: 13)),
                                       isExpanded: true,
                                       items: _categories.map((c) {
                                         return DropdownMenuItem<int>(
-                                          value: int.tryParse(c['category_id'].toString()),
-                                          child: Text(c['category_type'] ?? '', style: const TextStyle(fontSize: 13)),
+                                          value: int.tryParse(
+                                              c['category_id'].toString()),
+                                          child: Text(
+                                              c['category_type'] ?? '',
+                                              style: const TextStyle(
+                                                  fontSize: 13)),
                                         );
                                       }).toList(),
-                                      onChanged: (v) => setState(() => _selectedCategoryId = v),
+                                      onChanged: (v) => setState(
+                                          () => _selectedCategoryId = v),
                                       decoration: InputDecoration(
-                                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                        contentPadding:
+                                            const EdgeInsets.symmetric(
+                                                horizontal: 14,
+                                                vertical: 10),
                                         enabledBorder: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(6),
-                                          borderSide: const BorderSide(color: Color(0xFFAAAAAA)),
+                                          borderRadius:
+                                              BorderRadius.circular(6),
+                                          borderSide: const BorderSide(
+                                              color: Color(0xFFAAAAAA)),
                                         ),
                                         focusedBorder: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(6),
-                                          borderSide: const BorderSide(color: Color(0xFF3D1A8C), width: 2),
+                                          borderRadius:
+                                              BorderRadius.circular(6),
+                                          borderSide: const BorderSide(
+                                              color: Color(0xFF3D1A8C),
+                                              width: 2),
                                         ),
                                       ),
                                     ),
@@ -241,41 +276,60 @@ class _Step3TeamState extends State<Step3Team> {
                         ),
                         const SizedBox(height: 20),
 
-                        // Mentor Name
+                        // Mentor
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             _fieldLabel('MENTOR NAME:'),
                             const SizedBox(width: 16),
                             _isLoadingData
-                                ? const SizedBox(width: 340, height: 42, child: Center(child: CircularProgressIndicator(strokeWidth: 2)))
+                                ? const SizedBox(
+                                    width: 340,
+                                    height: 42,
+                                    child: Center(
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2)))
                                 : SizedBox(
                                     width: 340,
                                     height: 42,
                                     child: DropdownButtonFormField<int>(
                                       value: _selectedMentorId,
-                                      hint: const Text('Select mentor', style: TextStyle(color: Colors.black26, fontSize: 13)),
+                                      hint: const Text('Select mentor',
+                                          style: TextStyle(
+                                              color: Colors.black26,
+                                              fontSize: 13)),
                                       isExpanded: true,
                                       items: _mentors.map((m) {
                                         return DropdownMenuItem<int>(
-                                          value: int.tryParse(m['mentor_id'].toString()),
+                                          value: int.tryParse(
+                                              m['mentor_id'].toString()),
                                           child: Text(
-                                            m['mentor_name'] ?? '',
-                                            style: const TextStyle(fontSize: 13),
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
+                                              m['mentor_name'] ?? '',
+                                              style: const TextStyle(
+                                                  fontSize: 13),
+                                              overflow:
+                                                  TextOverflow.ellipsis),
                                         );
                                       }).toList(),
-                                      onChanged: (v) => setState(() => _selectedMentorId = v),
+                                      onChanged: (v) => setState(
+                                          () => _selectedMentorId = v),
                                       decoration: InputDecoration(
-                                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                        contentPadding:
+                                            const EdgeInsets.symmetric(
+                                                horizontal: 14,
+                                                vertical: 10),
                                         enabledBorder: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(6),
-                                          borderSide: const BorderSide(color: Color(0xFFAAAAAA)),
+                                          borderRadius:
+                                              BorderRadius.circular(6),
+                                          borderSide: const BorderSide(
+                                              color: Color(0xFFAAAAAA)),
                                         ),
                                         focusedBorder: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(6),
-                                          borderSide: const BorderSide(color: Color(0xFF3D1A8C), width: 2),
+                                          borderRadius:
+                                              BorderRadius.circular(6),
+                                          borderSide: const BorderSide(
+                                              color: Color(0xFF3D1A8C),
+                                              width: 2),
                                         ),
                                       ),
                                     ),
@@ -301,34 +355,62 @@ class _Step3TeamState extends State<Step3Team> {
                             OutlinedButton(
                               onPressed: widget.onSkip,
                               style: OutlinedButton.styleFrom(
-                                side: const BorderSide(color: Color(0xFF3D1A8C), width: 2),
-                                padding: const EdgeInsets.symmetric(horizontal: 44, vertical: 14),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                side: const BorderSide(
+                                    color: Color(0xFF3D1A8C), width: 2),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 44, vertical: 14),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius:
+                                        BorderRadius.circular(8)),
                               ),
-                              child: const Text(
-                                'SKIP',
-                                style: TextStyle(color: Color(0xFF3D1A8C), fontWeight: FontWeight.bold, letterSpacing: 1),
-                              ),
+                              child: const Text('SKIP',
+                                  style: TextStyle(
+                                      color: Color(0xFF3D1A8C),
+                                      fontWeight: FontWeight.bold,
+                                      letterSpacing: 1)),
                             ),
                             const SizedBox(width: 24),
                             ElevatedButton(
                               onPressed: _isLoading ? null : _register,
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF00CFFF),
-                                padding: const EdgeInsets.symmetric(horizontal: 44, vertical: 14),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                backgroundColor:
+                                    const Color(0xFF00CFFF),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 44, vertical: 14),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius:
+                                        BorderRadius.circular(8)),
                               ),
                               child: _isLoading
-                                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                                  : const Text(
-                                      'REGISTER',
-                                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1),
-                                    ),
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white))
+                                  : const Text('REGISTER',
+                                      style: TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.bold,
+                                          letterSpacing: 1)),
                             ),
                           ],
                         ),
                       ],
                     ),
+
+                    // Back button
+                    if (widget.onBack != null)
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        child: IconButton(
+                          icon: const Icon(Icons.arrow_back_ios_new,
+                              color: Color(0xFF3D1A8C)),
+                          tooltip: 'Back',
+                          onPressed: widget.onBack,
+                        ),
+                      ),
 
                     // Close button
                     Positioned(
@@ -336,7 +418,8 @@ class _Step3TeamState extends State<Step3Team> {
                       right: 0,
                       child: IconButton(
                         icon: const Icon(Icons.close),
-                        onPressed: () => Navigator.of(context).maybePop(),
+                        onPressed: () =>
+                            Navigator.of(context).maybePop(),
                       ),
                     ),
                   ],
@@ -362,19 +445,40 @@ class _Step3TeamState extends State<Step3Team> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               RichText(
-                text: const TextSpan(
-                  children: [
-                    TextSpan(text: 'Make', style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
-                    TextSpan(text: 'bl', style: TextStyle(color: Color(0xFF00CFFF), fontSize: 22, fontWeight: FontWeight.bold)),
-                    TextSpan(text: 'ock', style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
-                  ],
-                ),
+                text: const TextSpan(children: [
+                  TextSpan(
+                      text: 'Make',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold)),
+                  TextSpan(
+                      text: 'bl',
+                      style: TextStyle(
+                          color: Color(0xFF00CFFF),
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold)),
+                  TextSpan(
+                      text: 'ock',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold)),
+                ]),
               ),
-              const Text('Construct Your Dreams', style: TextStyle(color: Colors.white54, fontSize: 10)),
+              const Text('Construct Your Dreams',
+                  style:
+                      TextStyle(color: Colors.white54, fontSize: 10)),
             ],
           ),
-          Image.asset('assets/images/CenterLogo.png', height: 80, fit: BoxFit.contain),
-          const Text('CREOTEC', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 3)),
+          Image.asset('assets/images/CenterLogo.png',
+              height: 80, fit: BoxFit.contain),
+          const Text('CREOTEC',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 3)),
         ],
       ),
     );
@@ -385,9 +489,9 @@ class _Step3TeamState extends State<Step3Team> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: List.generate(4, (index) {
-        final step = index + 1;
+        final step    = index + 1;
         final isActive = step == 3;
-        final isDone = step < 3;
+        final isDone   = step < 3;
 
         return Row(
           children: [
@@ -396,27 +500,33 @@ class _Step3TeamState extends State<Step3Team> {
               height: 44,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: isActive || isDone ? const Color(0xFF3D1A8C) : Colors.white,
-                border: Border.all(color: const Color(0xFF3D1A8C), width: 2),
+                color: isActive || isDone
+                    ? const Color(0xFF3D1A8C)
+                    : Colors.white,
+                border:
+                    Border.all(color: const Color(0xFF3D1A8C), width: 2),
               ),
               child: Center(
                 child: isDone
-                    ? const Icon(Icons.check, color: Colors.white, size: 20)
-                    : Text(
-                        '$step',
+                    ? const Icon(Icons.check,
+                        color: Colors.white, size: 20)
+                    : Text('$step',
                         style: TextStyle(
-                          color: isActive ? Colors.white : const Color(0xFF3D1A8C),
+                          color: isActive
+                              ? Colors.white
+                              : const Color(0xFF3D1A8C),
                           fontWeight: FontWeight.bold,
                           fontSize: 16,
-                        ),
-                      ),
+                        )),
               ),
             ),
             if (step < 4)
               Container(
                 width: 120,
                 height: 2,
-                color: isDone ? const Color(0xFF3D1A8C) : const Color(0xFFCCCCCC),
+                color: isDone
+                    ? const Color(0xFF3D1A8C)
+                    : const Color(0xFFCCCCCC),
               ),
           ],
         );
@@ -428,11 +538,15 @@ class _Step3TeamState extends State<Step3Team> {
   Widget _fieldLabel(String text) {
     return SizedBox(
       width: 160,
-      child: Text(text, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
+      child: Text(text,
+          style: const TextStyle(
+              fontWeight: FontWeight.w900, fontSize: 14)),
     );
   }
 
-  Widget _textField({required String hint, required TextEditingController controller}) {
+  Widget _textField(
+      {required String hint,
+      required TextEditingController controller}) {
     return SizedBox(
       width: 340,
       height: 42,
@@ -440,15 +554,18 @@ class _Step3TeamState extends State<Step3Team> {
         controller: controller,
         decoration: InputDecoration(
           hintText: hint,
-          hintStyle: const TextStyle(color: Colors.black26, fontSize: 13),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          hintStyle:
+              const TextStyle(color: Colors.black26, fontSize: 13),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(6),
             borderSide: const BorderSide(color: Color(0xFFAAAAAA)),
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(6),
-            borderSide: const BorderSide(color: Color(0xFF3D1A8C), width: 2),
+            borderSide:
+                const BorderSide(color: Color(0xFF3D1A8C), width: 2),
           ),
         ),
       ),
