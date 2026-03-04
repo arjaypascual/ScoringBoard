@@ -34,8 +34,21 @@ class _Step2MentorState extends State<Step2Mentor> {
   Future<void> _loadSchools() async {
     try {
       final schools = await DBHelper.getSchools();
+
+      // Deduplicate by school_id to prevent dropdown assertion errors
+      final seen = <int>{};
+      final uniqueSchools = schools.where((s) {
+        final id = int.tryParse(s['school_id'].toString() ?? '');
+        if (id == null || id == 0 || !seen.add(id)) return false;
+        return true;
+      }).toList();
+
       setState(() {
-        _schools        = schools;
+        _schools          = uniqueSchools;
+        if (!uniqueSchools.any((s) =>
+            int.tryParse(s['school_id'].toString()) == _selectedSchoolId)) {
+          _selectedSchoolId = null;
+        }
         _isLoadingSchools = false;
       });
     } catch (e) {
@@ -423,14 +436,19 @@ class _Step2MentorState extends State<Step2Mentor> {
         hint: const Text('Select school',
             style: TextStyle(color: Colors.black26, fontSize: 13)),
         isExpanded: true,
-        items: _schools.map((s) {
-          return DropdownMenuItem<int>(
-            value: int.tryParse(s['school_id'].toString()),
-            child: Text(s['school_name'] ?? '',
-                style: const TextStyle(fontSize: 13),
-                overflow: TextOverflow.ellipsis),
-          );
-        }).toList(),
+        items: _schools
+            .map((s) {
+              final id = int.tryParse(s['school_id'].toString());
+              if (id == null) return null;
+              return DropdownMenuItem<int>(
+                value: id,
+                child: Text(s['school_name'] ?? '',
+                    style: const TextStyle(fontSize: 13),
+                    overflow: TextOverflow.ellipsis),
+              );
+            })
+            .whereType<DropdownMenuItem<int>>()
+            .toList(),
         onChanged: (v) => setState(() => _selectedSchoolId = v),
         decoration: InputDecoration(
           contentPadding:

@@ -19,6 +19,7 @@ class _TeamsPlayersState extends State<TeamsPlayers>
   Map<int, List<Map<String, dynamic>>> _teamsByCategory = {};
 
   bool _isLoading = true;
+  DateTime? _lastUpdated;
 
   @override
   void initState() {
@@ -55,6 +56,7 @@ class _TeamsPlayersState extends State<TeamsPlayers>
         _categories      = categories;
         _teamsByCategory = teamsByCategory;
         _isLoading       = false;
+        _lastUpdated     = DateTime.now();
       });
     } catch (e) {
       setState(() => _isLoading = false);
@@ -195,34 +197,14 @@ class _TeamsPlayersState extends State<TeamsPlayers>
               ),
               Row(
                 children: [
-                  // Team count badge
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF00CFFF).withOpacity(0.15),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                          color: const Color(0xFF00CFFF).withOpacity(0.4)),
+                  _buildLiveIndicator(),
+                  if (widget.onBack != null)
+                    IconButton(
+                      icon: const Icon(Icons.arrow_back_ios_new,
+                          color: Color(0xFF00CFFF)),
+                      tooltip: 'Back',
+                      onPressed: widget.onBack,
                     ),
-                    child: Text(
-                      '${teams.length} TEAM${teams.length != 1 ? 'S' : ''}',
-                      style: const TextStyle(
-                        color: Color(0xFF00CFFF),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                        letterSpacing: 1,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  // Refresh
-                  IconButton(
-                    tooltip: 'Refresh',
-                    icon: const Icon(Icons.refresh,
-                        color: Color(0xFF00CFFF)),
-                    onPressed: _loadData,
-                  ),
                 ],
               ),
             ],
@@ -271,6 +253,39 @@ class _TeamsPlayersState extends State<TeamsPlayers>
     );
   }
 
+  // ── Live indicator ────────────────────────────────────────────────────────
+  Widget _buildLiveIndicator() {
+    final timeStr = _lastUpdated == null
+        ? 'Loading...'
+        : '${_lastUpdated!.hour.toString().padLeft(2, '0')}:'
+          '${_lastUpdated!.minute.toString().padLeft(2, '0')}:'
+          '${_lastUpdated!.second.toString().padLeft(2, '0')}';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _PulsingDot(),
+          const SizedBox(width: 6),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('LIVE',
+                  style: TextStyle(
+                      color: Color(0xFF00FF88),
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1)),
+              Text(timeStr,
+                  style: const TextStyle(color: Colors.white54, fontSize: 9)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Header ────────────────────────────────────────────────────────────────
   Widget _buildHeader() {
     return Container(
@@ -281,47 +296,34 @@ class _TeamsPlayersState extends State<TeamsPlayers>
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Back button + Makeblock
-          Row(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (widget.onBack != null)
-                IconButton(
-                  icon: const Icon(Icons.arrow_back_ios_new,
-                      color: Color(0xFF00CFFF)),
-                  tooltip: 'Back',
-                  onPressed: widget.onBack,
-                ),
-              const SizedBox(width: 4),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  RichText(
-                    text: const TextSpan(children: [
-                      TextSpan(
-                          text: 'Make',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold)),
-                      TextSpan(
-                          text: 'bl',
-                          style: TextStyle(
-                              color: Color(0xFF00CFFF),
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold)),
-                      TextSpan(
-                          text: 'ock',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold)),
-                    ]),
-                  ),
-                  const Text('Construct Your Dreams',
+              RichText(
+                text: const TextSpan(children: [
+                  TextSpan(
+                      text: 'Make',
                       style: TextStyle(
-                          color: Colors.white54, fontSize: 10)),
-                ],
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold)),
+                  TextSpan(
+                      text: 'bl',
+                      style: TextStyle(
+                          color: Color(0xFF00CFFF),
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold)),
+                  TextSpan(
+                      text: 'ock',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold)),
+                ]),
               ),
+              const Text('Construct Your Dreams',
+                  style: TextStyle(
+                      color: Colors.white54, fontSize: 10)),
             ],
           ),
           Image.asset('assets/images/CenterLogo.png',
@@ -333,6 +335,50 @@ class _TeamsPlayersState extends State<TeamsPlayers>
                   fontWeight: FontWeight.bold,
                   letterSpacing: 3)),
         ],
+      ),
+    );
+  }
+}
+
+// ── Pulsing dot animation ─────────────────────────────────────────────────────
+class _PulsingDot extends StatefulWidget {
+  @override
+  State<_PulsingDot> createState() => _PulsingDotState();
+}
+
+class _PulsingDotState extends State<_PulsingDot>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+    _anim = Tween<double>(begin: 0.3, end: 1.0).animate(
+        CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _anim,
+      child: Container(
+        width: 8,
+        height: 8,
+        decoration: const BoxDecoration(
+          color: Color(0xFF00FF88),
+          shape: BoxShape.circle,
+        ),
       ),
     );
   }
@@ -355,7 +401,6 @@ class _TeamCardState extends State<_TeamCard>
   late Animation<double> _scaleAnim;
   bool _hovered = false;
 
-  // Card accent colors cycling through categories
   static const List<Color> _accentColors = [
     Color(0xFF00CFFF),
     Color(0xFF7B2FFF),
@@ -412,8 +457,7 @@ class _TeamCardState extends State<_TeamCard>
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
-                color:
-                    accent.withOpacity(_hovered ? 0.7 : 0.25),
+                color: accent.withOpacity(_hovered ? 0.7 : 0.25),
                 width: 1.5,
               ),
               gradient: LinearGradient(
@@ -442,7 +486,6 @@ class _TeamCardState extends State<_TeamCard>
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    // Team ID
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 10, vertical: 4),
@@ -460,8 +503,6 @@ class _TeamCardState extends State<_TeamCard>
                         ),
                       ),
                     ),
-
-                    // Present / Absent dot
                     Row(
                       children: [
                         Container(
@@ -501,7 +542,6 @@ class _TeamCardState extends State<_TeamCard>
 
                 const SizedBox(height: 14),
 
-                // Team name
                 Text(
                   teamName,
                   style: const TextStyle(
@@ -517,14 +557,12 @@ class _TeamCardState extends State<_TeamCard>
 
                 const Spacer(),
 
-                // Divider
                 Container(
                   height: 1,
                   color: accent.withOpacity(0.15),
                   margin: const EdgeInsets.only(bottom: 10),
                 ),
 
-                // Mentor
                 Row(
                   children: [
                     Icon(Icons.person_outline,
@@ -533,7 +571,7 @@ class _TeamCardState extends State<_TeamCard>
                     Expanded(
                       child: Text(
                         mentorName,
-                        style: TextStyle(
+                        style: const TextStyle(
                           color: Colors.white54,
                           fontSize: 11,
                           letterSpacing: 0.3,

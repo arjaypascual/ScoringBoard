@@ -9,6 +9,22 @@ class DBHelper {
   static const String _password     = "root";
   static const String _databaseName = "roboventurecompetitiondb";
 
+  // ── MIGRATIONS ───────────────────────────────────────────────────────────
+  // Safe to call on every app start — adds arena_number if missing.
+  static Future<void> runMigrations() async {
+    final conn = await getConnection();
+    try {
+      await conn.execute("""
+        ALTER TABLE tbl_teamschedule
+        ADD COLUMN arena_number INT NOT NULL DEFAULT 1
+      """);
+      print("✅ Migration: arena_number column added.");
+    } catch (_) {
+      // Column already exists — safe to ignore
+      print("ℹ️  Migration: arena_number already present.");
+    }
+  }
+
   // ── Connection ────────────────────────────────────────────────────────────
 
   static Future<MySQLConnection> getConnection() async {
@@ -113,6 +129,15 @@ class DBHelper {
   // ── SCHEDULE ──────────────────────────────────────────────────────────────
   // Used in: Generate Schedule, Schedule Viewer
 
+  // Wipes all existing schedule data in correct FK order before regenerating
+  static Future<void> clearSchedule() async {
+    final conn = await getConnection();
+    await conn.execute("DELETE FROM tbl_teamschedule");
+    await conn.execute("DELETE FROM tbl_match");
+    await conn.execute("DELETE FROM tbl_schedule");
+    print("✅ Schedule cleared.");
+  }
+
   static Future<int> insertSchedule({
     required String startTime,
     required String endTime,
@@ -138,28 +163,59 @@ class DBHelper {
     required int roundId,
     required int teamId,
     required int refereeId,
+    int arenaNumber = 1,
   }) async {
     final conn = await getConnection();
     await conn.execute("""
-      INSERT INTO tbl_teamschedule (match_id, round_id, team_id, referee_id)
-      VALUES (:match, :round, :team, :ref)
+      INSERT INTO tbl_teamschedule (match_id, round_id, team_id, referee_id, arena_number)
+      VALUES (:match, :round, :team, :ref, :arena)
     """, {
       "match": matchId,
       "round": roundId,
       "team":  teamId,
       "ref":   refereeId,
+      "arena": arenaNumber,
     });
+  }
+
+  // ── ROUNDS ────────────────────────────────────────────────────────────────
+  // Ensures tbl_round has enough rows for the max runs requested.
+  // Safe to call repeatedly — uses INSERT IGNORE.
+  static Future<void> seedRounds(int maxRounds) async {
+    final conn = await getConnection();
+    for (int i = 1; i <= maxRounds; i++) {
+      await conn.execute("""
+        INSERT IGNORE INTO tbl_round (round_id, round_type)
+        VALUES (:id, :type)
+      """, {
+        "id":   i,
+        "type": 'Round $i',
+      });
+    }
+    print("✅ Rounds seeded up to $maxRounds.");
   }
 
   static Future<void> generateSchedule({
     required Map<int, int> runsPerCategory,
+    required Map<int, int> arenasPerCategory,
     required String startTime,
+    required String endTime,
     required int durationMinutes,
     required int intervalMinutes,
+    bool lunchBreak = true,
   }) async {
     final conn = await getConnection();
 
-    // ── Get first available referee from DB (fixes FK constraint error) ──
+    // ── Clear old schedule first ─────────────────────────────────────────────
+    await clearSchedule();
+
+    // ── Seed rounds ──────────────────────────────────────────────────────────
+    final maxRuns = runsPerCategory.values.isEmpty
+        ? 1
+        : runsPerCategory.values.reduce((a, b) => a > b ? a : b);
+    await seedRounds(maxRuns);
+
+    // ── Get first available referee ──────────────────────────────────────────
     final refResult = await conn.execute(
       "SELECT referee_id FROM tbl_referee ORDER BY referee_id LIMIT 1"
     );
@@ -173,45 +229,91 @@ class DBHelper {
       refResult.rows.first.assoc()['referee_id'] ?? '0',
     );
 
-    final parts = startTime.split(':');
-    int hour   = int.parse(parts[0]);
-    int minute = int.parse(parts[1]);
+    // ── Parse start / end times ───────────────────────────────────────────────
+    final startParts = startTime.split(':');
+    int hour   = int.parse(startParts[0]);
+    int minute = int.parse(startParts[1]);
 
+    final endParts  = endTime.split(':');
+    final endLimitH = int.parse(endParts[0]);
+    final endLimitM = int.parse(endParts[1]);
+    int endLimitMinutes = endLimitH * 60 + endLimitM;
+
+    // ── Helper: current time in minutes ──────────────────────────────────────
+    int currentMinutes() => hour * 60 + minute;
+
+    // ── Helper: skip lunch break 12:00–13:00 ─────────────────────────────────
+    void skipLunch() {
+      if (lunchBreak && hour == 12) {
+        hour   = 13;
+        minute = 0;
+      }
+    }
+
+    void advanceTime(int minutes) {
+      minute += minutes;
+      while (minute >= 60) { minute -= 60; hour++; }
+      skipLunch();
+    }
+
+    // Skip lunch if start time is in break
+    skipLunch();
+
+    // ── Schedule by category ─────────────────────────────────────────────────
     for (final entry in runsPerCategory.entries) {
       final categoryId = entry.key;
       final runs       = entry.value;
+      final arenas     = arenasPerCategory[categoryId] ?? 1;
 
       final teams = await getTeamsByCategory(categoryId);
       if (teams.isEmpty) continue;
 
-      for (final team in teams) {
-        final teamId = int.parse(team['team_id'].toString());
+      for (int run = 0; run < runs; run++) {
+        int teamIndex = 0;
+        while (teamIndex < teams.length) {
+          // ── Stop if current slot would exceed end time ──────────────────
+          if (currentMinutes() + durationMinutes > endLimitMinutes) {
+            print("⚠️  End time reached — remaining slots not scheduled.");
+            return;
+          }
 
-        for (int run = 0; run < runs; run++) {
-          final startStr =
-              '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}:00';
+          final batchEnd = (teamIndex + arenas) < teams.length
+              ? teamIndex + arenas
+              : teams.length;
+          final batch = teams.sublist(teamIndex, batchEnd);
 
-          minute += durationMinutes;
-          while (minute >= 60) { minute -= 60; hour++; }
+          final startHH  = hour.toString().padLeft(2, '0');
+          final startMM  = minute.toString().padLeft(2, '0');
+          final startStr = '$startHH:$startMM:00';
 
+          int endHour   = hour;
+          int endMinute = minute + durationMinutes;
+          while (endMinute >= 60) { endMinute -= 60; endHour++; }
           final endStr =
-              '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}:00';
+              '${endHour.toString().padLeft(2, '0')}:${endMinute.toString().padLeft(2, '0')}:00';
 
           final scheduleId = await insertSchedule(
               startTime: startStr, endTime: endStr);
           final matchId = await insertMatch(scheduleId);
-          await insertTeamSchedule(
-            matchId:   matchId,
-            roundId:   run + 1,
-            teamId:    teamId,
-            refereeId: defaultRefereeId, // ✅ real referee from DB
-          );
 
-          minute += intervalMinutes;
-          while (minute >= 60) { minute -= 60; hour++; }
+          for (int ai = 0; ai < batch.length; ai++) {
+            final team   = batch[ai];
+            final teamId = int.parse(team['team_id'].toString());
+            await insertTeamSchedule(
+              matchId:     matchId,
+              roundId:     run + 1,
+              teamId:      teamId,
+              refereeId:   defaultRefereeId,
+              arenaNumber: ai + 1,
+            );
+          }
+
+          advanceTime(durationMinutes + intervalMinutes);
+          teamIndex += arenas;
         }
       }
     }
+
     print("✅ Schedule generated successfully!");
   }
 

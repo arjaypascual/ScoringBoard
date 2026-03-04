@@ -23,9 +23,11 @@ class _LandingPageState extends State<LandingPage>
   late Animation<double> _btn1Offset;
   late Animation<double> _btn2Offset;
   late Animation<double> _btn3Offset;
+  late Animation<double> _btn4Offset;
   late Animation<double> _btn1Opacity;
   late Animation<double> _btn2Opacity;
   late Animation<double> _btn3Opacity;
+  late Animation<double> _btn4Opacity;
 
   @override
   void initState() {
@@ -71,6 +73,11 @@ class _LandingPageState extends State<LandingPage>
           parent: _buttonsController,
           curve: const Interval(0.4, 0.9, curve: Curves.easeOutCubic)),
     );
+    _btn4Offset = Tween<double>(begin: 60.0, end: 0.0).animate(
+      CurvedAnimation(
+          parent: _buttonsController,
+          curve: const Interval(0.5, 1.0, curve: Curves.easeOutCubic)),
+    );
     _btn1Opacity = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
           parent: _buttonsController,
@@ -85,6 +92,11 @@ class _LandingPageState extends State<LandingPage>
       CurvedAnimation(
           parent: _buttonsController,
           curve: const Interval(0.4, 0.8, curve: Curves.easeIn)),
+    );
+    _btn4Opacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+          parent: _buttonsController,
+          curve: const Interval(0.5, 0.9, curve: Curves.easeIn)),
     );
 
     // Start animations
@@ -200,7 +212,7 @@ class _LandingPageState extends State<LandingPage>
                             ),
                           ),
 
-                          const SizedBox(height: 16),
+                          const SizedBox(height: 12), // reduced from 16
 
                           // Subtitle
                           AnimatedBuilder(
@@ -219,7 +231,7 @@ class _LandingPageState extends State<LandingPage>
                             ),
                           ),
 
-                          const SizedBox(height: 56),
+                          const SizedBox(height: 36), // reduced from 56
 
                           // Buttons
                           AnimatedBuilder(
@@ -236,7 +248,7 @@ class _LandingPageState extends State<LandingPage>
                                     onTap: _goToRegistration,
                                   ),
                                 ),
-                                const SizedBox(height: 20),
+                                const SizedBox(height: 14), // reduced from 20
                                 _animatedButton(
                                   offset: _btn2Offset.value,
                                   opacity: _btn2Opacity.value,
@@ -247,7 +259,7 @@ class _LandingPageState extends State<LandingPage>
                                     onTap: _goToSchedule,
                                   ),
                                 ),
-                                const SizedBox(height: 20),
+                                const SizedBox(height: 14), // reduced from 20
                                 _animatedButton(
                                   offset: _btn3Offset.value,
                                   opacity: _btn3Opacity.value,
@@ -258,10 +270,10 @@ class _LandingPageState extends State<LandingPage>
                                     onTap: _goToStandings,
                                   ),
                                 ),
-                                const SizedBox(height: 20),
+                                const SizedBox(height: 14), // reduced from 20
                                 _animatedButton(
-                                  offset: _btn3Offset.value,
-                                  opacity: _btn3Opacity.value,
+                                  offset: _btn4Offset.value,
+                                  opacity: _btn4Opacity.value,
                                   child: _NavButton(
                                     label: 'TEAMS & PLAYERS',
                                     icon: Icons.groups_rounded,
@@ -332,7 +344,6 @@ class _LandingPageState extends State<LandingPage>
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Makeblock
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -359,16 +370,11 @@ class _LandingPageState extends State<LandingPage>
                 ]),
               ),
               const Text('Construct Your Dreams',
-                  style:
-                      TextStyle(color: Colors.white38, fontSize: 9)),
+                  style: TextStyle(color: Colors.white38, fontSize: 9)),
             ],
           ),
-
-          // Center logo
           Image.asset('assets/images/CenterLogo.png',
               height: 70, fit: BoxFit.contain),
-
-          // CREOTEC
           const Text('CREOTEC',
               style: TextStyle(
                   color: Colors.white,
@@ -384,7 +390,6 @@ class _LandingPageState extends State<LandingPage>
   Widget _buildLogo() {
     return Column(
       children: [
-        // Glow ring behind logo image
         Container(
           width: 180,
           height: 180,
@@ -413,7 +418,6 @@ class _LandingPageState extends State<LandingPage>
     );
   }
 
-  // Fallback text logo if image not found
   Widget _buildTextLogo() {
     return ShaderMask(
       shaderCallback: (bounds) => const LinearGradient(
@@ -435,7 +439,7 @@ class _LandingPageState extends State<LandingPage>
   // ── Footer ───────────────────────────────────────────────────────────────
   Widget _buildFooter() {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.only(bottom: 16), // reduced from 20
       child: Text(
         '© 2025 RoboVenture • Powered by Creotec',
         style: TextStyle(
@@ -549,8 +553,7 @@ class _NavButtonState extends State<_NavButton>
                   boxShadow: _hovered
                       ? [
                           BoxShadow(
-                            color:
-                                widget.color.withOpacity(0.35),
+                            color: widget.color.withOpacity(0.35),
                             blurRadius: 24,
                             spreadRadius: 2,
                           ),
@@ -560,8 +563,7 @@ class _NavButtonState extends State<_NavButton>
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(widget.icon,
-                        color: widget.color, size: 22),
+                    Icon(widget.icon, color: widget.color, size: 22),
                     const SizedBox(width: 14),
                     Text(
                       widget.label,
@@ -597,8 +599,7 @@ class _OrbitPainter extends CustomPainter {
       final radius = 200.0 + i * 160;
       final angle  = progress * 2 * math.pi + i * (math.pi / 3);
       final paint  = Paint()
-        ..color = const Color(0xFF7B2FFF)
-            .withOpacity(0.04 - i * 0.01)
+        ..color = const Color(0xFF7B2FFF).withOpacity(0.04 - i * 0.01)
         ..style       = PaintingStyle.stroke
         ..strokeWidth = 1.5;
 
@@ -609,7 +610,6 @@ class _OrbitPainter extends CustomPainter {
       );
     }
 
-    // Glowing center blob
     final radial = RadialGradient(
       colors: [
         const Color(0xFF7B2FFF).withOpacity(0.15),
@@ -642,7 +642,6 @@ class _CircuitPainter extends CustomPainter {
       ..color = const Color(0xFF00CFFF).withOpacity(0.3)
       ..style = PaintingStyle.fill;
 
-    // Left side circuit
     final leftPath = Path()
       ..moveTo(40, 80)
       ..lineTo(40, 200)
@@ -653,7 +652,6 @@ class _CircuitPainter extends CustomPainter {
       ..lineTo(40, 420)
       ..lineTo(100, 420);
 
-    // Right side circuit
     final rightPath = Path()
       ..moveTo(size.width - 40, 120)
       ..lineTo(size.width - 40, 240)
@@ -666,7 +664,6 @@ class _CircuitPainter extends CustomPainter {
     canvas.drawPath(leftPath, paint);
     canvas.drawPath(rightPath, paint);
 
-    // Junction dots
     for (final offset in [
       const Offset(40, 200),
       const Offset(80, 280),

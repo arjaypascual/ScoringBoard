@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'db_helper.dart';
+import 'teams_players.dart';
 
 class Standings extends StatefulWidget {
   final VoidCallback? onBack;
@@ -14,31 +16,66 @@ class Standings extends StatefulWidget {
 }
 
 class _StandingsState extends State<Standings>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   TabController? _tabController;
   List<Map<String, dynamic>> _categories = [];
 
   // category_id → list of standing rows
-  // Each row: { rank, team_id(display), team_name, round1, round2, ..., finalScore, finalDuration }
   Map<int, List<Map<String, dynamic>>> _standingsByCategory = {};
 
   bool _isLoading = true;
+  DateTime? _lastUpdated;
+  Timer?    _autoRefreshTimer;
+
+  // Track changes using a data signature instead of just count
+  String _lastDataSignature = '';
 
   @override
   void initState() {
     super.initState();
-    _loadData();
+    _loadData(initial: true);
+    _autoRefreshTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => _silentRefresh(),
+    );
   }
 
   @override
   void dispose() {
+    _autoRefreshTimer?.cancel();
     _tabController?.dispose();
     super.dispose();
   }
 
+  // ── Build a signature string to detect any data change ──────────────────
+  String _buildSignature(List rows) {
+    return rows.map((r) => r.toString()).join('|');
+  }
+
+  // ── Silent refresh — only rebuilds UI if data actually changed ───────────
+  Future<void> _silentRefresh() async {
+    try {
+      final conn   = await DBHelper.getConnection();
+      final result = await conn.execute(
+          "SELECT score_id, team_id, round_id, score_totalscore FROM tbl_score ORDER BY score_id");
+      final rows = result.rows.map((r) => r.assoc()).toList();
+      final signature = _buildSignature(rows);
+
+      if (signature != _lastDataSignature) {
+        _lastDataSignature = signature;
+        await _loadData(initial: false); // silent — no spinner, no blink
+      }
+    } catch (_) {}
+  }
+
   // ── Load data ─────────────────────────────────────────────────────────────
-  Future<void> _loadData() async {
-    setState(() => _isLoading = true);
+  // initial: true  → show loading spinner (first load only)
+  // initial: false → update data silently, no spinner, no blink
+  Future<void> _loadData({bool initial = false}) async {
+    if (initial) {
+      setState(() => _isLoading = true);
+    }
+
     try {
       final categories = await DBHelper.getCategories();
       final Map<int, List<Map<String, dynamic>>> standingsByCategory = {};
@@ -47,7 +84,9 @@ class _StandingsState extends State<Standings>
         final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
         final rows  = await DBHelper.getScoresByCategory(catId);
 
-        // Group by team
+        // Update signature (use all categories combined)
+        // Done after loop below via full rows
+
         final Map<int, Map<String, dynamic>> teamMap = {};
         for (final row in rows) {
           final teamId   = int.tryParse(row['team_id'].toString()) ?? 0;
@@ -62,14 +101,14 @@ class _StandingsState extends State<Standings>
           });
 
           if (roundId > 0) {
-            (teamMap[teamId]!['rounds'] as Map<int, Map<String, dynamic>>)[roundId] = {
+            (teamMap[teamId]!['rounds']
+                as Map<int, Map<String, dynamic>>)[roundId] = {
               'score':    score,
               'duration': duration,
             };
           }
         }
 
-        // If no score rows yet, fall back to just listing teams
         if (teamMap.isEmpty) {
           final teams = await DBHelper.getTeamsByCategory(catId);
           for (final t in teams) {
@@ -82,8 +121,7 @@ class _StandingsState extends State<Standings>
           }
         }
 
-        // Determine max rounds across all teams
-        int maxRounds = 2; // minimum 2 shown
+        int maxRounds = 2;
         for (final t in teamMap.values) {
           final rounds = t['rounds'] as Map<int, Map<String, dynamic>>;
           if (rounds.keys.isNotEmpty) {
@@ -92,7 +130,6 @@ class _StandingsState extends State<Standings>
           }
         }
 
-        // Build standing rows, sorted by total score desc
         final standings = teamMap.values.map((t) {
           final rounds = t['rounds'] as Map<int, Map<String, dynamic>>;
           int totalScore = 0;
@@ -111,7 +148,6 @@ class _StandingsState extends State<Standings>
         standings.sort((a, b) =>
             (b['totalScore'] as int).compareTo(a['totalScore'] as int));
 
-        // Assign rank
         for (int i = 0; i < standings.length; i++) {
           standings[i]['rank'] = i + 1;
         }
@@ -119,16 +155,22 @@ class _StandingsState extends State<Standings>
         standingsByCategory[catId] = standings;
       }
 
+      // Preserve current tab index before rebuilding controller
+      final previousTabIndex = _tabController?.index ?? 0;
+
       _tabController?.dispose();
       _tabController = TabController(
         length: categories.length,
         vsync: this,
+        initialIndex: previousTabIndex.clamp(0, (categories.length - 1).clamp(0, 9999)),
       );
 
+      // Single setState — no intermediate _isLoading blink
       setState(() {
         _categories          = categories;
         _standingsByCategory = standingsByCategory;
         _isLoading           = false;
+        _lastUpdated         = DateTime.now();
       });
     } catch (e) {
       setState(() => _isLoading = false);
@@ -165,7 +207,6 @@ class _StandingsState extends State<Standings>
               ),
             )
           else ...[
-            // ── Category Tabs ────────────────────────────────────────
             Container(
               color: const Color(0xFF2D0E7A),
               child: TabBar(
@@ -187,8 +228,6 @@ class _StandingsState extends State<Standings>
                 }).toList(),
               ),
             ),
-
-            // ── Tab Views ────────────────────────────────────────────
             Expanded(
               child: TabBarView(
                 controller: _tabController,
@@ -223,8 +262,7 @@ class _StandingsState extends State<Standings>
         Container(
           width: double.infinity,
           color: const Color(0xFF2D0E7A),
-          padding:
-              const EdgeInsets.symmetric(vertical: 14, horizontal: 32),
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 32),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -246,19 +284,29 @@ class _StandingsState extends State<Standings>
                   letterSpacing: 2,
                 ),
               ),
-              // Refresh + Back buttons
+              // Live indicator + Teams + Back buttons (same pattern as ScheduleViewer)
               Row(
                 children: [
+                  _buildLiveIndicator(),
                   IconButton(
-                    tooltip: 'Refresh',
-                    icon: const Icon(Icons.refresh, color: Color(0xFF00CFFF)),
-                    onPressed: _loadData,
+                    tooltip: 'Teams & Players',
+                    icon: const Icon(Icons.groups_rounded,
+                        color: Color(0xFF00E5A0)),
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => TeamsPlayers(
+                            onBack: () => Navigator.of(context).pop(),
+                          ),
+                        ),
+                      );
+                    },
                   ),
                   IconButton(
-                    tooltip: 'Back to Schedule',
+                    tooltip: 'Back to Homepage',
                     icon: const Icon(Icons.arrow_back_ios_new,
                         color: Color(0xFF00CFFF)),
-                    onPressed: widget.onBack,
+                    onPressed: widget.onBack, // ← uses callback, same as ScheduleViewer
                   ),
                 ],
               ),
@@ -269,20 +317,15 @@ class _StandingsState extends State<Standings>
         // ── Table header ─────────────────────────────────────────────
         Container(
           color: const Color(0xFF5C2ECC),
-          padding:
-              const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
           child: Row(
             children: [
-              _headerCell('RANK',    flex: 1),
-              _headerCell('TEAM ID', flex: 2),
+              _headerCell('RANK',       flex: 1),
+              _headerCell('TEAM ID',    flex: 2),
               _headerCell('TEAM NAME:', flex: 3),
               ...List.generate(
                 maxRounds,
-                (i) => _headerCell(
-                  _roundLabel(i + 1),
-                  flex: 2,
-                  center: true,
-                ),
+                (i) => _headerCell(_roundLabel(i + 1), flex: 2, center: true),
               ),
               _headerCell('FINAL SCORE', flex: 2, center: true),
             ],
@@ -317,7 +360,6 @@ class _StandingsState extends State<Standings>
                           vertical: 16, horizontal: 24),
                       child: Row(
                         children: [
-                          // Rank
                           Expanded(
                             flex: 1,
                             child: Text(
@@ -329,8 +371,6 @@ class _StandingsState extends State<Standings>
                               ),
                             ),
                           ),
-
-                          // Team ID (display as team_id padded)
                           Expanded(
                             flex: 2,
                             child: Text(
@@ -342,8 +382,6 @@ class _StandingsState extends State<Standings>
                               ),
                             ),
                           ),
-
-                          // Team Name
                           Expanded(
                             flex: 3,
                             child: Text(
@@ -355,30 +393,22 @@ class _StandingsState extends State<Standings>
                               ),
                             ),
                           ),
-
-                          // Round scores (dynamic)
                           ...List.generate(maxRounds, (i) {
                             final roundData = rounds[i + 1];
                             final score = roundData?['score'] ?? 0;
                             return Expanded(
                               flex: 2,
-                              child: Column(
-                                children: [
-                                  Text(
-                                    '$score',
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 18,
-                                    ),
-                                  ),
-                                ],
+                              child: Text(
+                                '$score',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 18,
+                                ),
                               ),
                             );
                           }),
-
-                          // Final score + duration
                           Expanded(
                             flex: 2,
                             child: Column(
@@ -426,16 +456,15 @@ class _StandingsState extends State<Standings>
 
   Color _rankColor(int rank) {
     switch (rank) {
-      case 1:  return const Color(0xFFFFD700); // Gold
-      case 2:  return const Color(0xFFC0C0C0); // Silver
-      case 3:  return const Color(0xFFCD7F32); // Bronze
+      case 1:  return const Color(0xFFFFD700);
+      case 2:  return const Color(0xFFC0C0C0);
+      case 3:  return const Color(0xFFCD7F32);
       default: return Colors.white;
     }
   }
 
   String _bestDuration(Map<int, Map<String, dynamic>> rounds) {
     if (rounds.isEmpty) return '00:00';
-    // Return duration of best (highest score) round
     int    bestScore    = -1;
     String bestDuration = '00:00';
     for (final r in rounds.values) {
@@ -450,8 +479,7 @@ class _StandingsState extends State<Standings>
 
   // ── Widgets ───────────────────────────────────────────────────────────────
 
-  Widget _headerCell(String text,
-      {int flex = 1, bool center = false}) {
+  Widget _headerCell(String text, {int flex = 1, bool center = false}) {
     return Expanded(
       flex: flex,
       child: Text(
@@ -472,8 +500,7 @@ class _StandingsState extends State<Standings>
     return Container(
       width: double.infinity,
       color: const Color(0xFF2D0E7A),
-      padding:
-          const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
@@ -505,8 +532,7 @@ class _StandingsState extends State<Standings>
                 ),
               ),
               const Text('Construct Your Dreams',
-                  style:
-                      TextStyle(color: Colors.white54, fontSize: 10)),
+                  style: TextStyle(color: Colors.white54, fontSize: 10)),
             ],
           ),
           Image.asset('assets/images/CenterLogo.png',
@@ -518,6 +544,83 @@ class _StandingsState extends State<Standings>
                   fontWeight: FontWeight.bold,
                   letterSpacing: 3)),
         ],
+      ),
+    );
+  }
+
+  // ── Live indicator ────────────────────────────────────────────────────────
+  Widget _buildLiveIndicator() {
+    final timeStr = _lastUpdated == null
+        ? 'Loading...'
+        : '${_lastUpdated!.hour.toString().padLeft(2, '0')}:'
+          '${_lastUpdated!.minute.toString().padLeft(2, '0')}:'
+          '${_lastUpdated!.second.toString().padLeft(2, '0')}';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _PulsingDot(),
+          const SizedBox(width: 6),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('LIVE',
+                  style: TextStyle(
+                      color: Color(0xFF00FF88),
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1)),
+              Text(timeStr,
+                  style: const TextStyle(color: Colors.white54, fontSize: 9)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Pulsing dot animation ─────────────────────────────────────────────────────
+class _PulsingDot extends StatefulWidget {
+  @override
+  State<_PulsingDot> createState() => _PulsingDotState();
+}
+
+class _PulsingDotState extends State<_PulsingDot>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+    _anim = Tween<double>(begin: 0.3, end: 1.0).animate(
+        CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _anim,
+      child: Container(
+        width: 8,
+        height: 8,
+        decoration: const BoxDecoration(
+          color: Color(0xFF00FF88),
+          shape: BoxShape.circle,
+        ),
       ),
     );
   }

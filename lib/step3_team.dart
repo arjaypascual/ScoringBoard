@@ -41,9 +41,34 @@ class _Step3TeamState extends State<Step3Team> {
         "SELECT mentor_id, mentor_name FROM tbl_mentor ORDER BY mentor_name"
       );
       final mentors = mentorResult.rows.map((r) => r.assoc()).toList();
+
+      // Deduplicate by ID to prevent dropdown assertion errors
+      final seenCat = <int>{};
+      final uniqueCategories = categories.where((c) {
+        final id = int.tryParse(c['category_id'].toString() ?? '');
+        if (id == null || id == 0 || !seenCat.add(id)) return false;
+        return true;
+      }).toList();
+
+      final seenMen = <int>{};
+      final uniqueMentors = mentors.where((m) {
+        final id = int.tryParse(m['mentor_id'].toString() ?? '');
+        if (id == null || id == 0 || !seenMen.add(id)) return false;
+        return true;
+      }).toList();
+
       setState(() {
-        _categories    = categories;
-        _mentors       = mentors;
+        _categories    = uniqueCategories;
+        _mentors       = uniqueMentors;
+        // Reset selections if they no longer exist in the new list
+        if (!uniqueCategories.any((c) =>
+            int.tryParse(c['category_id'].toString()) == _selectedCategoryId)) {
+          _selectedCategoryId = null;
+        }
+        if (!uniqueMentors.any((m) =>
+            int.tryParse(m['mentor_id'].toString()) == _selectedMentorId)) {
+          _selectedMentorId = null;
+        }
         _isLoadingData = false;
       });
     } catch (e) {
@@ -239,16 +264,21 @@ class _Step3TeamState extends State<Step3Team> {
                                               color: Colors.black26,
                                               fontSize: 13)),
                                       isExpanded: true,
-                                      items: _categories.map((c) {
-                                        return DropdownMenuItem<int>(
-                                          value: int.tryParse(
-                                              c['category_id'].toString()),
-                                          child: Text(
-                                              c['category_type'] ?? '',
-                                              style: const TextStyle(
-                                                  fontSize: 13)),
-                                        );
-                                      }).toList(),
+                                      items: _categories
+                                          .map((c) {
+                                            final id = int.tryParse(
+                                                c['category_id'].toString());
+                                            if (id == null) return null;
+                                            return DropdownMenuItem<int>(
+                                              value: id,
+                                              child: Text(
+                                                  c['category_type'] ?? '',
+                                                  style: const TextStyle(
+                                                      fontSize: 13)),
+                                            );
+                                          })
+                                          .whereType<DropdownMenuItem<int>>()
+                                          .toList(),
                                       onChanged: (v) => setState(
                                           () => _selectedCategoryId = v),
                                       decoration: InputDecoration(
@@ -299,18 +329,23 @@ class _Step3TeamState extends State<Step3Team> {
                                               color: Colors.black26,
                                               fontSize: 13)),
                                       isExpanded: true,
-                                      items: _mentors.map((m) {
-                                        return DropdownMenuItem<int>(
-                                          value: int.tryParse(
-                                              m['mentor_id'].toString()),
-                                          child: Text(
-                                              m['mentor_name'] ?? '',
-                                              style: const TextStyle(
-                                                  fontSize: 13),
-                                              overflow:
-                                                  TextOverflow.ellipsis),
-                                        );
-                                      }).toList(),
+                                      items: _mentors
+                                          .map((m) {
+                                            final id = int.tryParse(
+                                                m['mentor_id'].toString());
+                                            if (id == null) return null;
+                                            return DropdownMenuItem<int>(
+                                              value: id,
+                                              child: Text(
+                                                  m['mentor_name'] ?? '',
+                                                  style: const TextStyle(
+                                                      fontSize: 13),
+                                                  overflow:
+                                                      TextOverflow.ellipsis),
+                                            );
+                                          })
+                                          .whereType<DropdownMenuItem<int>>()
+                                          .toList(),
                                       onChanged: (v) => setState(
                                           () => _selectedMentorId = v),
                                       decoration: InputDecoration(

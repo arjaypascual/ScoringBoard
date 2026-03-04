@@ -15,6 +15,7 @@ void main() async {
   try {
     await DBHelper.getConnection();
     print("✅ Connected to database!");
+    await DBHelper.runMigrations();
   } catch (e) {
     print("❌ Connection failed: $e");
   }
@@ -91,6 +92,7 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
           teamId: _teamId,
           onDone: () => _goToStep(5),
           onBack: () => _goToStep(3),
+          onSkip: () => _goToStep(5),
         );
 
       // ── Step 5: Generate Schedule ─────────────────────────────────────

@@ -5,12 +5,14 @@ class Step4Player extends StatefulWidget {
   final int? teamId;
   final VoidCallback? onDone;
   final VoidCallback? onBack;
+  final VoidCallback? onSkip;
 
   const Step4Player({
     super.key,
     this.teamId,
     this.onDone,
     this.onBack,
+    this.onSkip,
   });
 
   @override
@@ -24,13 +26,16 @@ class _Step4PlayerState extends State<Step4Player> {
   final _player1BirthdateController = TextEditingController();
   final _player2BirthdateController = TextEditingController();
 
+  DateTime? _player1Birthdate;
+  DateTime? _player2Birthdate;
+
   bool? _player1IsPresent;
   bool? _player2IsPresent;
 
   int? _selectedTeamId;
   List<Map<String, dynamic>> _teams = [];
 
-  bool _isLoading = false;
+  bool _isLoading     = false;
   bool _isLoadingData = true;
 
   // ── Lifecycle ────────────────────────────────────────────────────────────────
@@ -43,10 +48,21 @@ class _Step4PlayerState extends State<Step4Player> {
   Future<void> _loadData() async {
     try {
       final teams = await DBHelper.getTeams();
+
+      // Deduplicate by team_id to prevent dropdown assertion errors
+      final seen = <int>{};
+      final uniqueTeams = teams.where((t) {
+        final id = int.tryParse(t['team_id'].toString() ?? '');
+        if (id == null || id == 0 || !seen.add(id)) return false;
+        return true;
+      }).toList();
+
       setState(() {
-        _teams = teams;
+        _teams = uniqueTeams;
         // Pre-select team from previous step if provided
-        if (widget.teamId != null) {
+        if (widget.teamId != null &&
+            uniqueTeams.any((t) =>
+                int.tryParse(t['team_id'].toString()) == widget.teamId)) {
           _selectedTeamId = widget.teamId;
         }
         _isLoadingData = false;
@@ -273,6 +289,9 @@ class _Step4PlayerState extends State<Step4Player> {
                               label: 'PLAYER 1 NAME:',
                               nameController: _player1NameController,
                               birthdateController: _player1BirthdateController,
+                              birthdate: _player1Birthdate,
+                              onDatePicked: (d) =>
+                                  setState(() => _player1Birthdate = d),
                               isPresent: _player1IsPresent,
                               onPresentChanged: (v) =>
                                   setState(() => _player1IsPresent = v),
@@ -285,6 +304,9 @@ class _Step4PlayerState extends State<Step4Player> {
                               label: 'PLAYER 2 NAME:',
                               nameController: _player2NameController,
                               birthdateController: _player2BirthdateController,
+                              birthdate: _player2Birthdate,
+                              onDatePicked: (d) =>
+                                  setState(() => _player2Birthdate = d),
                               isPresent: _player2IsPresent,
                               onPresentChanged: (v) =>
                                   setState(() => _player2IsPresent = v),
@@ -320,18 +342,24 @@ class _Step4PlayerState extends State<Step4Player> {
                                             fontSize: 13),
                                       ),
                                       isExpanded: true,
-                                      items: _teams.map((t) {
-                                        return DropdownMenuItem<int>(
-                                          value: int.tryParse(
-                                              t['team_id'].toString()),
-                                          child: Text(
-                                            t['team_name'] ?? '',
-                                            style: const TextStyle(
-                                                fontSize: 13),
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        );
-                                      }).toList(),
+                                      items: _teams
+                                          .map((t) {
+                                            final id = int.tryParse(
+                                                t['team_id'].toString());
+                                            if (id == null) return null;
+                                            return DropdownMenuItem<int>(
+                                              value: id,
+                                              child: Text(
+                                                t['team_name'] ?? '',
+                                                style: const TextStyle(
+                                                    fontSize: 13),
+                                                overflow:
+                                                    TextOverflow.ellipsis,
+                                              ),
+                                            );
+                                          })
+                                          .whereType<DropdownMenuItem<int>>()
+                                          .toList(),
                                       onChanged: (v) =>
                                           setState(() => _selectedTeamId = v),
                                       decoration: InputDecoration(
@@ -358,31 +386,69 @@ class _Step4PlayerState extends State<Step4Player> {
                         ),
                         const SizedBox(height: 32),
 
-                        // ── Register button ─────────────────────────────────
-                        ElevatedButton(
-                          onPressed: _isLoading ? null : _register,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF00CFFF),
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 56, vertical: 14),
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8)),
-                          ),
-                          child: _isLoading
-                              ? const SizedBox(
-                                  width: 20,
-                                  height: 20,
-                                  child: CircularProgressIndicator(
-                                      strokeWidth: 2, color: Colors.white),
-                                )
-                              : const Text(
-                                  'REGISTER',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 1,
-                                  ),
+                        // ── Buttons row ─────────────────────────────────────
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            // SKIP → go to Generate Schedule
+                            OutlinedButton(
+                              onPressed: widget.onSkip,
+                              style: OutlinedButton.styleFrom(
+                                side: const BorderSide(
+                                    color: Color(0xFF3D1A8C), width: 2),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 36, vertical: 14),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8)),
+                              ),
+                              child: const Text(
+                                'SKIP',
+                                style: TextStyle(
+                                  color: Color(0xFF3D1A8C),
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 1,
                                 ),
+                              ),
+                            ),
+                            const SizedBox(width: 20),
+
+                            // REGISTER
+                            ElevatedButton(
+                              onPressed: _isLoading ? null : _register,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF00CFFF),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 36, vertical: 14),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8)),
+                              ),
+                              child: _isLoading
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white),
+                                    )
+                                  : const Text(
+                                      'REGISTER',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold,
+                                        letterSpacing: 1,
+                                      ),
+                                    ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Note: SKIP will go directly to Generate Schedule.',
+                          style: TextStyle(
+                            color: Color(0xFF3D1A8C),
+                            fontSize: 12,
+                            fontStyle: FontStyle.italic,
+                          ),
                         ),
                       ],
                     ),
@@ -419,10 +485,41 @@ class _Step4PlayerState extends State<Step4Player> {
   }
 
   // ── Player column builder ────────────────────────────────────────────────────
+  Future<void> _pickDate({
+    required DateTime? current,
+    required void Function(DateTime) onPicked,
+    required TextEditingController controller,
+  }) async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: current ?? DateTime(2010),
+      firstDate: DateTime(1990),
+      lastDate: DateTime.now(),
+      builder: (context, child) => Theme(
+        data: Theme.of(context).copyWith(
+          colorScheme: const ColorScheme.light(
+            primary:   Color(0xFF3D1A8C),
+            onPrimary: Colors.white,
+            surface:   Colors.white,
+            onSurface: Color(0xFF3D1A8C),
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) {
+      onPicked(picked);
+      controller.text =
+          '${picked.year}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}';
+    }
+  }
+
   Widget _buildPlayerColumn({
     required String label,
     required TextEditingController nameController,
     required TextEditingController birthdateController,
+    required DateTime? birthdate,
+    required void Function(DateTime) onDatePicked,
     required bool? isPresent,
     required void Function(bool) onPresentChanged,
   }) {
@@ -432,26 +529,56 @@ class _Step4PlayerState extends State<Step4Player> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Name
-          Text(
-            label,
-            style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14),
-          ),
+          Text(label,
+              style: const TextStyle(
+                  fontWeight: FontWeight.w900, fontSize: 14)),
           const SizedBox(height: 8),
           _textField(hint: 'Enter player name', controller: nameController),
           const SizedBox(height: 16),
 
-          // Birthdate
-          const Text(
-            'BIRTHDATE:',
-            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14),
-          ),
+          // Birthdate — date picker tile
+          const Text('BIRTHDATE:',
+              style: TextStyle(
+                  fontWeight: FontWeight.w900, fontSize: 14)),
           const SizedBox(height: 8),
-          _textField(hint: 'YYYY-MM-DD', controller: birthdateController),
+          GestureDetector(
+            onTap: () => _pickDate(
+              current:    birthdate,
+              onPicked:   onDatePicked,
+              controller: birthdateController,
+            ),
+            child: Container(
+              height: 48,
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                border: Border.all(color: const Color(0xFFAAAAAA)),
+                borderRadius: BorderRadius.circular(6),
+                color: Colors.white,
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.calendar_today_rounded,
+                      size: 18, color: Color(0xFF3D1A8C)),
+                  const SizedBox(width: 10),
+                  Text(
+                    birthdate != null
+                        ? '${birthdate.year}-${birthdate.month.toString().padLeft(2, '0')}-${birthdate.day.toString().padLeft(2, '0')}'
+                        : 'Select birthdate',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: birthdate != null
+                          ? Colors.black87
+                          : Colors.black38,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
           const SizedBox(height: 16),
 
           // Present?
-          const Text(
-            'PRESENT?',
+          const Text('PRESENT?',
             style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14),
           ),
           const SizedBox(height: 4),
