@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
 
 // ── Accent colors per step ────────────────────────────────────────────────────
 const kStepColors = [
@@ -10,8 +11,14 @@ const kStepColors = [
 const kStepLabels  = ['School', 'Mentor', 'Team', 'Players'];
 
 // ── Shared premium header ─────────────────────────────────────────────────────
-class RegistrationHeader extends StatelessWidget {
+class RegistrationHeader extends StatefulWidget {
   const RegistrationHeader({super.key});
+
+  @override
+  State<RegistrationHeader> createState() => _RegistrationHeaderState();
+}
+
+class _RegistrationHeaderState extends State<RegistrationHeader> {
 
   @override
   Widget build(BuildContext context) {
@@ -84,18 +91,24 @@ class RegistrationHeader extends StatelessWidget {
           ),
 
           // Center: logo with glow
-          Container(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.35),
-                    blurRadius: 24, spreadRadius: 4),
-                BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.15),
-                    blurRadius: 16, spreadRadius: 2),
-              ],
-            ),
-            child: Image.asset('assets/images/CenterLogo.png',
-                height: 70, fit: BoxFit.contain),
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.35),
+                        blurRadius: 24, spreadRadius: 4),
+                    BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.15),
+                        blurRadius: 16, spreadRadius: 2),
+                  ],
+                ),
+                child: Image.asset('assets/images/CenterLogo.png',
+                    height: 70, fit: BoxFit.contain),
+              ),
+
+            ],
           ),
 
           // Right: CREOTEC badge
@@ -128,6 +141,111 @@ class RegistrationHeader extends StatelessWidget {
                         letterSpacing: 2.5, height: 1.0)),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+// ── Standalone live clock badge (self-contained timer) ───────────────────────
+class _LiveClockBadge extends StatefulWidget {
+  const _LiveClockBadge();
+
+  @override
+  State<_LiveClockBadge> createState() => _LiveClockBadgeState();
+}
+
+class _LiveClockBadgeState extends State<_LiveClockBadge>
+    with SingleTickerProviderStateMixin {
+  late Timer _timer;
+  late DateTime _now;
+  late AnimationController _pulse;
+  late Animation<double> _pulseAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _now = DateTime.now();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _now = DateTime.now());
+    });
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+    _pulseAnim = Tween<double>(begin: 0.35, end: 1.0).animate(
+      CurvedAnimation(parent: _pulse, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  String get _time {
+    final h = _now.hour.toString().padLeft(2, '0');
+    final m = _now.minute.toString().padLeft(2, '0');
+    final s = _now.second.toString().padLeft(2, '0');
+    return '$h:$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0D0D2B),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+            color: const Color(0xFF00E5A0).withOpacity(0.35), width: 1),
+        boxShadow: [
+          BoxShadow(
+              color: const Color(0xFF00E5A0).withOpacity(0.12),
+              blurRadius: 8),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AnimatedBuilder(
+            animation: _pulseAnim,
+            builder: (_, __) => Container(
+              width: 7, height: 7,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: const Color(0xFF00E5A0).withOpacity(_pulseAnim.value),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF00E5A0).withOpacity(_pulseAnim.value * 0.6),
+                    blurRadius: 6, spreadRadius: 1,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 5),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('LIVE',
+                  style: TextStyle(
+                    color: Color(0xFF00E5A0),
+                    fontSize: 8, fontWeight: FontWeight.w800,
+                    letterSpacing: 1.5, height: 1.0,
+                  )),
+              Text(_time,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13, fontWeight: FontWeight.bold,
+                    letterSpacing: 1, height: 1.2,
+                  )),
+            ],
           ),
         ],
       ),
