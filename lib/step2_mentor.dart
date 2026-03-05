@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'db_helper.dart';
+import 'registration_shared.dart';
 
 class Step2Mentor extends StatefulWidget {
   final VoidCallback onSkip;
@@ -18,34 +20,36 @@ class Step2Mentor extends StatefulWidget {
 }
 
 class _Step2MentorState extends State<Step2Mentor> {
+  static const _accent = Color(0xFF967BB6); // lavender
+
   final _nameController    = TextEditingController();
   final _contactController = TextEditingController();
   int? _selectedSchoolId;
   List<Map<String, dynamic>> _schools = [];
   bool _isLoading        = false;
   bool _isLoadingSchools = true;
+  int  _contactLength    = 0;
 
   @override
   void initState() {
     super.initState();
     _loadSchools();
+    _contactController.addListener(
+        () => setState(() => _contactLength = _contactController.text.length));
   }
 
   Future<void> _loadSchools() async {
     try {
       final schools = await DBHelper.getSchools();
-
-      // Deduplicate by school_id to prevent dropdown assertion errors
       final seen = <int>{};
-      final uniqueSchools = schools.where((s) {
+      final unique = schools.where((s) {
         final id = int.tryParse(s['school_id'].toString() ?? '');
         if (id == null || id == 0 || !seen.add(id)) return false;
         return true;
       }).toList();
-
       setState(() {
-        _schools          = uniqueSchools;
-        if (!uniqueSchools.any((s) =>
+        _schools = unique;
+        if (!unique.any((s) =>
             int.tryParse(s['school_id'].toString()) == _selectedSchoolId)) {
           _selectedSchoolId = null;
         }
@@ -55,8 +59,7 @@ class _Step2MentorState extends State<Step2Mentor> {
       setState(() => _isLoadingSchools = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('❌ Failed to load schools: $e'),
+          SnackBar(content: Text('❌ Failed to load schools: $e'),
               backgroundColor: Colors.red),
         );
       }
@@ -64,45 +67,35 @@ class _Step2MentorState extends State<Step2Mentor> {
   }
 
   Future<void> _register() async {
-    if (_nameController.text.trim().isEmpty ||
-        _contactController.text.trim().isEmpty ||
+    final contact = _contactController.text.trim();
+    if (_nameController.text.trim().isEmpty || contact.isEmpty ||
         _selectedSchoolId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill in all fields.')),
-      );
+        const SnackBar(content: Text('Please fill in all fields.')));
       return;
     }
-
+    if (contact.length != 11) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('❌ Contact number must be exactly 11 digits.'),
+        backgroundColor: Colors.red));
+      return;
+    }
     setState(() => _isLoading = true);
     try {
       final conn = await DBHelper.getConnection();
-
       await conn.execute(
         "INSERT INTO tbl_mentor (mentor_name, mentor_number, school_id) VALUES (:name, :number, :schoolId)",
-        {
-          "name":     _nameController.text.trim(),
-          "number":   _contactController.text.trim(),
-          "schoolId": _selectedSchoolId,
-        },
+        {"name": _nameController.text.trim(), "number": contact, "schoolId": _selectedSchoolId},
       );
-
       final result   = await conn.execute("SELECT LAST_INSERT_ID() as id");
-      final mentorId = int.parse(
-          result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0');
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Mentor registered successfully!'),
-          backgroundColor: Colors.green,
-        ),
-      );
-
+      final mentorId = int.parse(result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0');
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('✅ Mentor registered successfully!'),
+        backgroundColor: Colors.green));
       widget.onRegistered(mentorId);
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text('❌ Error: $e'), backgroundColor: Colors.red),
-      );
+        SnackBar(content: Text('❌ Error: $e'), backgroundColor: Colors.red));
     } finally {
       setState(() => _isLoading = false);
     }
@@ -118,158 +111,83 @@ class _Step2MentorState extends State<Step2Mentor> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFDDDDDD),
+      backgroundColor: const Color(0xFF1A0A4A),
       body: Column(
         children: [
-          _buildHeader(),
+          const RegistrationHeader(),
           Expanded(
             child: Center(
-              child: Container(
-                width: 860,
-                padding: const EdgeInsets.fromLTRB(40, 32, 40, 32),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(20),
-                  border:
-                      Border.all(color: const Color(0xFF3D1A8C), width: 2),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.15),
-                      blurRadius: 20,
-                      offset: const Offset(0, 8),
-                    ),
-                  ],
-                ),
-                child: Stack(
-                  children: [
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _buildStepIndicator(),
-                        const SizedBox(height: 36),
-
-                        // Mentor Name
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: RegistrationCard(
+                  activeStep: 2,
+                  child: Stack(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(48, 36, 48, 36),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            _fieldLabel('MENTOR NAME:'),
-                            const SizedBox(width: 16),
-                            _textField(
-                                hint: 'Enter mentor name',
-                                controller: _nameController),
-                          ],
-                        ),
-                        const SizedBox(height: 20),
+                            const StepIndicator(activeStep: 2),
+                            const SizedBox(height: 10),
+                            const Text('MENTOR REGISTRATION',
+                                style: TextStyle(color: Colors.white,
+                                    fontSize: 18, fontWeight: FontWeight.w800,
+                                    letterSpacing: 2)),
+                            const SizedBox(height: 4),
+                            Text('Register the team mentor',
+                                style: TextStyle(
+                                    color: Colors.white.withOpacity(0.4),
+                                    fontSize: 12)),
+                            const SizedBox(height: 28),
+                            buildDivider(_accent),
+                            const SizedBox(height: 24),
 
-                        // Contact No.
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            _fieldLabel('CONTACT NO.:'),
-                            const SizedBox(width: 16),
-                            _textField(
-                              hint: 'Enter contact number',
-                              controller: _contactController,
-                              keyboardType: TextInputType.phone,
+                            // Name
+                            buildField(
+                              label: 'MENTOR NAME', hint: 'Enter mentor name',
+                              controller: _nameController,
+                              icon: Icons.person_rounded,
+                              accentColor: _accent, isRequired: true,
+                            ),
+                            const SizedBox(height: 18),
+
+                            // Contact
+                            _buildContactField(),
+                            const SizedBox(height: 18),
+
+                            // School
+                            _buildSchoolDropdown(),
+                            const SizedBox(height: 16),
+
+                            buildInfoNote('If the mentor is already registered, you may skip this step.'),
+                            const SizedBox(height: 28),
+
+                            buildButtonRow(
+                              onSkip: widget.onSkip,
+                              onRegister: _register,
+                              isLoading: _isLoading,
+                              accentColor: _accent,
+                              registerIcon: Icons.person_add_rounded,
                             ),
                           ],
                         ),
-                        const SizedBox(height: 20),
-
-                        // School dropdown
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            _fieldLabel('SCHOOL NAME:'),
-                            const SizedBox(width: 16),
-                            _schoolDropdown(),
-                          ],
+                      ),
+                      if (widget.onBack != null)
+                        Positioned(top: 12, left: 12,
+                          child: IconButton(
+                            icon: const Icon(Icons.arrow_back_ios_new,
+                                color: _accent, size: 18),
+                            onPressed: widget.onBack),
                         ),
-                        const SizedBox(height: 24),
-
-                        const Text(
-                          'Note: If the mentor is already registered, you may skip this step.',
-                          style: TextStyle(
-                            color: Color(0xFF3D1A8C),
-                            fontSize: 12,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
-                        const SizedBox(height: 28),
-
-                        // Buttons
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            OutlinedButton(
-                              onPressed: widget.onSkip,
-                              style: OutlinedButton.styleFrom(
-                                side: const BorderSide(
-                                    color: Color(0xFF3D1A8C), width: 2),
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 44, vertical: 14),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8)),
-                              ),
-                              child: const Text('SKIP',
-                                  style: TextStyle(
-                                    color: Color(0xFF3D1A8C),
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 1,
-                                  )),
-                            ),
-                            const SizedBox(width: 24),
-                            ElevatedButton(
-                              onPressed: _isLoading ? null : _register,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF00CFFF),
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 44, vertical: 14),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8)),
-                              ),
-                              child: _isLoading
-                                  ? const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Colors.white))
-                                  : const Text('REGISTER',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold,
-                                        letterSpacing: 1,
-                                      )),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-
-                    // Back button
-                    if (widget.onBack != null)
-                      Positioned(
-                        top: 0,
-                        left: 0,
+                      Positioned(top: 12, right: 12,
                         child: IconButton(
-                          icon: const Icon(Icons.arrow_back_ios_new,
-                              color: Color(0xFF3D1A8C)),
-                          tooltip: 'Back',
-                          onPressed: widget.onBack,
-                        ),
+                          icon: Icon(Icons.close,
+                              color: Colors.white.withOpacity(0.35), size: 20),
+                          onPressed: () => Navigator.of(context).maybePop()),
                       ),
-
-                    // Close button
-                    Positioned(
-                      top: 0,
-                      right: 0,
-                      child: IconButton(
-                        icon: const Icon(Icons.close),
-                        onPressed: () => Navigator.of(context).maybePop(),
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -279,191 +197,121 @@ class _Step2MentorState extends State<Step2Mentor> {
     );
   }
 
-  // ── HEADER ──────────────────────────────────────────────────────────────────
-  Widget _buildHeader() {
-    return Container(
-      width: double.infinity,
-      color: const Color(0xFF2D0E7A),
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              RichText(
-                text: const TextSpan(children: [
-                  TextSpan(
-                      text: 'Make',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold)),
-                  TextSpan(
-                      text: 'bl',
-                      style: TextStyle(
-                          color: Color(0xFF00CFFF),
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold)),
-                  TextSpan(
-                      text: 'ock',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold)),
-                ]),
-              ),
-              const Text('Construct Your Dreams',
-                  style: TextStyle(color: Colors.white54, fontSize: 10)),
-            ],
-          ),
-          Image.asset('assets/images/CenterLogo.png',
-              height: 80, fit: BoxFit.contain),
-          const Text('CREOTEC',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 3)),
-        ],
-      ),
-    );
-  }
-
-  // ── STEP INDICATOR ──────────────────────────────────────────────────────────
-  Widget _buildStepIndicator() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(4, (index) {
-        final step    = index + 1;
-        final isActive = step == 2;
-        final isDone   = step < 2;
-
-        return Row(
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isActive || isDone
-                    ? const Color(0xFF3D1A8C)
-                    : Colors.white,
-                border:
-                    Border.all(color: const Color(0xFF3D1A8C), width: 2),
-              ),
-              child: Center(
-                child: isDone
-                    ? const Icon(Icons.check, color: Colors.white, size: 20)
-                    : Text('$step',
-                        style: TextStyle(
-                          color: isActive
-                              ? Colors.white
-                              : const Color(0xFF3D1A8C),
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        )),
-              ),
-            ),
-            if (step < 4)
-              Container(
-                width: 120,
-                height: 2,
-                color: isDone
-                    ? const Color(0xFF3D1A8C)
-                    : const Color(0xFFCCCCCC),
-              ),
+  Widget _buildContactField() {
+    final bool isComplete = _contactLength == 11;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          const Text('CONTACT NO.',
+              style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700,
+                  fontSize: 12, letterSpacing: 1)),
+          const Text(' *',
+              style: TextStyle(color: _accent, fontWeight: FontWeight.bold)),
+        ]),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _contactController,
+          keyboardType: TextInputType.phone,
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+          inputFormatters: [
+            FilteringTextInputFormatter.digitsOnly,
+            LengthLimitingTextInputFormatter(11),
           ],
-        );
-      }),
-    );
-  }
-
-  // ── HELPERS ─────────────────────────────────────────────────────────────────
-  Widget _fieldLabel(String text) {
-    return SizedBox(
-      width: 160,
-      child: Text(text,
-          style:
-              const TextStyle(fontWeight: FontWeight.w900, fontSize: 14)),
-    );
-  }
-
-  Widget _textField({
-    required String hint,
-    required TextEditingController controller,
-    TextInputType keyboardType = TextInputType.text,
-  }) {
-    return SizedBox(
-      width: 340,
-      height: 42,
-      child: TextField(
-        controller: controller,
-        keyboardType: keyboardType,
-        decoration: InputDecoration(
-          hintText: hint,
-          hintStyle:
-              const TextStyle(color: Colors.black26, fontSize: 13),
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(6),
-            borderSide: const BorderSide(color: Color(0xFFAAAAAA)),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(6),
-            borderSide:
-                const BorderSide(color: Color(0xFF3D1A8C), width: 2),
+          decoration: InputDecoration(
+            hintText: 'e.g. 09XXXXXXXXX',
+            hintStyle: TextStyle(color: Colors.white.withOpacity(0.25), fontSize: 13),
+            prefixIcon: Icon(Icons.phone_rounded,
+                color: _accent.withOpacity(0.7), size: 20),
+            suffixText: '$_contactLength/11',
+            suffixStyle: TextStyle(
+              fontSize: 12, fontWeight: FontWeight.bold,
+              color: isComplete ? const Color(0xFF00E5A0) : Colors.white38,
+            ),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+            filled: true,
+            fillColor: Colors.white.withOpacity(0.05),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(
+                  color: isComplete
+                      ? const Color(0xFF00E5A0)
+                      : Colors.white.withOpacity(0.15)),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(
+                  color: isComplete ? const Color(0xFF00E5A0) : _accent,
+                  width: 2),
+            ),
           ),
         ),
-      ),
+      ],
     );
   }
 
-  Widget _schoolDropdown() {
-    if (_isLoadingSchools) {
-      return const SizedBox(
-        width: 340,
-        height: 42,
-        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-      );
-    }
-    return SizedBox(
-      width: 340,
-      height: 42,
-      child: DropdownButtonFormField<int>(
-        value: _selectedSchoolId,
-        hint: const Text('Select school',
-            style: TextStyle(color: Colors.black26, fontSize: 13)),
-        isExpanded: true,
-        items: _schools
-            .map((s) {
-              final id = int.tryParse(s['school_id'].toString());
-              if (id == null) return null;
-              return DropdownMenuItem<int>(
-                value: id,
-                child: Text(s['school_name'] ?? '',
-                    style: const TextStyle(fontSize: 13),
-                    overflow: TextOverflow.ellipsis),
-              );
-            })
-            .whereType<DropdownMenuItem<int>>()
-            .toList(),
-        onChanged: (v) => setState(() => _selectedSchoolId = v),
-        decoration: InputDecoration(
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(6),
-            borderSide: const BorderSide(color: Color(0xFFAAAAAA)),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(6),
-            borderSide:
-                const BorderSide(color: Color(0xFF3D1A8C), width: 2),
-          ),
-        ),
-      ),
+  Widget _buildSchoolDropdown() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          const Text('SCHOOL',
+              style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700,
+                  fontSize: 12, letterSpacing: 1)),
+          const Text(' *',
+              style: TextStyle(color: _accent, fontWeight: FontWeight.bold)),
+        ]),
+        const SizedBox(height: 8),
+        _isLoadingSchools
+            ? Container(
+                height: 52,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.white.withOpacity(0.15)),
+                ),
+                child: const Center(
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: _accent)),
+              )
+            : DropdownButtonFormField<int>(
+                value: _selectedSchoolId,
+                dropdownColor: const Color(0xFF2D0E7A),
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                hint: Text('Select school',
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.25), fontSize: 13)),
+                icon: const Icon(Icons.keyboard_arrow_down_rounded, color: _accent),
+                isExpanded: true,
+                items: _schools.map((s) {
+                  final id = int.tryParse(s['school_id'].toString());
+                  if (id == null) return null;
+                  return DropdownMenuItem<int>(
+                    value: id,
+                    child: Text(s['school_name'] ?? '',
+                        style: const TextStyle(color: Colors.white, fontSize: 13),
+                        overflow: TextOverflow.ellipsis),
+                  );
+                }).whereType<DropdownMenuItem<int>>().toList(),
+                onChanged: (v) => setState(() => _selectedSchoolId = v),
+                decoration: InputDecoration(
+                  prefixIcon: Icon(Icons.school_rounded,
+                      color: _accent.withOpacity(0.7), size: 20),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  filled: true,
+                  fillColor: Colors.white.withOpacity(0.05),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Colors.white.withOpacity(0.15)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: _accent, width: 2),
+                  ),
+                ),
+              ),
+      ],
     );
   }
 }

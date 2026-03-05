@@ -581,10 +581,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             children: [
               _headerCell('MATCH',     flex: 1, center: false),
               _headerCell('SCHEDULE:', flex: 2, center: false),
+              if (maxArenas == 1) const Spacer(flex: 2),
               ...List.generate(
                 maxArenas,
                 (i) => _headerCell('ARENA ${i + 1}', flex: 3, center: true),
               ),
+              if (maxArenas == 1) const Spacer(flex: 2),
               _headerCell('STATUS', flex: 2, center: true),
             ],
           ),
@@ -633,6 +635,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                   color: Colors.white, fontSize: 13),
                             ),
                           ),
+                          // If single arena, add spacers to center it
+                          if (maxArenas == 1) const Spacer(flex: 2),
                           ...List.generate(maxArenas, (ai) {
                             final team = ai < arenas.length
                                 ? arenas[ai] as Map<String, dynamic>?
@@ -642,12 +646,14 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                 flex: 3,
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.center,
+                                  mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
                                     Text(
                                       (team['round_type']
                                                   ?.toString()
                                                   .toUpperCase() ??
                                               ''),
+                                      textAlign: TextAlign.center,
                                       style: const TextStyle(
                                         color: Color(0xFF00CFFF),
                                         fontWeight: FontWeight.bold,
@@ -675,6 +681,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                               );
                             }
                           }),
+                          if (maxArenas == 1) const Spacer(flex: 2),
                           Expanded(
                             flex: 2,
                             child: GestureDetector(

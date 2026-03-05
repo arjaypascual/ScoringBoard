@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'db_helper.dart';
+import 'registration_shared.dart';
 
 class Step4Player extends StatefulWidget {
   final int? teamId;
@@ -20,25 +21,23 @@ class Step4Player extends StatefulWidget {
 }
 
 class _Step4PlayerState extends State<Step4Player> {
-  // ── Controllers & State ──────────────────────────────────────────────────────
-  final _player1NameController = TextEditingController();
-  final _player2NameController = TextEditingController();
-  final _player1BirthdateController = TextEditingController();
-  final _player2BirthdateController = TextEditingController();
+  static const _accent = Color(0xFF00E5A0); // emerald
 
-  DateTime? _player1Birthdate;
-  DateTime? _player2Birthdate;
+  final _p1NameCtrl  = TextEditingController();
+  final _p2NameCtrl  = TextEditingController();
+  final _p1BirthCtrl = TextEditingController();
+  final _p2BirthCtrl = TextEditingController();
 
-  bool? _player1IsPresent;
-  bool? _player2IsPresent;
+  DateTime? _p1Birthdate;
+  DateTime? _p2Birthdate;
+  bool? _p1Present;
+  bool? _p2Present;
 
   int? _selectedTeamId;
   List<Map<String, dynamic>> _teams = [];
-
   bool _isLoading     = false;
   bool _isLoadingData = true;
 
-  // ── Lifecycle ────────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
@@ -48,20 +47,16 @@ class _Step4PlayerState extends State<Step4Player> {
   Future<void> _loadData() async {
     try {
       final teams = await DBHelper.getTeams();
-
-      // Deduplicate by team_id to prevent dropdown assertion errors
-      final seen = <int>{};
-      final uniqueTeams = teams.where((t) {
+      final seen  = <int>{};
+      final unique = teams.where((t) {
         final id = int.tryParse(t['team_id'].toString() ?? '');
         if (id == null || id == 0 || !seen.add(id)) return false;
         return true;
       }).toList();
-
       setState(() {
-        _teams = uniqueTeams;
-        // Pre-select team from previous step if provided
+        _teams = unique;
         if (widget.teamId != null &&
-            uniqueTeams.any((t) =>
+            unique.any((t) =>
                 int.tryParse(t['team_id'].toString()) == widget.teamId)) {
           _selectedTeamId = widget.teamId;
         }
@@ -71,420 +66,157 @@ class _Step4PlayerState extends State<Step4Player> {
       setState(() => _isLoadingData = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('❌ Failed to load data: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+          SnackBar(content: Text('❌ Failed to load data: $e'),
+              backgroundColor: Colors.red));
       }
     }
   }
 
-  // ── Validation helpers ───────────────────────────────────────────────────────
   bool _isValidDate(String value) {
-    // Accepts YYYY-MM-DD
-    final regex = RegExp(r'^\d{4}-\d{2}-\d{2}$');
-    if (!regex.hasMatch(value)) return false;
-    try {
-      DateTime.parse(value);
-      return true;
-    } catch (_) {
-      return false;
-    }
+    if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
+    try { DateTime.parse(value); return true; } catch (_) { return false; }
   }
 
-  // ── Register action ──────────────────────────────────────────────────────────
   Future<void> _register() async {
-    final p1Name = _player1NameController.text.trim();
-    final p2Name = _player2NameController.text.trim();
-    final p1Birth = _player1BirthdateController.text.trim();
-    final p2Birth = _player2BirthdateController.text.trim();
+    final p1Name  = _p1NameCtrl.text.trim();
+    final p2Name  = _p2NameCtrl.text.trim();
+    final p1Birth = _p1BirthCtrl.text.trim();
+    final p2Birth = _p2BirthCtrl.text.trim();
 
-    // Validation
-    if (p1Name.isEmpty ||
-        p2Name.isEmpty ||
-        p1Birth.isEmpty ||
-        p2Birth.isEmpty ||
-        _player1IsPresent == null ||
-        _player2IsPresent == null ||
-        _selectedTeamId == null) {
+    if (p1Name.isEmpty || p2Name.isEmpty || p1Birth.isEmpty || p2Birth.isEmpty ||
+        _p1Present == null || _p2Present == null || _selectedTeamId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill in all fields.')),
-      );
+        const SnackBar(content: Text('Please fill in all fields.')));
       return;
     }
-
     if (!_isValidDate(p1Birth)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Player 1 birthdate must be in YYYY-MM-DD format.'),
-          backgroundColor: Colors.orange,
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Player 1 birthdate must be YYYY-MM-DD format.'),
+        backgroundColor: Colors.orange));
       return;
     }
-
     if (!_isValidDate(p2Birth)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Player 2 birthdate must be in YYYY-MM-DD format.'),
-          backgroundColor: Colors.orange,
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Player 2 birthdate must be YYYY-MM-DD format.'),
+        backgroundColor: Colors.orange));
       return;
     }
 
     setState(() => _isLoading = true);
     try {
       final conn = await DBHelper.getConnection();
-
-      // Insert Player 1
-      await conn.execute(
-        """INSERT INTO tbl_player
-             (player_name, player_birthdate, player_ispresent, team_id)
-           VALUES (:name, :birthdate, :present, :teamId)""",
-        {
-          "name": p1Name,
-          "birthdate": p1Birth,
-          "present": _player1IsPresent! ? 1 : 0,
-          "teamId": _selectedTeamId,
-        },
-      );
-
-      // Insert Player 2
-      await conn.execute(
-        """INSERT INTO tbl_player
-             (player_name, player_birthdate, player_ispresent, team_id)
-           VALUES (:name, :birthdate, :present, :teamId)""",
-        {
-          "name": p2Name,
-          "birthdate": p2Birth,
-          "present": _player2IsPresent! ? 1 : 0,
-          "teamId": _selectedTeamId,
-        },
-      );
+      for (final p in [
+        {"name": p1Name, "birthdate": p1Birth, "present": _p1Present! ? 1 : 0},
+        {"name": p2Name, "birthdate": p2Birth, "present": _p2Present! ? 1 : 0},
+      ]) {
+        await conn.execute(
+          """INSERT INTO tbl_player (player_name, player_birthdate, player_ispresent, team_id)
+             VALUES (:name, :birthdate, :present, :teamId)""",
+          {...p, "teamId": _selectedTeamId},
+        );
+      }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('✅ Players registered successfully!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-
-        // Show completion dialog
-        showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (ctx) => AlertDialog(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: const Row(
-              children: [
-                Icon(Icons.check_circle, color: Colors.green, size: 28),
-                SizedBox(width: 10),
-                Text(
-                  'Registration Complete!',
-                  style: TextStyle(
-                    color: Color(0xFF3D1A8C),
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
-                  ),
-                ),
-              ],
-            ),
-            content: const Text(
-              'All players have been successfully registered.\nYou may now close this window.',
-              style: TextStyle(fontSize: 14),
-            ),
-            actions: [
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  widget.onDone?.call();
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF00CFFF),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
-                ),
-                child: const Text(
-                  'DONE',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('✅ Players registered successfully!'),
+          backgroundColor: Colors.green));
+        _showSuccessDialog();
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('❌ Error: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+          SnackBar(content: Text('❌ Error: $e'), backgroundColor: Colors.red));
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  // ── Dispose ──────────────────────────────────────────────────────────────────
-  @override
-  void dispose() {
-    _player1NameController.dispose();
-    _player2NameController.dispose();
-    _player1BirthdateController.dispose();
-    _player2BirthdateController.dispose();
-    super.dispose();
-  }
-
-  // ── Build ────────────────────────────────────────────────────────────────────
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFDDDDDD),
-      body: Column(
-        children: [
-          _buildHeader(),
-          Expanded(
-            child: Center(
-              child: Container(
-                width: 900,
-                padding: const EdgeInsets.fromLTRB(40, 32, 40, 32),
+  void _showSuccessDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          padding: const EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft, end: Alignment.bottomRight,
+              colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)],
+            ),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+                color: const Color(0xFF00E5A0).withOpacity(0.4), width: 1.5),
+            boxShadow: [
+              BoxShadow(color: const Color(0xFF00E5A0).withOpacity(0.15),
+                  blurRadius: 40, spreadRadius: 4),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 64, height: 64,
                 decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: const Color(0xFF3D1A8C), width: 2),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.15),
-                      blurRadius: 20,
-                      offset: const Offset(0, 8),
-                    ),
-                  ],
+                  shape: BoxShape.circle,
+                  gradient: const LinearGradient(
+                      colors: [Color(0xFF00E5A0), Color(0xFF00BFA5)]),
+                  boxShadow: [BoxShadow(
+                      color: const Color(0xFF00E5A0).withOpacity(0.5),
+                      blurRadius: 20, spreadRadius: 4)],
                 ),
-                child: Stack(
-                  children: [
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _buildStepIndicator(),
-                        const SizedBox(height: 32),
-
-                        // ── Two-column player form ──────────────────────────
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            // Player 1 column
-                            _buildPlayerColumn(
-                              label: 'PLAYER 1 NAME:',
-                              nameController: _player1NameController,
-                              birthdateController: _player1BirthdateController,
-                              birthdate: _player1Birthdate,
-                              onDatePicked: (d) =>
-                                  setState(() => _player1Birthdate = d),
-                              isPresent: _player1IsPresent,
-                              onPresentChanged: (v) =>
-                                  setState(() => _player1IsPresent = v),
-                            ),
-
-                            const SizedBox(width: 40),
-
-                            // Player 2 column
-                            _buildPlayerColumn(
-                              label: 'PLAYER 2 NAME:',
-                              nameController: _player2NameController,
-                              birthdateController: _player2BirthdateController,
-                              birthdate: _player2Birthdate,
-                              onDatePicked: (d) =>
-                                  setState(() => _player2Birthdate = d),
-                              isPresent: _player2IsPresent,
-                              onPresentChanged: (v) =>
-                                  setState(() => _player2IsPresent = v),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 24),
-
-                        // ── Team Name dropdown ──────────────────────────────
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            _fieldLabel('TEAM NAME:'),
-                            const SizedBox(width: 16),
-                            _isLoadingData
-                                ? const SizedBox(
-                                    width: 340,
-                                    height: 42,
-                                    child: Center(
-                                      child: CircularProgressIndicator(
-                                          strokeWidth: 2),
-                                    ),
-                                  )
-                                : SizedBox(
-                                    width: 340,
-                                    height: 42,
-                                    child: DropdownButtonFormField<int>(
-                                      value: _selectedTeamId,
-                                      hint: const Text(
-                                        'Select team',
-                                        style: TextStyle(
-                                            color: Colors.black26,
-                                            fontSize: 13),
-                                      ),
-                                      isExpanded: true,
-                                      items: _teams
-                                          .map((t) {
-                                            final id = int.tryParse(
-                                                t['team_id'].toString());
-                                            if (id == null) return null;
-                                            return DropdownMenuItem<int>(
-                                              value: id,
-                                              child: Text(
-                                                t['team_name'] ?? '',
-                                                style: const TextStyle(
-                                                    fontSize: 13),
-                                                overflow:
-                                                    TextOverflow.ellipsis,
-                                              ),
-                                            );
-                                          })
-                                          .whereType<DropdownMenuItem<int>>()
-                                          .toList(),
-                                      onChanged: (v) =>
-                                          setState(() => _selectedTeamId = v),
-                                      decoration: InputDecoration(
-                                        contentPadding:
-                                            const EdgeInsets.symmetric(
-                                                horizontal: 14, vertical: 10),
-                                        enabledBorder: OutlineInputBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(6),
-                                          borderSide: const BorderSide(
-                                              color: Color(0xFFAAAAAA)),
-                                        ),
-                                        focusedBorder: OutlineInputBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(6),
-                                          borderSide: const BorderSide(
-                                              color: Color(0xFF3D1A8C),
-                                              width: 2),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                          ],
-                        ),
-                        const SizedBox(height: 32),
-
-                        // ── Buttons row ─────────────────────────────────────
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            // SKIP → go to Generate Schedule
-                            OutlinedButton(
-                              onPressed: widget.onSkip,
-                              style: OutlinedButton.styleFrom(
-                                side: const BorderSide(
-                                    color: Color(0xFF3D1A8C), width: 2),
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 36, vertical: 14),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8)),
-                              ),
-                              child: const Text(
-                                'SKIP',
-                                style: TextStyle(
-                                  color: Color(0xFF3D1A8C),
-                                  fontWeight: FontWeight.bold,
-                                  letterSpacing: 1,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 20),
-
-                            // REGISTER
-                            ElevatedButton(
-                              onPressed: _isLoading ? null : _register,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF00CFFF),
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 36, vertical: 14),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8)),
-                              ),
-                              child: _isLoading
-                                  ? const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Colors.white),
-                                    )
-                                  : const Text(
-                                      'REGISTER',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold,
-                                        letterSpacing: 1,
-                                      ),
-                                    ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        const Text(
-                          'Note: SKIP will go directly to Generate Schedule.',
-                          style: TextStyle(
-                            color: Color(0xFF3D1A8C),
-                            fontSize: 12,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
-                      ],
-                    ),
-
-                    // ── Back button ───────────────────────────────────────
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      child: IconButton(
-                        icon: const Icon(Icons.arrow_back_ios_new,
-                            color: Color(0xFF3D1A8C)),
-                        tooltip: 'Back',
-                        onPressed: widget.onBack,
-                      ),
-                    ),
-
-                    // ── Close button ──────────────────────────────────────────
-                    Positioned(
-                      top: 0,
-                      right: 0,
-                      child: IconButton(
-                        icon: const Icon(Icons.close),
-                        onPressed: () => Navigator.of(context).maybePop(),
-                      ),
-                    ),
-                  ],
+                child: const Icon(Icons.check_rounded,
+                    color: Colors.white, size: 36),
+              ),
+              const SizedBox(height: 20),
+              const Text('Registration Complete!',
+                  style: TextStyle(color: Colors.white, fontSize: 20,
+                      fontWeight: FontWeight.w800, letterSpacing: 1)),
+              const SizedBox(height: 8),
+              Text('All players have been successfully registered.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: Colors.white.withOpacity(0.6), fontSize: 13,
+                      height: 1.5)),
+              const SizedBox(height: 28),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.of(ctx).pop();
+                  widget.onDone?.call();
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.transparent,
+                  shadowColor: Colors.transparent,
+                  padding: EdgeInsets.zero,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10)),
+                ),
+                child: Ink(
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                        colors: [Color(0xFF00E5A0), Color(0xFF00BFA5)]),
+                    borderRadius: BorderRadius.circular(10),
+                    boxShadow: [BoxShadow(
+                        color: const Color(0xFF00E5A0).withOpacity(0.4),
+                        blurRadius: 16, spreadRadius: 1)],
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 48, vertical: 14),
+                    child: Text('DONE',
+                        style: TextStyle(color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 2, fontSize: 14)),
+                  ),
                 ),
               ),
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
 
-  // ── Player column builder ────────────────────────────────────────────────────
   Future<void> _pickDate({
     required DateTime? current,
     required void Function(DateTime) onPicked,
@@ -495,13 +227,13 @@ class _Step4PlayerState extends State<Step4Player> {
       initialDate: current ?? DateTime(2010),
       firstDate: DateTime(1990),
       lastDate: DateTime.now(),
-      builder: (context, child) => Theme(
-        data: Theme.of(context).copyWith(
-          colorScheme: const ColorScheme.light(
-            primary:   Color(0xFF3D1A8C),
-            onPrimary: Colors.white,
-            surface:   Colors.white,
-            onSurface: Color(0xFF3D1A8C),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: const ColorScheme.dark(
+            primary: Color(0xFF00E5A0),
+            onPrimary: Colors.black,
+            surface: Color(0xFF2D0E7A),
+            onSurface: Colors.white,
           ),
         ),
         child: child!,
@@ -514,262 +246,353 @@ class _Step4PlayerState extends State<Step4Player> {
     }
   }
 
-  Widget _buildPlayerColumn({
-    required String label,
-    required TextEditingController nameController,
-    required TextEditingController birthdateController,
+  @override
+  void dispose() {
+    _p1NameCtrl.dispose(); _p2NameCtrl.dispose();
+    _p1BirthCtrl.dispose(); _p2BirthCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF1A0A4A),
+      body: Column(
+        children: [
+          const RegistrationHeader(),
+          Expanded(
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: RegistrationCard(
+                  activeStep: 4,
+                  width: 820,
+                  child: Stack(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(48, 36, 48, 36),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const StepIndicator(activeStep: 4),
+                            const SizedBox(height: 10),
+                            const Text('PLAYER REGISTRATION',
+                                style: TextStyle(color: Colors.white,
+                                    fontSize: 18, fontWeight: FontWeight.w800,
+                                    letterSpacing: 2)),
+                            const SizedBox(height: 4),
+                            Text('Register both players for the team',
+                                style: TextStyle(
+                                    color: Colors.white.withOpacity(0.4),
+                                    fontSize: 12)),
+                            const SizedBox(height: 28),
+                            buildDivider(_accent),
+                            const SizedBox(height: 24),
+
+                            // Two-column player forms
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(child: _buildPlayerCard(
+                                  playerNum: 1,
+                                  nameCtrl: _p1NameCtrl,
+                                  birthCtrl: _p1BirthCtrl,
+                                  birthdate: _p1Birthdate,
+                                  onDatePicked: (d) => setState(() => _p1Birthdate = d),
+                                  isPresent: _p1Present,
+                                  onPresentChanged: (v) => setState(() => _p1Present = v),
+                                )),
+                                const SizedBox(width: 20),
+                                Expanded(child: _buildPlayerCard(
+                                  playerNum: 2,
+                                  nameCtrl: _p2NameCtrl,
+                                  birthCtrl: _p2BirthCtrl,
+                                  birthdate: _p2Birthdate,
+                                  onDatePicked: (d) => setState(() => _p2Birthdate = d),
+                                  isPresent: _p2Present,
+                                  onPresentChanged: (v) => setState(() => _p2Present = v),
+                                )),
+                              ],
+                            ),
+                            const SizedBox(height: 20),
+
+                            // Team dropdown
+                            _buildTeamDropdown(),
+                            const SizedBox(height: 16),
+
+                            buildInfoNote('SKIP will go directly to Generate Schedule.'),
+                            const SizedBox(height: 28),
+
+                            buildButtonRow(
+                              onSkip: widget.onSkip,
+                              onRegister: _register,
+                              isLoading: _isLoading,
+                              accentColor: _accent,
+                              registerIcon: Icons.how_to_reg_rounded,
+                            ),
+                          ],
+                        ),
+                      ),
+                      Positioned(top: 12, left: 12,
+                        child: IconButton(
+                          icon: const Icon(Icons.arrow_back_ios_new,
+                              color: _accent, size: 18),
+                          onPressed: widget.onBack),
+                      ),
+                      Positioned(top: 12, right: 12,
+                        child: IconButton(
+                          icon: Icon(Icons.close,
+                              color: Colors.white.withOpacity(0.35), size: 20),
+                          onPressed: () => Navigator.of(context).maybePop()),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlayerCard({
+    required int playerNum,
+    required TextEditingController nameCtrl,
+    required TextEditingController birthCtrl,
     required DateTime? birthdate,
     required void Function(DateTime) onDatePicked,
     required bool? isPresent,
     required void Function(bool) onPresentChanged,
   }) {
-    return SizedBox(
-      width: 340,
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.04),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _accent.withOpacity(0.2)),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Name
-          Text(label,
-              style: const TextStyle(
-                  fontWeight: FontWeight.w900, fontSize: 14)),
-          const SizedBox(height: 8),
-          _textField(hint: 'Enter player name', controller: nameController),
+          // Player header
+          Row(children: [
+            Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: const LinearGradient(
+                    colors: [Color(0xFF00E5A0), Color(0xFF00BFA5)]),
+                boxShadow: [BoxShadow(
+                    color: _accent.withOpacity(0.4), blurRadius: 10)],
+              ),
+              child: Center(child: Text('$playerNum',
+                  style: const TextStyle(color: Colors.black,
+                      fontWeight: FontWeight.bold, fontSize: 14))),
+            ),
+            const SizedBox(width: 10),
+            Text('PLAYER $playerNum',
+                style: const TextStyle(color: _accent, fontSize: 14,
+                    fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+          ]),
           const SizedBox(height: 16),
 
-          // Birthdate — date picker tile
-          const Text('BIRTHDATE:',
-              style: TextStyle(
-                  fontWeight: FontWeight.w900, fontSize: 14)),
+          // Name
+          _playerField(label: 'NAME', hint: 'Enter player name',
+              controller: nameCtrl, icon: Icons.person_outline_rounded),
+          const SizedBox(height: 14),
+
+          // Birthdate
+          _playerLabel('BIRTHDATE'),
           const SizedBox(height: 8),
           GestureDetector(
             onTap: () => _pickDate(
-              current:    birthdate,
-              onPicked:   onDatePicked,
-              controller: birthdateController,
-            ),
+                current: birthdate, onPicked: onDatePicked, controller: birthCtrl),
             child: Container(
-              height: 48,
+              height: 50,
               padding: const EdgeInsets.symmetric(horizontal: 14),
               decoration: BoxDecoration(
-                border: Border.all(color: const Color(0xFFAAAAAA)),
-                borderRadius: BorderRadius.circular(6),
-                color: Colors.white,
+                color: Colors.white.withOpacity(0.05),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: birthdate != null
+                      ? _accent.withOpacity(0.5)
+                      : Colors.white.withOpacity(0.15),
+                ),
               ),
-              child: Row(
-                children: [
-                  const Icon(Icons.calendar_today_rounded,
-                      size: 18, color: Color(0xFF3D1A8C)),
-                  const SizedBox(width: 10),
-                  Text(
-                    birthdate != null
-                        ? '${birthdate.year}-${birthdate.month.toString().padLeft(2, '0')}-${birthdate.day.toString().padLeft(2, '0')}'
-                        : 'Select birthdate',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: birthdate != null
-                          ? Colors.black87
-                          : Colors.black38,
-                    ),
+              child: Row(children: [
+                Icon(Icons.calendar_month_rounded,
+                    color: _accent.withOpacity(0.7), size: 20),
+                const SizedBox(width: 10),
+                Text(
+                  birthdate != null
+                      ? '${birthdate.year}-${birthdate.month.toString().padLeft(2, '0')}-${birthdate.day.toString().padLeft(2, '0')}'
+                      : 'Select birthdate',
+                  style: TextStyle(
+                    color: birthdate != null
+                        ? Colors.white
+                        : Colors.white.withOpacity(0.3),
+                    fontSize: 13,
                   ),
-                ],
-              ),
+                ),
+              ]),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
 
-          // Present?
-          const Text('PRESENT?',
-            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 14),
-          ),
-          const SizedBox(height: 4),
-          Row(
-            children: [
-              // YES
-              GestureDetector(
-                onTap: () => onPresentChanged(true),
-                child: Row(
-                  children: [
-                    Checkbox(
-                      value: isPresent == true,
-                      onChanged: (_) => onPresentChanged(true),
-                      activeColor: const Color(0xFF3D1A8C),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(3),
-                      ),
-                    ),
-                    const Text('YES',
-                        style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 16),
-              // NO
-              GestureDetector(
-                onTap: () => onPresentChanged(false),
-                child: Row(
-                  children: [
-                    Checkbox(
-                      value: isPresent == false,
-                      onChanged: (_) => onPresentChanged(false),
-                      activeColor: const Color(0xFF3D1A8C),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(3),
-                      ),
-                    ),
-                    const Text('NO',
-                        style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ],
-          ),
+          // Present
+          _playerLabel('PRESENT?'),
+          const SizedBox(height: 8),
+          Row(children: [
+            _presentChip(label: 'YES', selected: isPresent == true,
+                onTap: () => onPresentChanged(true)),
+            const SizedBox(width: 10),
+            _presentChip(label: 'NO', selected: isPresent == false,
+                onTap: () => onPresentChanged(false)),
+          ]),
         ],
       ),
     );
   }
 
-  // ── Header ───────────────────────────────────────────────────────────────────
-  Widget _buildHeader() {
-    return Container(
-      width: double.infinity,
-      color: const Color(0xFF2D0E7A),
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              RichText(
-                text: const TextSpan(
-                  children: [
-                    TextSpan(
-                        text: 'Make',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold)),
-                    TextSpan(
-                        text: 'bl',
-                        style: TextStyle(
-                            color: Color(0xFF00CFFF),
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold)),
-                    TextSpan(
-                        text: 'ock',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-              const Text('Construct Your Dreams',
-                  style: TextStyle(color: Colors.white54, fontSize: 10)),
-            ],
-          ),
-          Image.asset('assets/images/CenterLogo.png',
-              height: 80, fit: BoxFit.contain),
-          const Text('CREOTEC',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 3)),
-        ],
-      ),
-    );
-  }
+  Widget _playerLabel(String text) => Text(text,
+      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700,
+          fontSize: 11, letterSpacing: 1));
 
-  // ── Step Indicator ───────────────────────────────────────────────────────────
-  Widget _buildStepIndicator() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(4, (index) {
-        final step = index + 1;
-        final isActive = step == 4;
-        final isDone = step < 4;
-
-        return Row(
-          children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isActive || isDone
-                    ? const Color(0xFF3D1A8C)
-                    : Colors.white,
-                border:
-                    Border.all(color: const Color(0xFF3D1A8C), width: 2),
-              ),
-              child: Center(
-                child: isDone
-                    ? const Icon(Icons.check, color: Colors.white, size: 20)
-                    : Text(
-                        '$step',
-                        style: TextStyle(
-                          color: isActive
-                              ? Colors.white
-                              : const Color(0xFF3D1A8C),
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
-              ),
-            ),
-            if (step < 4)
-              Container(
-                width: 120,
-                height: 2,
-                color: isDone
-                    ? const Color(0xFF3D1A8C)
-                    : const Color(0xFFCCCCCC),
-              ),
-          ],
-        );
-      }),
-    );
-  }
-
-  // ── Helpers ──────────────────────────────────────────────────────────────────
-  Widget _fieldLabel(String text) {
-    return SizedBox(
-      width: 160,
-      child: Text(
-        text,
-        style:
-            const TextStyle(fontWeight: FontWeight.w900, fontSize: 14),
-      ),
-    );
-  }
-
-  Widget _textField({
+  Widget _playerField({
+    required String label,
     required String hint,
     required TextEditingController controller,
+    required IconData icon,
   }) {
-    return SizedBox(
-      width: 340,
-      height: 42,
-      child: TextField(
-        controller: controller,
-        decoration: InputDecoration(
-          hintText: hint,
-          hintStyle:
-              const TextStyle(color: Colors.black26, fontSize: 13),
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(6),
-            borderSide: const BorderSide(color: Color(0xFFAAAAAA)),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(6),
-            borderSide:
-                const BorderSide(color: Color(0xFF3D1A8C), width: 2),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _playerLabel(label),
+        const SizedBox(height: 6),
+        TextField(
+          controller: controller,
+          style: const TextStyle(color: Colors.white, fontSize: 13),
+          decoration: InputDecoration(
+            hintText: hint,
+            hintStyle: TextStyle(
+                color: Colors.white.withOpacity(0.25), fontSize: 12),
+            prefixIcon: Icon(icon, color: _accent.withOpacity(0.7), size: 18),
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            filled: true,
+            fillColor: Colors.white.withOpacity(0.05),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: Colors.white.withOpacity(0.15)),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: const BorderSide(color: _accent, width: 2),
+            ),
           ),
         ),
+      ],
+    );
+  }
+
+  Widget _presentChip({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        decoration: BoxDecoration(
+          gradient: selected
+              ? const LinearGradient(
+                  colors: [Color(0xFF00E5A0), Color(0xFF00BFA5)])
+              : null,
+          color: selected ? null : Colors.white.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: selected ? _accent : Colors.white.withOpacity(0.15),
+            width: selected ? 2 : 1,
+          ),
+          boxShadow: selected
+              ? [BoxShadow(color: _accent.withOpacity(0.35),
+                  blurRadius: 10, spreadRadius: 1)]
+              : [],
+        ),
+        child: Text(label,
+            style: TextStyle(
+              color: selected ? Colors.black : Colors.white.withOpacity(0.4),
+              fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 1,
+            )),
       ),
+    );
+  }
+
+  Widget _buildTeamDropdown() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          const Text('TEAM',
+              style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700,
+                  fontSize: 12, letterSpacing: 1)),
+          const Text(' *',
+              style: TextStyle(color: _accent, fontWeight: FontWeight.bold)),
+        ]),
+        const SizedBox(height: 8),
+        _isLoadingData
+            ? Container(
+                height: 52,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.white.withOpacity(0.15)),
+                ),
+                child: const Center(child: CircularProgressIndicator(
+                    strokeWidth: 2, color: _accent)),
+              )
+            : DropdownButtonFormField<int>(
+                value: _selectedTeamId,
+                dropdownColor: const Color(0xFF2D0E7A),
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                hint: Text('Select team',
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.25), fontSize: 13)),
+                icon: const Icon(Icons.keyboard_arrow_down_rounded,
+                    color: _accent),
+                isExpanded: true,
+                items: _teams.map((t) {
+                  final id = int.tryParse(t['team_id'].toString());
+                  if (id == null) return null;
+                  return DropdownMenuItem<int>(
+                    value: id,
+                    child: Text(t['team_name'] ?? '',
+                        style: const TextStyle(color: Colors.white, fontSize: 13),
+                        overflow: TextOverflow.ellipsis),
+                  );
+                }).whereType<DropdownMenuItem<int>>().toList(),
+                onChanged: (v) => setState(() => _selectedTeamId = v),
+                decoration: InputDecoration(
+                  prefixIcon: Icon(Icons.groups_rounded,
+                      color: _accent.withOpacity(0.7), size: 20),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  filled: true,
+                  fillColor: Colors.white.withOpacity(0.05),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Colors.white.withOpacity(0.15)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: _accent, width: 2),
+                  ),
+                ),
+              ),
+      ],
     );
   }
 }
