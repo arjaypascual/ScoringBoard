@@ -1,3 +1,5 @@
+// ignore_for_file: deprecated_member_use, unnecessary_underscores
+
 import 'package:flutter/material.dart';
 import 'dart:math' as math;
 import 'main.dart';
@@ -156,7 +158,9 @@ class _LandingPageState extends State<LandingPage>
 
   PageRoute _buildRoute(Widget page) {
     return PageRouteBuilder(
+      // ignore: unnecessary_underscores
       pageBuilder: (_, __, ___) => page,
+      // ignore: unnecessary_underscores
       transitionsBuilder: (_, anim, __, child) {
         return FadeTransition(
           opacity: anim,
@@ -228,7 +232,7 @@ class _LandingPageState extends State<LandingPage>
                             opacity: _btn1Opacity.value,
                             child: _NavButton(
                               label: 'REGISTRATION',
-                              subtitle: 'Register your team',
+                              subtitle: 'Register Now',
                               icon: Icons.app_registration_rounded,
                               color: const Color(0xFF00CFFF),
                               isPrimary: true,

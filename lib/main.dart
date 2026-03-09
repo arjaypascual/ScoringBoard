@@ -8,6 +8,7 @@ import 'step4_player.dart';
 import 'generate_schedule.dart';
 import 'schedule_viewer.dart';
 import 'standings.dart';
+import 'excel_import.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -35,12 +36,12 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF3D1A8C)),
         useMaterial3: true,
       ),
-      home: const LandingPage(), // ← starts at landing page
+      home: const LandingPage(),
     );
   }
 }
 
-// ── Registration Flow (launched from LandingPage → REGISTRATION button) ──────
+// ── Registration Flow ─────────────────────────────────────────────────────────
 class RegistrationFlow extends StatefulWidget {
   const RegistrationFlow({super.key});
 
@@ -49,7 +50,10 @@ class RegistrationFlow extends StatefulWidget {
 }
 
 class _RegistrationFlowState extends State<RegistrationFlow> {
-  int _currentStep = 1;
+  // 0  = choose mode (manual or excel)
+  // -1 = excel import screen
+  // 1–7 = existing manual steps
+  int _currentStep = 0;
   int? _teamId;
 
   void _goToStep(int step) => setState(() => _currentStep = step);
@@ -57,12 +61,27 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
   @override
   Widget build(BuildContext context) {
     switch (_currentStep) {
+
+      // ── Step 0: Choose registration mode ─────────────────────────────
+      case 0:
+        return _RegistrationChooser(
+          onManual: () => _goToStep(1),
+          onExcel:  () => _goToStep(-1),
+          onBack:   () => Navigator.of(context).pop(),
+        );
+
+      // ── Step -1: Excel Bulk Import ────────────────────────────────────
+      case -1:
+        return ExcelImportPage(
+          onDone: () => _goToStep(5),   // jump to Generate Schedule after import
+        );
+
       // ── Step 1: School ────────────────────────────────────────────────
       case 1:
         return Step1School(
           onSkip:       () => _goToStep(2),
           onRegistered: (_) => _goToStep(2),
-          onBack:       () => Navigator.of(context).pop(), // back to landing
+          onBack:       () => _goToStep(0),
         );
 
       // ── Step 2: Mentor ────────────────────────────────────────────────
@@ -105,7 +124,7 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
       // ── Step 6: Schedule Viewer ───────────────────────────────────────
       case 6:
         return ScheduleViewer(
-          onRegister:  () => _goToStep(1),
+          onRegister:  () => _goToStep(0),
           onStandings: () => _goToStep(7),
         );
 
@@ -120,5 +139,183 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
           body: Center(child: Text('Flow Completed')),
         );
     }
+  }
+}
+
+// ── Registration mode chooser ─────────────────────────────────────────────────
+class _RegistrationChooser extends StatelessWidget {
+  final VoidCallback onManual;
+  final VoidCallback onExcel;
+  final VoidCallback onBack;
+
+  const _RegistrationChooser({
+    required this.onManual,
+    required this.onExcel,
+    required this.onBack,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0E0630),
+      body: Column(
+        children: [
+          // ── Header ────────────────────────────────────────────────────
+          Container(
+            width: double.infinity,
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF1A0A4A)],
+              ),
+              border: Border(
+                bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5),
+              ),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+            child: Row(children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios_new,
+                    color: Color(0xFF00CFFF), size: 18),
+                onPressed: onBack,
+              ),
+              const SizedBox(width: 8),
+              const Text('REGISTRATION',
+                  style: TextStyle(color: Colors.white,
+                      fontSize: 20, fontWeight: FontWeight.w900,
+                      letterSpacing: 3)),
+            ]),
+          ),
+
+          // ── Body ──────────────────────────────────────────────────────
+          Expanded(
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text('HOW WOULD YOU LIKE TO REGISTER?',
+                      style: TextStyle(
+                          color: Colors.white54, fontSize: 13,
+                          letterSpacing: 2, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 48),
+
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _ModeCard(
+                        icon:     Icons.edit_note_rounded,
+                        title:    'MANUAL',
+                        subtitle: 'Register one team\nat a time, step by step',
+                        color:    const Color(0xFFFFD700),
+                        onTap:    onManual,
+                      ),
+                      const SizedBox(width: 32),
+                      _ModeCard(
+                        icon:     Icons.upload_file_rounded,
+                        title:    'EXCEL IMPORT',
+                        subtitle: 'Upload an Excel file to\nregister all teams at once',
+                        color:    const Color(0xFF00CFFF),
+                        onTap:    onExcel,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Mode card ─────────────────────────────────────────────────────────────────
+class _ModeCard extends StatefulWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _ModeCard({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  State<_ModeCard> createState() => _ModeCardState();
+}
+
+class _ModeCardState extends State<_ModeCard> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit:  (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          width: 220,
+          height: 220,
+          decoration: BoxDecoration(
+            color: _hovered
+                ? widget.color.withOpacity(0.1)
+                : const Color(0xFF130840),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+              color: _hovered
+                  ? widget.color
+                  : widget.color.withOpacity(0.25),
+              width: _hovered ? 2.0 : 1.5,
+            ),
+            boxShadow: _hovered
+                ? [BoxShadow(
+                    color: widget.color.withOpacity(0.25),
+                    blurRadius: 24, spreadRadius: 2)]
+                : [],
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // Icon circle
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                width: 72, height: 72,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: widget.color.withOpacity(_hovered ? 0.2 : 0.1),
+                  border: Border.all(
+                      color: widget.color.withOpacity(0.4), width: 1.5),
+                ),
+                child: Icon(widget.icon, color: widget.color, size: 32),
+              ),
+              const SizedBox(height: 20),
+              // Title
+              Text(widget.title,
+                  style: TextStyle(
+                      color: widget.color,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 2)),
+              const SizedBox(height: 8),
+              // Subtitle
+              Text(widget.subtitle,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: Colors.white.withOpacity(0.45),
+                      fontSize: 11,
+                      height: 1.5)),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

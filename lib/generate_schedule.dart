@@ -34,7 +34,8 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
   bool _lunchBreakEnabled = true;
   bool _isGenerating      = false;
 
-  static const int _maxTeamsPerArena = 15;
+  // ── Changed from 3 to 30 ──────────────────────────────────────────────────
+  static const int _maxTeamsPerArena = 30;
 
   @override
   void initState() {
@@ -322,7 +323,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                             ),
                             const SizedBox(height: 28),
 
-                            // Gradient divider
                             buildDivider(_accent),
                             const SizedBox(height: 28),
 
@@ -425,7 +425,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Column header
         Row(children: [
           const Expanded(
             child: Text('CATEGORY',
@@ -450,11 +449,9 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
         ]),
         const SizedBox(height: 4),
 
-        // Thin divider
         Container(height: 1, color: _accent.withOpacity(0.15)),
         const SizedBox(height: 14),
 
-        // Category rows
         _isLoadingData
             ? const Center(child: CircularProgressIndicator(
                 strokeWidth: 2, color: _accent))
@@ -464,6 +461,7 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                   final name    = (c['category_type'] ?? '').toString();
                   final count   = _teamCountPerCategory[id] ?? 0;
                   final warning = _arenaWarning(id);
+                  final isSoccer = name.toLowerCase().contains('soccer');
 
                   return Container(
                     margin: const EdgeInsets.only(bottom: 12),
@@ -482,7 +480,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                       children: [
                         Row(
                           children: [
-                            // Category info
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -517,19 +514,46 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
                                 ],
                               ),
                             ),
-                            // Runs spinner
-                            SizedBox(width: 90,
-                                child: Center(
-                                    child: _buildSpinner(id, isRuns: true))),
+                            // Show Single Elimination badge for Soccer instead of RUNS spinner
+                            SizedBox(
+                              width: 90,
+                              child: Center(
+                                child: isSoccer
+                                    ? Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 8, vertical: 8),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFFFF6B35).withOpacity(0.12),
+                                          borderRadius: BorderRadius.circular(8),
+                                          border: Border.all(
+                                              color: const Color(0xFFFF6B35).withOpacity(0.45)),
+                                        ),
+                                        child: const Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(Icons.emoji_events_rounded,
+                                                color: Color(0xFFFF6B35), size: 14),
+                                            SizedBox(height: 3),
+                                            Text('SINGLE\nELIM',
+                                                textAlign: TextAlign.center,
+                                                style: TextStyle(
+                                                    color: Color(0xFFFF6B35),
+                                                    fontSize: 8,
+                                                    fontWeight: FontWeight.bold,
+                                                    letterSpacing: 0.5)),
+                                          ],
+                                        ),
+                                      )
+                                    : _buildSpinner(id, isRuns: true),
+                              ),
+                            ),
                             const SizedBox(width: 10),
-                            // Arenas spinner
                             SizedBox(width: 90,
                                 child: Center(
                                     child: _buildSpinner(id, isRuns: false))),
                           ],
                         ),
 
-                        // Warning or capacity
                         if (warning != null) ...[
                           const SizedBox(height: 8),
                           Container(
@@ -599,11 +623,8 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
         Container(height: 1, color: _accent.withOpacity(0.15)),
         const SizedBox(height: 16),
 
-        // Start time
         _timeTile(label: 'START TIME', time: _startTime, isStart: true),
         const SizedBox(height: 10),
-
-        // End time
         _timeTile(label: 'END TIME', time: _endTime, isStart: false),
 
         if (timeError) ...[
@@ -626,7 +647,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
 
         const SizedBox(height: 16),
 
-        // Duration + Break
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -645,20 +665,17 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
         ),
         const SizedBox(height: 12),
 
-        // Timing preview
         _buildTimingPreview(),
         const SizedBox(height: 16),
 
         Container(height: 1, color: Colors.white.withOpacity(0.08)),
         const SizedBox(height: 14),
 
-        // Lunch break toggle
         _buildLunchToggle(),
       ],
     );
   }
 
-  // ── Time tile ──────────────────────────────────────────────────────────────
   Widget _timeTile({
     required String label,
     required TimeOfDay time,
@@ -701,7 +718,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     );
   }
 
-  // ── Number field ────────────────────────────────────────────────────────────
   Widget _buildNumberField({
     required String label,
     required String subtitle,
@@ -743,7 +759,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     );
   }
 
-  // ── Timing preview ─────────────────────────────────────────────────────────
   Widget _buildTimingPreview() {
     final duration  = int.tryParse(_durationController.text.trim()) ?? 0;
     final breakMins = int.tryParse(_intervalController.text.trim())  ?? 0;
@@ -817,7 +832,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     ]);
   }
 
-  // ── Lunch break toggle ──────────────────────────────────────────────────────
   Widget _buildLunchToggle() {
     return GestureDetector(
       onTap: () => setState(() => _lunchBreakEnabled = !_lunchBreakEnabled),
@@ -880,7 +894,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     );
   }
 
-  // ── Spinner ────────────────────────────────────────────────────────────────
   Widget _buildSpinner(int categoryId, {required bool isRuns}) {
     final value  = isRuns ? (_runsPerCategory[categoryId] ?? 2)
                           : (_arenasPerCategory[categoryId] ?? 1);
@@ -947,7 +960,6 @@ class _GenerateScheduleState extends State<GenerateSchedule> {
     );
   }
 
-  // ── Helpers ────────────────────────────────────────────────────────────────
   Future<void> _pickTime(bool isStart) async {
     final picked = await showTimePicker(
       context: context,
