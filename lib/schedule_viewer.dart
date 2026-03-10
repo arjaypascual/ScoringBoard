@@ -149,6 +149,15 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     });
   }
 
+  // ── NEW: check if every group-stage match for a category is Done ──────────
+  bool _allMatchesDone(int catId, List<Map<String, dynamic>> matches) {
+    if (matches.isEmpty) return false;
+    return matches.every((m) {
+      final matchNum = m['matchNumber'] as int? ?? 0;
+      return _getStatus(catId, matchNum) == MatchStatus.done;
+    });
+  }
+
   // ── silent background refresh ─────────────────────────────────────────────
   Future<void> _silentRefresh() async {
     try {
@@ -269,10 +278,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       String? lastSoccerEndTime;
       if (soccerCatId != null) {
         soccerTeams = await DBHelper.getTeamsByCategory(soccerCatId);
-        // Find the last schedule_end from soccer group-stage matches
         final soccerMatches = scheduleByCategory[soccerCatId] ?? [];
         if (soccerMatches.isNotEmpty) {
-          // schedule_start is stored; derive end from the raw rows
           final lastMatch = rows
               .where((r) =>
                   int.tryParse(r['category_id'].toString()) == soccerCatId)
@@ -315,8 +322,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
   }
 
-  // ── Determine bracket size based on total teams ───────────────────────────
-  // 16+ → top 16 | 8–15 → top 8 | 4–7 → top 4
   int _bracketSize(int teamCount) {
     if (teamCount >= 16) return 16;
     if (teamCount >= 8)  return 8;
@@ -324,9 +329,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     return teamCount.clamp(2, 4);
   }
 
-  // ── Assign scheduled times to every bracket match ────────────────────────
-  // Each match gets durationMinutes after the previous one (same as group stage).
-  // Starts right after the last soccer group-stage match ends.
   void _assignBracketTimes(List<List<BracketMatch>> rounds, int durationMinutes) {
     if (_lastSoccerEndTime == null) return;
     final parts = _lastSoccerEndTime!.split(':');
@@ -342,13 +344,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         match.scheduleTime = fmt(h, m);
         m += durationMinutes;
         while (m >= 60) { m -= 60; h++; }
-        // Skip lunch 12:00–13:00
         if (h == 12) { h = 13; m = 0; }
       }
     }
   }
 
-  // ── Seed bracket from top-N teams (by DB order, 1 vs N, 2 vs N-1, …) ─────
   void _seedBracketFromStandings(List<Map<String, dynamic>> matches) {
     final size  = _bracketSize(_soccerTeams.length);
     final topN  = _soccerTeams.take(size).toList();
@@ -369,7 +369,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       bracketTeams.add(BracketTeam(teamId: -(++byeN), teamName: 'BYE', isBye: true));
 
     final rounds = _buildBracketFromTeams(bracketTeams);
-    _assignBracketTimes(rounds, 10); // 10 min per bracket match
+    _assignBracketTimes(rounds, 10);
     setState(() {
       _bracketRounds = rounds;
       _bracketSeeded = true;
@@ -410,7 +410,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     _seedBracketFromStandings(matches);
   }
 
-  // ── Bracket winner propagation ─────────────────────────────────────────────
   void _setMatchResult(BracketMatch match, BracketTeam winner) {
     setState(() { match.winner = winner; _propagateWinner(match); });
   }
@@ -445,7 +444,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     setState(() { resetDownstream(match); match.winner = null; });
   }
 
-  // ── Score entry dialog ────────────────────────────────────────────────────
   void _showScoreDialog(
       String matchId, String team1Name, String team2Name,
       List<Map<String, dynamic>> allMatches) {
@@ -469,7 +467,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 blurRadius: 40, spreadRadius: 2)],
           ),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            // ── Header ──────────────────────────────────────────────────────
             Container(
               padding: const EdgeInsets.fromLTRB(20, 14, 14, 14),
               decoration: const BoxDecoration(
@@ -501,8 +498,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 ),
               ]),
             ),
-
-            // ── Score inputs ────────────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.all(20),
               child: Row(children: [
@@ -544,8 +539,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 ])),
               ]),
             ),
-
-            // ── Buttons ─────────────────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
               child: Row(children: [
@@ -625,7 +618,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  // ── PDF export ─────────────────────────────────────────────────────────────
   Future<void> _exportPdf(
       Map<String, dynamic> category,
       List<Map<String, dynamic>> matches) async {
@@ -752,11 +744,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   }
 
   // ── Soccer view: 2 sub-tabs (Schedule | Bracket) ─────────────────────────
+  // ── CHANGED: bracket tab is locked until all group-stage matches are Done ─
   Widget _buildSoccerView(
       Map<String, dynamic> category, int catId,
       List<Map<String, dynamic>> matches) {
-    final bracketSize = _bracketSize(_soccerTeams.length);
-    final canSeed = !_bracketSeeded;
+    final bracketSize  = _bracketSize(_soccerTeams.length);
+    final canSeed      = !_bracketSeeded;
+    final allDone      = _allMatchesDone(catId, matches);   // ← NEW
 
     return DefaultTabController(
       length: 2,
@@ -764,25 +758,203 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         _buildCategoryTitleBar(category, 'SOCCER', matches),
         Container(
           color: const Color(0xFF130742),
-          child: const TabBar(
-            indicatorColor: Color(0xFF00FF88),
+          child: TabBar(
+            // ── Disable bracket tab if not all matches are Done ──────────
+            onTap: (index) {
+              if (index == 1 && !allDone) {
+                // Snap back to schedule tab and show warning
+                DefaultTabController.of(context).animateTo(0);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    backgroundColor: const Color(0xFF2D0E7A),
+                    behavior: SnackBarBehavior.floating,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                    content: Row(children: const [
+                      Icon(Icons.lock, color: Color(0xFFFFD700), size: 18),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Complete all group-stage matches first.\nSet every match status to "Done" to unlock the bracket.',
+                          style: TextStyle(color: Colors.white, fontSize: 13),
+                        ),
+                      ),
+                    ]),
+                    duration: const Duration(seconds: 3),
+                  ),
+                );
+              }
+            },
+            indicatorColor: const Color(0xFF00FF88),
             indicatorWeight: 3,
-            labelColor: Color(0xFF00FF88),
+            labelColor: const Color(0xFF00FF88),
             unselectedLabelColor: Colors.white30,
-            labelStyle: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.2),
+            labelStyle: const TextStyle(
+                fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 1.2),
             tabs: [
-              Tab(icon: Icon(Icons.calendar_today, size: 16), text: 'SCHEDULE'),
-              Tab(icon: Icon(Icons.account_tree,   size: 16), text: 'BRACKET'),
+              // Schedule tab — always accessible
+              const Tab(
+                icon: Icon(Icons.calendar_today, size: 16),
+                text: 'SCHEDULE',
+              ),
+              // Bracket tab — shows lock icon when not all done
+              Tab(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      allDone ? Icons.account_tree : Icons.lock,
+                      size: 16,
+                      color: allDone
+                          ? const Color(0xFF00FF88)
+                          : Colors.white24,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'BRACKET',
+                      style: TextStyle(
+                        color: allDone ? const Color(0xFF00FF88) : Colors.white24,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                    if (!allDone) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.06),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                              color: Colors.white12, width: 1),
+                        ),
+                        child: const Text(
+                          'LOCKED',
+                          style: TextStyle(
+                              color: Colors.white24,
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 1),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             ],
           ),
         ),
         Expanded(
           child: TabBarView(children: [
             _buildSoccerScheduleTab(catId, matches, bracketSize, canSeed),
-            _buildBracketTab(matches),
+            // ── If not all done, show locked screen instead of bracket ──
+            allDone
+                ? _buildBracketTab(matches)
+                : _buildBracketLockedScreen(matches),
           ]),
         ),
       ]),
+    );
+  }
+
+  // ── NEW: Locked bracket placeholder screen ────────────────────────────────
+  Widget _buildBracketLockedScreen(List<Map<String, dynamic>> matches) {
+    final total    = matches.length;
+    final doneCount = matches.where((m) {
+      final matchNum = m['matchNumber'] as int? ?? 0;
+      return _getStatus(_soccerCategoryId ?? 0, matchNum) == MatchStatus.done;
+    }).length;
+    final remaining = total - doneCount;
+
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: const Color(0xFF1A0A4A),
+              border: Border.all(
+                  color: const Color(0xFFFFD700).withOpacity(0.3), width: 2),
+              boxShadow: [
+                BoxShadow(
+                    color: const Color(0xFFFFD700).withOpacity(0.1),
+                    blurRadius: 30,
+                    spreadRadius: 5),
+              ],
+            ),
+            child: const Icon(Icons.lock, color: Color(0xFFFFD700), size: 52),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'BRACKET LOCKED',
+            style: TextStyle(
+                color: Color(0xFFFFD700),
+                fontSize: 22,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 3),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Complete all group-stage matches to unlock.',
+            style: TextStyle(
+                color: Colors.white.withOpacity(0.45),
+                fontSize: 15),
+          ),
+          const SizedBox(height: 20),
+          // Progress indicator
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 48),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            decoration: BoxDecoration(
+              color: const Color(0xFF130742),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                  color: const Color(0xFF3D1E88).withOpacity(0.5), width: 1),
+            ),
+            child: Column(children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Matches Done',
+                      style: TextStyle(
+                          color: Colors.white.withOpacity(0.5), fontSize: 13)),
+                  Text('$doneCount / $total',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: LinearProgressIndicator(
+                  value: total > 0 ? doneCount / total : 0,
+                  minHeight: 8,
+                  backgroundColor: Colors.white.withOpacity(0.08),
+                  valueColor: const AlwaysStoppedAnimation<Color>(
+                      Color(0xFF00FF88)),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                remaining > 0
+                    ? '$remaining match${remaining > 1 ? 'es' : ''} remaining'
+                    : 'All matches complete!',
+                style: TextStyle(
+                    color: remaining > 0
+                        ? Colors.white38
+                        : const Color(0xFF00FF88),
+                    fontSize: 13),
+              ),
+            ]),
+          ),
+        ],
+      ),
     );
   }
 
@@ -793,7 +965,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       int bracketSize,
       bool canSeed) {
 
-    // Pair matches into VS rows
     final List<Map<String, dynamic>> rows = [];
     int i = 0;
     while (i < matches.length) {
@@ -821,59 +992,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       }
     }
 
-    // ── Append bracket elimination matches below group stage ─────────────────
-    if (_bracketSeeded && _bracketRounds.isNotEmpty) {
-      int nextMatchNum = (rows.isNotEmpty
-          ? (rows.last['matchNumber'] as int? ?? rows.length)
-          : 0) + 2;
-
-      // Parse last soccer end time to assign bracket match times
-      int bHour = 9, bMin = 0;
-      if (_lastSoccerEndTime != null) {
-        final p = _lastSoccerEndTime!.split(':');
-        if (p.length >= 2) {
-          bHour = int.tryParse(p[0]) ?? 9;
-          bMin  = int.tryParse(p[1]) ?? 0;
-        }
-      }
-      String nextTime() {
-        final hh = bHour.toString().padLeft(2, '0');
-        final mm = bMin.toString().padLeft(2, '0');
-        return '$hh:$mm';
-      }
-      void advanceBracketTime(int mins) {
-        bMin += mins;
-        while (bMin >= 60) { bMin -= 60; bHour++; }
-        if (bHour == 12) { bHour = 13; bMin = 0; } // skip lunch
-      }
-
-      final totalRounds = _bracketRounds.length;
-      for (int r = 0; r < _bracketRounds.length; r++) {
-        String roundLabel;
-        Color  roundColor;
-        if (r == totalRounds - 1)      { roundLabel = 'FINAL';         roundColor = const Color(0xFFFFD700); }
-        else if (r == totalRounds - 2) { roundLabel = 'SEMI-FINAL';    roundColor = const Color(0xFF00FF88); }
-        else if (r == totalRounds - 3) { roundLabel = 'QUARTER-FINAL'; roundColor = const Color(0xFF00CFFF); }
-        else                            { roundLabel = 'ROUND ${r+1}';  roundColor = const Color(0xFF7B6AAA); }
-
-        for (final bm in _bracketRounds[r]) {
-          final slotTime = nextTime();
-          advanceBracketTime(10); // 10 min per bracket match
-          rows.add({
-            'isBracket':    true,
-            'bracketMatch': bm,
-            'roundLabel':   roundLabel,
-            'roundColor':   roundColor,
-            'matchNumber':  nextMatchNum,
-            'schedule':     slotTime,
-          });
-          nextMatchNum += 2;
-        }
-      }
-    }
-
     return Column(children: [
-      // ── "Advance to Bracket" banner ──────────────────────────────────────
       if (canSeed)
         Container(
           margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
@@ -909,7 +1028,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           ]),
         ),
 
-      // ── Table header ─────────────────────────────────────────────────────
       Container(
         decoration: const BoxDecoration(
             gradient: LinearGradient(colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
@@ -924,7 +1042,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         ]),
       ),
 
-      // ── Match rows ────────────────────────────────────────────────────────
       Expanded(
         child: rows.isEmpty
             ? const Center(child: Text('No matches scheduled.',
@@ -934,188 +1051,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 itemBuilder: (context, idx) {
                   final row = rows[idx];
 
-                  // ── Bracket elimination row ─────────────────────────────
-                  if (row['isBracket'] == true) {
-                    final bm         = row['bracketMatch'] as BracketMatch;
-                    final matchNum   = row['matchNumber']  as int;
-                    final roundLabel = row['roundLabel']   as String;
-                    final roundColor = row['roundColor']   as Color;
-                    final slotTime   = row['schedule']     as String; // e.g. "11:06"
-                    final isEven     = idx % 2 == 0;
-                    final t1Name     = bm.team1.teamName;
-                    final t2Name     = bm.team2.teamName;
-                    final t1Wins     = bm.winner?.teamId == bm.team1.teamId && bm.winner != null;
-                    final t2Wins     = bm.winner?.teamId == bm.team2.teamId && bm.winner != null;
-
-                    // Format team ID as C{id}R (only for real teams, not TBD/BYE)
-                    final t1Id = (!bm.team1.isBye && t1Name != 'TBD' && bm.team1.teamId > 0)
-                        ? 'C${bm.team1.teamId}R' : '';
-                    final t2Id = (!bm.team2.isBye && t2Name != 'TBD' && bm.team2.teamId > 0)
-                        ? 'C${bm.team2.teamId}R' : '';
-
-                    // Compute end time string e.g. "11:06 - 11:16"
-                    String timeRange = slotTime;
-                    if (slotTime.isNotEmpty) {
-                      final tp = slotTime.split(':');
-                      if (tp.length >= 2) {
-                        int eh = int.tryParse(tp[0]) ?? 0;
-                        int em = (int.tryParse(tp[1]) ?? 0) + 10;
-                        while (em >= 60) { em -= 60; eh++; }
-                        timeRange = '$slotTime - ${eh.toString().padLeft(2,'0')}:${em.toString().padLeft(2,'0')}';
-                      }
-                    }
-
-                    return Container(
-                      decoration: BoxDecoration(
-                        color: isEven ? const Color(0xFF160C40) : const Color(0xFF100830),
-                        border: Border(
-                          bottom: BorderSide(color: const Color(0xFF1A1050), width: 1),
-                          left:   BorderSide(color: roundColor.withOpacity(0.6), width: 3),
-                        ),
-                      ),
-                      child: IntrinsicHeight(
-                        child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                          // #
-                          Expanded(flex: 1, child: Center(
-                            child: Text('$matchNum',
-                                style: TextStyle(color: Colors.white.withOpacity(0.4),
-                                    fontWeight: FontWeight.bold, fontSize: 15)),
-                          )),
-                          // Time range + Round badge
-                          Expanded(flex: 2, child: Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (timeRange.isNotEmpty)
-                                  Text(timeRange,
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(
-                                          color: Colors.white.withOpacity(0.7),
-                                          fontSize: 12, fontWeight: FontWeight.bold)),
-                                const SizedBox(height: 4),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: roundColor.withOpacity(0.1),
-                                    borderRadius: BorderRadius.circular(6),
-                                    border: Border.all(color: roundColor.withOpacity(0.4)),
-                                  ),
-                                  child: Text(roundLabel,
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(color: roundColor,
-                                          fontSize: 9, fontWeight: FontWeight.bold,
-                                          letterSpacing: 1.0)),
-                                ),
-                              ],
-                            ),
-                          )),
-                          // Home (team1)
-                          Expanded(flex: 4, child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                if (t1Id.isNotEmpty)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF00CFFF).withOpacity(0.15),
-                                      borderRadius: BorderRadius.circular(4),
-                                      border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.5), width: 1),
-                                    ),
-                                    child: Text(t1Id,
-                                        style: const TextStyle(color: Color(0xFF00CFFF),
-                                            fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
-                                  ),
-                                const SizedBox(height: 3),
-                                Text(t1Name,
-                                    textAlign: TextAlign.right,
-                                    maxLines: 2, overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                        color: t1Wins ? const Color(0xFF00FF88)
-                                            : t1Name == 'TBD' || bm.team1.isBye
-                                                ? Colors.white24 : Colors.white,
-                                        fontSize: 16,
-                                        fontWeight: t1Wins ? FontWeight.bold : FontWeight.w700)),
-                              ],
-                            ),
-                          )),
-                          // VS divider
-                          Expanded(flex: 2, child: Center(
-                            child: bm.winner != null
-                                ? Text('${bm.winner!.teamName == t1Name ? "✓" : ""}  –  ${bm.winner!.teamName == t2Name ? "✓" : ""}',
-                                    style: const TextStyle(color: Color(0xFF00FF88),
-                                        fontWeight: FontWeight.bold, fontSize: 16))
-                                : Text('VS',
-                                    style: TextStyle(
-                                        color: Colors.white.withOpacity(0.2),
-                                        fontWeight: FontWeight.w900, fontSize: 14,
-                                        fontStyle: FontStyle.italic)),
-                          )),
-                          // Away (team2)
-                          Expanded(flex: 4, child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                if (t2Id.isNotEmpty)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF00CFFF).withOpacity(0.15),
-                                      borderRadius: BorderRadius.circular(4),
-                                      border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.5), width: 1),
-                                    ),
-                                    child: Text(t2Id,
-                                        style: const TextStyle(color: Color(0xFF00CFFF),
-                                            fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
-                                  ),
-                                const SizedBox(height: 3),
-                                Text(t2Name,
-                                    maxLines: 2, overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                        color: t2Wins ? const Color(0xFF00FF88)
-                                            : t2Name == 'TBD' || bm.team2.isBye
-                                                ? Colors.white24 : Colors.white,
-                                        fontSize: 16,
-                                        fontWeight: t2Wins ? FontWeight.bold : FontWeight.w700)),
-                              ],
-                            ),
-                          )),
-                          // Status / Winner indicator
-                          Expanded(flex: 2, child: Center(
-                            child: bm.winner != null
-                                ? Row(mainAxisSize: MainAxisSize.min, children: [
-                                    const Icon(Icons.emoji_events,
-                                        color: Color(0xFFFFD700), size: 16),
-                                    const SizedBox(width: 4),
-                                    Flexible(child: Text(bm.winner!.teamName,
-                                        maxLines: 1, overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                            color: Color(0xFFFFD700),
-                                            fontSize: 12, fontWeight: FontWeight.bold))),
-                                  ])
-                                : Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                                    decoration: BoxDecoration(
-                                      color: Colors.white.withOpacity(0.05),
-                                      borderRadius: BorderRadius.circular(20),
-                                      border: Border.all(color: Colors.white24, width: 1.5),
-                                    ),
-                                    child: const Text('TBD',
-                                        textAlign: TextAlign.center,
-                                        style: TextStyle(color: Colors.white38,
-                                            fontWeight: FontWeight.bold, fontSize: 12)),
-                                  ),
-                          )),
-                        ]),
-                      ),
-                    );
-                  }
-
-                  // ── Normal group-stage row ──────────────────────────────
+                  // ── Group-stage row ────────────────────────────────────
                   final matchId  = row['match_id'].toString();
                   final matchNum = row['matchNumber'] as int;
                   final schedule = row['schedule']    as String;
@@ -1152,20 +1088,17 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          // #
                           Expanded(flex: 1, child: Center(
                             child: Text('$matchNum',
                                 style: TextStyle(
                                     color: Colors.white.withOpacity(0.4),
                                     fontWeight: FontWeight.bold, fontSize: 16)),
                           )),
-                          // Time
                           Expanded(flex: 2, child: Center(
                             child: Text(schedule,
                                 style: TextStyle(
                                     color: Colors.white.withOpacity(0.55), fontSize: 15)),
                           )),
-                          // Home team
                           Expanded(flex: 4, child: Padding(
                             padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
                             child: Column(
@@ -1201,7 +1134,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                               ],
                             ),
                           )),
-                          // Score cell (tap to enter)
                           Expanded(flex: 2, child: Center(
                             child: GestureDetector(
                               onTap: bothReal
@@ -1250,7 +1182,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                               ),
                             ),
                           )),
-                          // Away team
                           Expanded(flex: 4, child: Padding(
                             padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
                             child: Column(
@@ -1285,7 +1216,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                               ],
                             ),
                           )),
-                          // Status
                           Expanded(flex: 2, child: Center(
                             child: GestureDetector(
                               onTap: () => _cycleStatus(catId, matchNum),
@@ -1355,7 +1285,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     final bracketSize = _bracketRounds[0].length * 2;
 
     return Column(children: [
-      // Info bar
       Container(
         color: const Color(0xFF0D0628),
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
@@ -1399,8 +1328,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           ),
         ]),
       ),
-      // Round labels row removed — each card has its own footer label
-      // Canvas — always fits to available space, no scrolling
       Expanded(
         child: LayoutBuilder(builder: (context, constraints) {
           final availW        = constraints.maxWidth  - 40;
@@ -1408,11 +1335,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           final numRounds     = _bracketRounds.length;
           final firstRoundCnt = _bracketRounds[0].length;
 
-          // Gap fractions
           const double kGapWFrac = 0.08;
           const double kGapHFrac = 0.12;
 
-          // Derive card size purely from available space so it always fits
           final double gapW   = availW * kGapWFrac / numRounds;
           final double matchW = (availW - gapW * (numRounds - 1)) / numRounds;
           final double gapH   = availH * kGapHFrac / firstRoundCnt;
@@ -1437,7 +1362,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     ]);
   }
 
-  // ── Bracket winner dialog ──────────────────────────────────────────────────
   void _showMatchDialog(BracketMatch match) {
     final bool t1Real = !match.team1.isBye && match.team1.teamName != 'TBD';
     final bool t2Real = !match.team2.isBye && match.team2.teamName != 'TBD';
@@ -1608,7 +1532,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  // ── Non-soccer category view ───────────────────────────────────────────────
   Widget _buildCategoryView(
       Map<String, dynamic> category, int catId,
       List<Map<String, dynamic>> matches) {
@@ -1883,7 +1806,6 @@ class _BracketCanvas extends StatelessWidget {
         children: [
           _MatchCard(match: match, onTap: () => onMatchTap(match), cardH: matchH),
           const SizedBox(height: 4),
-          // ── Round footer label ────────────────────────────────────────
           Container(
             height: footerH,
             width: matchW,
