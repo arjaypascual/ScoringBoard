@@ -24,11 +24,9 @@ class _LandingPageState extends State<LandingPage>
   late Animation<double> _logoOpacity;
   late Animation<double> _btn1Offset;
   late Animation<double> _btn2Offset;
-  late Animation<double> _btn3Offset;
   late Animation<double> _btn4Offset;
   late Animation<double> _btn1Opacity;
   late Animation<double> _btn2Opacity;
-  late Animation<double> _btn3Opacity;
   late Animation<double> _btn4Opacity;
 
   @override
@@ -70,11 +68,6 @@ class _LandingPageState extends State<LandingPage>
           parent: _buttonsController,
           curve: const Interval(0.2, 0.75, curve: Curves.easeOutCubic)),
     );
-    _btn3Offset = Tween<double>(begin: 60.0, end: 0.0).animate(
-      CurvedAnimation(
-          parent: _buttonsController,
-          curve: const Interval(0.4, 0.9, curve: Curves.easeOutCubic)),
-    );
     _btn4Offset = Tween<double>(begin: 60.0, end: 0.0).animate(
       CurvedAnimation(
           parent: _buttonsController,
@@ -89,11 +82,6 @@ class _LandingPageState extends State<LandingPage>
       CurvedAnimation(
           parent: _buttonsController,
           curve: const Interval(0.2, 0.65, curve: Curves.easeIn)),
-    );
-    _btn3Opacity = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-          parent: _buttonsController,
-          curve: const Interval(0.4, 0.8, curve: Curves.easeIn)),
     );
     _btn4Opacity = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
@@ -158,9 +146,7 @@ class _LandingPageState extends State<LandingPage>
 
   PageRoute _buildRoute(Widget page) {
     return PageRouteBuilder(
-      // ignore: unnecessary_underscores
       pageBuilder: (_, __, ___) => page,
-      // ignore: unnecessary_underscores
       transitionsBuilder: (_, anim, __, child) {
         return FadeTransition(
           opacity: anim,
@@ -194,17 +180,37 @@ class _LandingPageState extends State<LandingPage>
           SafeArea(
             child: Column(
               children: [
-                // Header bar
-                _buildTopBar(),
+                // ── Sponsor logos row (Makeblock left, Creotec right) ──
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Image.asset(
+                        'assets/images/MakeblockLogo.png',
+                        height: 44,
+                        fit: BoxFit.contain,
+                      ),
+                      Image.asset(
+                        'assets/images/CreotecLogo.png',
+                        height: 44,
+                        fit: BoxFit.contain,
+                      ),
+                    ],
+                  ),
+                ),
 
                 Expanded(
                   child: Center(
                     child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 480),
+                      constraints: const BoxConstraints(maxWidth: 540),
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          // Logo
+                          const SizedBox(height: 12),
+
+                          // ── Main Philippine Robotics Cup logo ──
                           AnimatedBuilder(
                             animation: _logoController,
                             builder: (_, __) => Opacity(
@@ -216,77 +222,75 @@ class _LandingPageState extends State<LandingPage>
                             ),
                           ),
 
-                          const SizedBox(height: 12), // reduced from 16
 
-                          
-                          const SizedBox(height: 36), // reduced from 56
+                          const SizedBox(height: 28),
 
                           // Buttons
                           AnimatedBuilder(
                             animation: _buttonsController,
                             builder: (_, __) => Column(
                               children: [
-                          // ── REGISTRATION (Primary - largest, filled) ──
-                          _animatedButton(
-                            offset: _btn1Offset.value,
-                            opacity: _btn1Opacity.value,
-                            child: _NavButton(
-                              label: 'REGISTRATION',
-                              subtitle: 'Register Now',
-                              icon: Icons.app_registration_rounded,
-                              color: const Color(0xFF00CFFF),
-                              isPrimary: true,
-                              onTap: _goToRegistration,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-
-                          // ── SCHEDULE + STANDINGS side by side ──
-                          _animatedButton(
-                            offset: _btn2Offset.value,
-                            opacity: _btn2Opacity.value,
-                            child: Row(
-                              children: [
-                                Expanded(
+                                // ── REGISTRATION (Primary - largest, filled) ──
+                                _animatedButton(
+                                  offset: _btn1Offset.value,
+                                  opacity: _btn1Opacity.value,
                                   child: _NavButton(
-                                    label: 'SCHEDULE',
-                                    subtitle: 'View match schedule',
-                                    icon: Icons.calendar_month_rounded,
-                                    color: const Color(0xFF967BB6),
-                                    isPrimary: false,
-                                    onTap: _goToSchedule,
+                                    label: 'REGISTRATION',
+                                    subtitle: 'Register Now',
+                                    icon: Icons.app_registration_rounded,
+                                    color: const Color(0xFF00CFFF),
+                                    isPrimary: true,
+                                    onTap: _goToRegistration,
                                   ),
                                 ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: _NavButton(
-                                    label: 'STANDINGS',
-                                    subtitle: 'View leaderboard',
-                                    icon: Icons.emoji_events_rounded,
-                                    color: const Color(0xFFFFD700),
-                                    isPrimary: false,
-                                    onTap: _goToStandings,
+                                const SizedBox(height: 12),
+
+                                // ── SCHEDULE + STANDINGS side by side ──
+                                _animatedButton(
+                                  offset: _btn2Offset.value,
+                                  opacity: _btn2Opacity.value,
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: _NavButton(
+                                          label: 'SCHEDULE',
+                                          subtitle: 'View match schedule',
+                                          icon: Icons.calendar_month_rounded,
+                                          color: const Color(0xFF967BB6),
+                                          isPrimary: false,
+                                          onTap: _goToSchedule,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: _NavButton(
+                                          label: 'STANDINGS',
+                                          subtitle: 'View leaderboard',
+                                          icon: Icons.emoji_events_rounded,
+                                          color: const Color(0xFFFFD700),
+                                          isPrimary: false,
+                                          onTap: _goToStandings,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 12),
+                                const SizedBox(height: 12),
 
-                          // ── TEAMS & PLAYERS (smallest, tertiary) ──
-                          _animatedButton(
-                            offset: _btn4Offset.value,
-                            opacity: _btn4Opacity.value,
-                            child: _NavButton(
-                              label: 'TEAMS & PLAYERS',
-                              subtitle: 'Browse registered teams',
-                              icon: Icons.groups_rounded,
-                              color: const Color(0xFF00E5A0),
-                              isPrimary: false,
-                              isTertiary: true,
-                              onTap: _goToTeams,
-                            ),
-                          ),
+                                // ── TEAMS & PLAYERS (smallest, tertiary) ──
+                                _animatedButton(
+                                  offset: _btn4Offset.value,
+                                  opacity: _btn4Opacity.value,
+                                  child: _NavButton(
+                                    label: 'TEAMS & PLAYERS',
+                                    subtitle: 'Browse registered teams',
+                                    icon: Icons.groups_rounded,
+                                    color: const Color(0xFF00E5A0),
+                                    isPrimary: false,
+                                    isTertiary: true,
+                                    onTap: _goToTeams,
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -343,173 +347,6 @@ class _LandingPageState extends State<LandingPage>
     );
   }
 
-  // ── Top bar ──────────────────────────────────────────────────────────────
-  Widget _buildTopBar() {
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFF1A0550),
-            Color(0xFF2D0E7A),
-            Color(0xFF1A0A4A),
-          ],
-        ),
-        border: const Border(
-          bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF00CFFF).withOpacity(0.12),
-            blurRadius: 16,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 10),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          // ── LEFT: Makeblock badge ──────────────────────────────────
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                  color: const Color(0xFF00CFFF).withOpacity(0.35), width: 1.5),
-              gradient: LinearGradient(
-                colors: [
-                  const Color(0xFF00CFFF).withOpacity(0.12),
-                  const Color(0xFF00CFFF).withOpacity(0.04),
-                ],
-              ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: const BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Color(0xFF00CFFF),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    RichText(
-                      text: const TextSpan(children: [
-                        TextSpan(
-                            text: 'Make',
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 0.5)),
-                        TextSpan(
-                            text: 'bl',
-                            style: TextStyle(
-                                color: Color(0xFF00CFFF),
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold)),
-                        TextSpan(
-                            text: 'ock',
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold)),
-                      ]),
-                    ),
-                    const Text('Construct Your Dreams',
-                        style: TextStyle(
-                            color: Colors.white38,
-                            fontSize: 9,
-                            letterSpacing: 1)),
-                  ],
-                ),
-              ],
-            ),
-          ),
-
-          // ── CENTER: CenterLogo with glow ──────────────────────────
-          Container(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF7B2FFF).withOpacity(0.35),
-                  blurRadius: 24,
-                  spreadRadius: 4,
-                ),
-                BoxShadow(
-                  color: const Color(0xFF00CFFF).withOpacity(0.15),
-                  blurRadius: 16,
-                  spreadRadius: 2,
-                ),
-              ],
-            ),
-            child: Image.asset(
-              'assets/images/CenterLogo.png',
-              height: 70,
-              fit: BoxFit.contain,
-            ),
-          ),
-
-          // ── RIGHT: CREOTEC badge (logo style) ─────────────────────
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                  color: const Color(0xFFFFD700).withOpacity(0.30), width: 1.5),
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  const Color(0xFFFFD700).withOpacity(0.10),
-                  const Color(0xFFFFD700).withOpacity(0.03),
-                ],
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                // Main bold logo text — matches the thick CREOTEC wordmark
-                const Text(
-                  'CREOTEC',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 22,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 4,
-                    height: 1.0,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                // Spaced subtitle — matches "PHILIPPINES, INC." style
-                Text(
-                  'P H I L I P P I N E S ,  I N C .',
-                  style: TextStyle(
-                    color: const Color(0xFFFFD700).withOpacity(0.75),
-                    fontSize: 8,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 2.5,
-                    height: 1.0,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   // ── Logo ─────────────────────────────────────────────────────────────────
   Widget _buildLogo() {
@@ -541,7 +378,7 @@ class _LandingPageState extends State<LandingPage>
   // ── Footer ───────────────────────────────────────────────────────────────
   Widget _buildFooter() {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 16), // reduced from 20
+      padding: const EdgeInsets.only(bottom: 16),
       child: Text(
         '© 2025 RoboVenture • Powered by Creotec',
         style: TextStyle(
@@ -622,7 +459,6 @@ class _NavButtonState extends State<_NavButton>
 
   @override
   Widget build(BuildContext context) {
-    // Height varies by importance
     final double height = widget.isPrimary
         ? 76
         : widget.isTertiary
@@ -650,7 +486,6 @@ class _NavButtonState extends State<_NavButton>
                 height: height,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(widget.isPrimary ? 16 : 12),
-                  // Primary: fully filled gradient; others: subtle fill
                   gradient: widget.isPrimary
                       ? LinearGradient(
                           begin: Alignment.topLeft,
@@ -700,7 +535,6 @@ class _NavButtonState extends State<_NavButton>
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    // Icon container — filled circle for primary
                     if (widget.isPrimary)
                       Container(
                         width: 40,

@@ -7,10 +7,9 @@ class DBHelper {
   static const int    _port         = 3306;
   static const String _userName     = "root";
   static const String _password     = "root";
-  static const String _databaseName = "roboventurecompetitiondb";
+  static const String _databaseName = "roboventuredb";
 
   // ── MIGRATIONS ───────────────────────────────────────────────────────────
-  // Safe to call on every app start — adds arena_number if missing.
   static Future<void> runMigrations() async {
     final conn = await getConnection();
     try {
@@ -20,7 +19,6 @@ class DBHelper {
       """);
       print("✅ Migration: arena_number column added.");
     } catch (_) {
-      // Column already exists — safe to ignore
       print("ℹ️  Migration: arena_number already present.");
     }
   }
@@ -57,7 +55,6 @@ class DBHelper {
   }
 
   // ── SCHOOLS ───────────────────────────────────────────────────────────────
-  // Used in: Step 1
 
   static Future<List<Map<String, dynamic>>> getSchools() async {
     final conn = await getConnection();
@@ -68,7 +65,6 @@ class DBHelper {
   }
 
   // ── CATEGORIES ────────────────────────────────────────────────────────────
-  // Used in: Step 3, Generate Schedule, Schedule Viewer, Standings
 
   static Future<List<Map<String, dynamic>>> getCategories() async {
     final conn = await getConnection();
@@ -81,8 +77,8 @@ class DBHelper {
   static Future<void> seedCategories() async {
     final conn = await getConnection();
     const categories = [
-      'Aspiring Makers',
-      'Emerging Innovators',
+      'Aspiring Makers (mBot 1)',
+      'Emerging Innovators (mBot 2)',
       'Navigation',
       'Soccer',
     ];
@@ -96,7 +92,6 @@ class DBHelper {
   }
 
   // ── TEAMS ─────────────────────────────────────────────────────────────────
-  // Used in: Step 3, Step 4, Generate Schedule, Standings
 
   static Future<List<Map<String, dynamic>>> getTeams() async {
     final conn = await getConnection();
@@ -127,15 +122,17 @@ class DBHelper {
   }
 
   // ── SCHEDULE ──────────────────────────────────────────────────────────────
-  // Used in: Generate Schedule, Schedule Viewer
 
-  // Wipes all existing schedule data in correct FK order before regenerating
   static Future<void> clearSchedule() async {
     final conn = await getConnection();
     await conn.execute("DELETE FROM tbl_teamschedule");
     await conn.execute("DELETE FROM tbl_match");
     await conn.execute("DELETE FROM tbl_schedule");
-    print("✅ Schedule cleared.");
+    // ✅ Reset AUTO_INCREMENT so match IDs start from 1 again
+    await conn.execute("ALTER TABLE tbl_teamschedule AUTO_INCREMENT = 1");
+    await conn.execute("ALTER TABLE tbl_match AUTO_INCREMENT = 1");
+    await conn.execute("ALTER TABLE tbl_schedule AUTO_INCREMENT = 1");
+    print("✅ Schedule cleared and IDs reset.");
   }
 
   static Future<int> insertSchedule({
@@ -179,8 +176,7 @@ class DBHelper {
   }
 
   // ── ROUNDS ────────────────────────────────────────────────────────────────
-  // Ensures tbl_round has enough rows for the max runs requested.
-  // Safe to call repeatedly — uses INSERT IGNORE.
+
   static Future<void> seedRounds(int maxRounds) async {
     final conn = await getConnection();
     for (int i = 1; i <= maxRounds; i++) {
@@ -230,57 +226,59 @@ class DBHelper {
     );
 
     // ── Parse start / end times ───────────────────────────────────────────────
-    final startParts = startTime.split(':');
-    int hour   = int.parse(startParts[0]);
-    int minute = int.parse(startParts[1]);
+    final startParts  = startTime.split(':');
+    final startHourBase   = int.parse(startParts[0]);
+    final startMinuteBase = int.parse(startParts[1]);
 
-    final endParts  = endTime.split(':');
-    final endLimitH = int.parse(endParts[0]);
-    final endLimitM = int.parse(endParts[1]);
-    int endLimitMinutes = endLimitH * 60 + endLimitM;
+    final endParts      = endTime.split(':');
+    final endLimitH     = int.parse(endParts[0]);
+    final endLimitM     = int.parse(endParts[1]);
+    final endLimitMinutes = endLimitH * 60 + endLimitM;
 
-    // ── Helper: current time in minutes ──────────────────────────────────────
-    int currentMinutes() => hour * 60 + minute;
-
-    // ── Helper: skip lunch break 12:00–13:00 ─────────────────────────────────
-    void skipLunch() {
-      if (lunchBreak && hour == 12) {
-        hour   = 13;
-        minute = 0;
-      }
-    }
-
-    void advanceTime(int minutes) {
-      minute += minutes;
-      while (minute >= 60) { minute -= 60; hour++; }
-      skipLunch();
-    }
-
-    // Skip lunch if start time is in break
-    skipLunch();
-
-    // ── Schedule by category ─────────────────────────────────────────────────
+    // ── Schedule each category — ALL reset to startTime ──────────────────────
     for (final entry in runsPerCategory.entries) {
       final categoryId = entry.key;
       final runs       = entry.value;
-      final arenas     = arenasPerCategory[categoryId] ?? 1;
-
       final teams = await getTeamsByCategory(categoryId);
       if (teams.isEmpty) continue;
 
+      // ✅ Reset time to startTime for EVERY category
+      int hour   = startHourBase;
+      int minute = startMinuteBase;
+
+      // ── Helper: current time in minutes ────────────────────────────────────
+      int currentMinutes() => hour * 60 + minute;
+
+      // ── Helper: skip lunch break 12:00–13:00 ───────────────────────────────
+      void skipLunch() {
+        if (lunchBreak && hour == 12) {
+          hour   = 13;
+          minute = 0;
+        }
+      }
+
+      void advanceTime(int minutes) {
+        minute += minutes;
+        while (minute >= 60) { minute -= 60; hour++; }
+        skipLunch();
+      }
+
+      // Skip lunch if category starts in lunch window
+      skipLunch();
+
       for (int run = 0; run < runs; run++) {
+        // ✅ Pair teams: [0 vs 1], [2 vs 3], [4 vs 5]...
+        // If odd number of teams, last team gets a BYE (paired alone)
         int teamIndex = 0;
         while (teamIndex < teams.length) {
-          // ── Stop if current slot would exceed end time ──────────────────
           if (currentMinutes() + durationMinutes > endLimitMinutes) {
-            print("⚠️  End time reached — remaining slots not scheduled.");
-            return;
+            print("⚠️  End time reached for category $categoryId — remaining slots not scheduled.");
+            break;
           }
 
-          final batchEnd = (teamIndex + arenas) < teams.length
-              ? teamIndex + arenas
-              : teams.length;
-          final batch = teams.sublist(teamIndex, batchEnd);
+          // Grab up to 2 teams per match slot (1 per arena side)
+          final team1 = teams[teamIndex];
+          final team2 = (teamIndex + 1) < teams.length ? teams[teamIndex + 1] : null;
 
           final startHH  = hour.toString().padLeft(2, '0');
           final startMM  = minute.toString().padLeft(2, '0');
@@ -296,29 +294,38 @@ class DBHelper {
               startTime: startStr, endTime: endStr);
           final matchId = await insertMatch(scheduleId);
 
-          for (int ai = 0; ai < batch.length; ai++) {
-            final team   = batch[ai];
-            final teamId = int.parse(team['team_id'].toString());
+          // Insert team1 as arena 1
+          await insertTeamSchedule(
+            matchId:     matchId,
+            roundId:     run + 1,
+            teamId:      int.parse(team1['team_id'].toString()),
+            refereeId:   defaultRefereeId,
+            arenaNumber: 1,
+          );
+
+          // Insert team2 as arena 2 only if it exists (no blank slot)
+          if (team2 != null) {
             await insertTeamSchedule(
               matchId:     matchId,
               roundId:     run + 1,
-              teamId:      teamId,
+              teamId:      int.parse(team2['team_id'].toString()),
               refereeId:   defaultRefereeId,
-              arenaNumber: ai + 1,
+              arenaNumber: 2,
             );
           }
 
           advanceTime(durationMinutes + intervalMinutes);
-          teamIndex += arenas;
+          teamIndex += 2; // always advance by 2 (pair per match)
         }
       }
+
+      print("✅ Category $categoryId scheduled.");
     }
 
     print("✅ Schedule generated successfully!");
   }
 
   // ── SCORES ────────────────────────────────────────────────────────────────
-  // Used in: Standings
 
   static Future<List<Map<String, dynamic>>> getScoresByCategory(
       int categoryId) async {
