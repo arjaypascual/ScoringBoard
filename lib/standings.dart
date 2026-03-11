@@ -63,14 +63,12 @@ class _StandingsState extends State<Standings>
 
       if (signature != _lastDataSignature) {
         _lastDataSignature = signature;
-        await _loadData(initial: false); // silent — no spinner, no blink
+        await _loadData(initial: false);
       }
     } catch (_) {}
   }
 
   // ── Load data ─────────────────────────────────────────────────────────────
-  // initial: true  → show loading spinner (first load only)
-  // initial: false → update data silently, no spinner, no blink
   Future<void> _loadData({bool initial = false}) async {
     if (initial) {
       setState(() => _isLoading = true);
@@ -83,9 +81,6 @@ class _StandingsState extends State<Standings>
       for (final cat in categories) {
         final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
         final rows  = await DBHelper.getScoresByCategory(catId);
-
-        // Update signature (use all categories combined)
-        // Done after loop below via full rows
 
         final Map<int, Map<String, dynamic>> teamMap = {};
         for (final row in rows) {
@@ -155,7 +150,6 @@ class _StandingsState extends State<Standings>
         standingsByCategory[catId] = standings;
       }
 
-      // Preserve current tab index before rebuilding controller
       final previousTabIndex = _tabController?.index ?? 0;
 
       _tabController?.dispose();
@@ -165,7 +159,6 @@ class _StandingsState extends State<Standings>
         initialIndex: previousTabIndex.clamp(0, (categories.length - 1).clamp(0, 9999)),
       );
 
-      // Single setState — no intermediate _isLoading blink
       setState(() {
         _categories          = categories;
         _standingsByCategory = standingsByCategory;
@@ -284,7 +277,6 @@ class _StandingsState extends State<Standings>
                   letterSpacing: 2,
                 ),
               ),
-              // Live indicator + Teams + Back buttons (same pattern as ScheduleViewer)
               Row(
                 children: [
                   _buildLiveIndicator(),
@@ -306,7 +298,7 @@ class _StandingsState extends State<Standings>
                     tooltip: 'Back to Homepage',
                     icon: const Icon(Icons.arrow_back_ios_new,
                         color: Color(0xFF00CFFF)),
-                    onPressed: widget.onBack, // ← uses callback, same as ScheduleViewer
+                    onPressed: widget.onBack,
                   ),
                 ],
               ),
@@ -325,7 +317,11 @@ class _StandingsState extends State<Standings>
               _headerCell('TEAM NAME:', flex: 3),
               ...List.generate(
                 maxRounds,
-                (i) => _headerCell(_roundLabel(i + 1), flex: 2, center: true),
+                (i) => _headerCell(
+                  _roundLabel(i + 1, categoryName),
+                  flex: 2,
+                  center: true,
+                ),
               ),
               _headerCell('FINAL SCORE', flex: 2, center: true),
             ],
@@ -445,12 +441,15 @@ class _StandingsState extends State<Standings>
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  String _roundLabel(int round) {
+  /// Uses "MATCH" for Soccer categories, "RUN" for everything else.
+  String _roundLabel(int round, String categoryName) {
+    final isSoccer = categoryName.toLowerCase().contains('soccer');
+    final word     = isSoccer ? 'MATCH' : 'RUN';
     switch (round) {
-      case 1:  return 'FIRST\nMATCH';
-      case 2:  return 'SECOND\nMATCH';
-      case 3:  return 'THIRD\nMATCH';
-      default: return 'MATCH $round';
+      case 1:  return 'FIRST\n$word';
+      case 2:  return 'SECOND\n$word';
+      case 3:  return 'THIRD\n$word';
+      default: return '$word $round';
     }
   }
 

@@ -46,14 +46,14 @@ class _Step3TeamState extends State<Step3Team> {
 
       final seenCat = <int>{};
       final uniqueCat = categories.where((c) {
-        final id = int.tryParse(c['category_id'].toString() ?? '');
+        final id = int.tryParse(c['category_id'].toString());
         if (id == null || id == 0 || !seenCat.add(id)) return false;
         return true;
       }).toList();
 
       final seenMen = <int>{};
       final uniqueMen = mentors.where((m) {
-        final id = int.tryParse(m['mentor_id'].toString() ?? '');
+        final id = int.tryParse(m['mentor_id'].toString());
         if (id == null || id == 0 || !seenMen.add(id)) return false;
         return true;
       }).toList();

@@ -60,7 +60,6 @@ class _Step1SchoolState extends State<Step1School> {
     try {
       final conn = await DBHelper.getConnection();
 
-      // ── Duplicate check ──────────────────────────────────────────
       final checkResult = await conn.execute(
         "SELECT COUNT(*) as cnt FROM tbl_school WHERE school_name = :name",
         {"name": fullName},
@@ -85,7 +84,6 @@ class _Step1SchoolState extends State<Step1School> {
         return;
       }
 
-      // ── Insert ───────────────────────────────────────────────────
       await conn.execute(
         "INSERT INTO tbl_school (school_name, school_region) VALUES (:name, :region)",
         {"name": fullName, "region": _selectedRegion},
@@ -182,7 +180,6 @@ class _Step1SchoolState extends State<Step1School> {
                             ),
                             const SizedBox(height: 28),
 
-                            // Gradient divider
                             Container(
                               height: 1,
                               decoration: BoxDecoration(
@@ -195,7 +192,6 @@ class _Step1SchoolState extends State<Step1School> {
                             ),
                             const SizedBox(height: 24),
 
-                            // School Name
                             _buildField(
                               label: 'SCHOOL NAME',
                               hint: 'Enter school name',
@@ -205,7 +201,6 @@ class _Step1SchoolState extends State<Step1School> {
                             ),
                             const SizedBox(height: 18),
 
-                            // Campus
                             _buildField(
                               label: 'CAMPUS',
                               hint: 'e.g. Main, Annex, Branch',
@@ -215,11 +210,9 @@ class _Step1SchoolState extends State<Step1School> {
                             ),
                             const SizedBox(height: 18),
 
-                            // Region
                             _buildRegionField(),
                             const SizedBox(height: 16),
 
-                            // Live preview
                             AnimatedBuilder(
                               animation: Listenable.merge(
                                   [_nameController, _campusController]),
@@ -263,7 +256,6 @@ class _Step1SchoolState extends State<Step1School> {
                             ),
                             const SizedBox(height: 10),
 
-                            // Info note
                             Container(
                               width: double.infinity,
                               padding: const EdgeInsets.symmetric(
@@ -296,7 +288,6 @@ class _Step1SchoolState extends State<Step1School> {
                             ),
                             const SizedBox(height: 28),
 
-                            // Buttons
                             Row(
                               children: [
                                 Expanded(
@@ -410,7 +401,9 @@ class _Step1SchoolState extends State<Step1School> {
     );
   }
 
-  // ── HEADER ──────────────────────────────────────────────────────────────────
+  // ── HEADER ───────────────────────────────────────────────────────────────────
+  // Matches screenshot: dark navy bg, logos flush (no containers/borders),
+  // CenterLogo kept in the middle with its glow.
   Widget _buildHeader() {
     return Container(
       width: double.infinity,
@@ -421,98 +414,68 @@ class _Step1SchoolState extends State<Step1School> {
           colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF1A0A4A)],
         ),
         border: const Border(
-            bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5)),
+          bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5),
+        ),
         boxShadow: [
           BoxShadow(
-              color: const Color(0xFF00CFFF).withOpacity(0.12),
-              blurRadius: 16,
-              offset: const Offset(0, 4)),
+            color: const Color(0xFF00CFFF).withOpacity(0.10),
+            blurRadius: 12,
+            offset: const Offset(0, 3),
+          ),
         ],
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // Left: Makeblock badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                  color: const Color(0xFF00CFFF).withOpacity(0.35), width: 1.5),
-              gradient: LinearGradient(colors: [
-                const Color(0xFF00CFFF).withOpacity(0.12),
-                const Color(0xFF00CFFF).withOpacity(0.04),
-              ]),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 8, height: 8,
-                  decoration: const BoxDecoration(
-                      shape: BoxShape.circle, color: Color(0xFF00CFFF)),
-                ),
-                const SizedBox(width: 10),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    RichText(
-                      text: const TextSpan(children: [
-                        TextSpan(text: 'Make',
-                            style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-                        TextSpan(text: 'bl',
-                            style: TextStyle(color: Color(0xFF00CFFF), fontSize: 18, fontWeight: FontWeight.bold)),
-                        TextSpan(text: 'ock',
-                            style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-                      ]),
-                    ),
-                    const Text('Construct Your Dreams',
-                        style: TextStyle(color: Colors.white38, fontSize: 9, letterSpacing: 1)),
-                  ],
-                ),
-              ],
+
+          // ── Left: Makeblock — fixed size to match CREOTEC ────────
+          SizedBox(
+            height: 44,
+            width: 160,
+            child: Image.asset(
+              'assets/images/MakeblockLogo.png',
+              fit: BoxFit.contain,
+              alignment: Alignment.centerLeft,
             ),
           ),
 
-          // Center: logo
+          // ── Center: CenterLogo with subtle glow ───────────────────
           Container(
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               boxShadow: [
-                BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.35), blurRadius: 24, spreadRadius: 4),
-                BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.15), blurRadius: 16, spreadRadius: 2),
+                BoxShadow(
+                  color: const Color(0xFF7B2FFF).withOpacity(0.35),
+                  blurRadius: 24,
+                  spreadRadius: 4,
+                ),
+                BoxShadow(
+                  color: const Color(0xFF00CFFF).withOpacity(0.15),
+                  blurRadius: 16,
+                  spreadRadius: 2,
+                ),
               ],
             ),
-            child: Image.asset('assets/images/CenterLogo.png', height: 70, fit: BoxFit.contain),
+            child: Image.asset(
+              'assets/images/CenterLogo.png',
+              height: 70,
+              fit: BoxFit.contain,
+            ),
           ),
 
-          // Right: CREOTEC badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.30), width: 1.5),
-              gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [
-                const Color(0xFFFFD700).withOpacity(0.10),
-                const Color(0xFFFFD700).withOpacity(0.03),
-              ]),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                const Text('CREOTEC',
-                    style: TextStyle(color: Colors.white, fontSize: 22,
-                        fontWeight: FontWeight.w900, letterSpacing: 4, height: 1.0)),
-                const SizedBox(height: 3),
-                Text('P H I L I P P I N E S ,  I N C .',
-                    style: TextStyle(color: const Color(0xFFFFD700).withOpacity(0.75),
-                        fontSize: 8, fontWeight: FontWeight.w600, letterSpacing: 2.5, height: 1.0)),
-              ],
+          // ── Right: CREOTEC — fixed size to match Makeblock ───────
+          SizedBox(
+            height: 44,
+            width: 160,
+            child: Image.asset(
+              'assets/images/CreotecLogo.png',
+              fit: BoxFit.contain,
+              alignment: Alignment.centerRight,
             ),
           ),
+
         ],
       ),
     );
@@ -557,17 +520,23 @@ class _Step1SchoolState extends State<Step1School> {
                         ? const Icon(Icons.check, color: Colors.white, size: 20)
                         : Text('$step',
                             style: TextStyle(
-                              color: isActive ? Colors.white : Colors.white.withOpacity(0.3),
-                              fontWeight: FontWeight.bold, fontSize: 16,
+                              color: isActive
+                                  ? Colors.white
+                                  : Colors.white.withOpacity(0.3),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
                             )),
                   ),
                 ),
                 const SizedBox(height: 6),
                 Text(labels[index],
                     style: TextStyle(
-                      color: isActive ? const Color(0xFF00CFFF) : Colors.white.withOpacity(0.3),
+                      color: isActive
+                          ? const Color(0xFF00CFFF)
+                          : Colors.white.withOpacity(0.3),
                       fontSize: 10,
-                      fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                      fontWeight:
+                          isActive ? FontWeight.bold : FontWeight.normal,
                       letterSpacing: 0.5,
                     )),
               ],
@@ -586,7 +555,7 @@ class _Step1SchoolState extends State<Step1School> {
     );
   }
 
-  // ── FIELD BUILDER ────────────────────────────────────────────────────────────
+  // ── FIELD BUILDER ─────────────────────────────────────────────────────────
   Widget _buildField({
     required String label,
     required String hint,
@@ -602,13 +571,18 @@ class _Step1SchoolState extends State<Step1School> {
           children: [
             Text(label,
                 style: const TextStyle(
-                    color: Colors.white, fontWeight: FontWeight.w700,
-                    fontSize: 12, letterSpacing: 1)),
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12,
+                    letterSpacing: 1)),
             if (isRequired)
-              const Text(' *', style: TextStyle(color: Color(0xFF00CFFF), fontWeight: FontWeight.bold)),
+              const Text(' *',
+                  style: TextStyle(
+                      color: Color(0xFF00CFFF), fontWeight: FontWeight.bold)),
             if (isOptional)
               Text('  (optional)',
-                  style: TextStyle(color: Colors.white.withOpacity(0.35), fontSize: 11)),
+                  style: TextStyle(
+                      color: Colors.white.withOpacity(0.35), fontSize: 11)),
           ],
         ),
         const SizedBox(height: 8),
@@ -617,9 +591,12 @@ class _Step1SchoolState extends State<Step1School> {
           style: const TextStyle(color: Colors.white, fontSize: 14),
           decoration: InputDecoration(
             hintText: hint,
-            hintStyle: TextStyle(color: Colors.white.withOpacity(0.25), fontSize: 13),
-            prefixIcon: Icon(icon, color: const Color(0xFF00CFFF).withOpacity(0.7), size: 20),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+            hintStyle: TextStyle(
+                color: Colors.white.withOpacity(0.25), fontSize: 13),
+            prefixIcon: Icon(icon,
+                color: const Color(0xFF00CFFF).withOpacity(0.7), size: 20),
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
             filled: true,
             fillColor: Colors.white.withOpacity(0.05),
             enabledBorder: OutlineInputBorder(
@@ -636,7 +613,7 @@ class _Step1SchoolState extends State<Step1School> {
     );
   }
 
-  // ── REGION FIELD ─────────────────────────────────────────────────────────────
+  // ── REGION FIELD ──────────────────────────────────────────────────────────
   Widget _buildRegionField() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -644,10 +621,14 @@ class _Step1SchoolState extends State<Step1School> {
         Row(
           children: [
             const Text('SCHOOL REGION',
-                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700,
-                    fontSize: 12, letterSpacing: 1)),
+                style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12,
+                    letterSpacing: 1)),
             const Text(' *',
-                style: TextStyle(color: Color(0xFF00CFFF), fontWeight: FontWeight.bold)),
+                style: TextStyle(
+                    color: Color(0xFF00CFFF), fontWeight: FontWeight.bold)),
           ],
         ),
         const SizedBox(height: 8),
@@ -656,17 +637,24 @@ class _Step1SchoolState extends State<Step1School> {
           dropdownColor: const Color(0xFF2D0E7A),
           style: const TextStyle(color: Colors.white, fontSize: 13),
           hint: Text('Select region',
-              style: TextStyle(color: Colors.white.withOpacity(0.25), fontSize: 13)),
-          icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Color(0xFF00CFFF)),
-          items: _regions.map((r) => DropdownMenuItem(
-            value: r,
-            child: Text(r, style: const TextStyle(color: Colors.white, fontSize: 13)),
-          )).toList(),
+              style: TextStyle(
+                  color: Colors.white.withOpacity(0.25), fontSize: 13)),
+          icon: const Icon(Icons.keyboard_arrow_down_rounded,
+              color: Color(0xFF00CFFF)),
+          items: _regions
+              .map((r) => DropdownMenuItem(
+                    value: r,
+                    child: Text(r,
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 13)),
+                  ))
+              .toList(),
           onChanged: (v) => setState(() => _selectedRegion = v),
           decoration: InputDecoration(
             prefixIcon: Icon(Icons.map_rounded,
                 color: const Color(0xFF00CFFF).withOpacity(0.7), size: 20),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
             filled: true,
             fillColor: Colors.white.withOpacity(0.05),
             enabledBorder: OutlineInputBorder(

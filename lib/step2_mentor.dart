@@ -43,7 +43,7 @@ class _Step2MentorState extends State<Step2Mentor> {
       final schools = await DBHelper.getSchools();
       final seen = <int>{};
       final unique = schools.where((s) {
-        final id = int.tryParse(s['school_id'].toString() ?? '');
+        final id = int.tryParse(s['school_id'].toString());
         if (id == null || id == 0 || !seen.add(id)) return false;
         return true;
       }).toList();

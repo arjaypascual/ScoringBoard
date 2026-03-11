@@ -3,7 +3,7 @@ import 'package:mysql_client/mysql_client.dart';
 class DBHelper {
   static MySQLConnection? _connection;
 
-  static const String _host         = "127.0.0.1";
+  static const String _host         = "localhost";
   static const int    _port         = 3306;
   static const String _userName     = "root";
   static const String _password     = "root";
@@ -12,6 +12,8 @@ class DBHelper {
   // ── MIGRATIONS ───────────────────────────────────────────────────────────
   static Future<void> runMigrations() async {
     final conn = await getConnection();
+
+    // Migration 1: arena_number column on tbl_teamschedule
     try {
       await conn.execute("""
         ALTER TABLE tbl_teamschedule
@@ -21,10 +23,50 @@ class DBHelper {
     } catch (_) {
       print("ℹ️  Migration: arena_number already present.");
     }
+
+    // Migration 2: contact column on tbl_referee
+    try {
+      await conn.execute("""
+        ALTER TABLE tbl_referee
+        ADD COLUMN contact VARCHAR(100) NOT NULL DEFAULT ''
+        AFTER referee_name
+      """);
+      print("✅ Migration: contact column added to tbl_referee.");
+    } catch (_) {
+      print("ℹ️  Migration: contact already present.");
+    }
+
+    // Migration 3: status column on tbl_category
+    try {
+      await conn.execute("""
+        ALTER TABLE tbl_category
+        ADD COLUMN status ENUM('active','inactive') NOT NULL DEFAULT 'active'
+      """);
+      print("✅ Migration: status column added to tbl_category.");
+    } catch (_) {
+      print("ℹ️  Migration: status already present.");
+    }
+
+    // Migration 4: tbl_referee_category junction table
+    try {
+      await conn.execute("""
+        CREATE TABLE IF NOT EXISTS tbl_referee_category (
+          referee_id  INT NOT NULL,
+          category_id INT NOT NULL,
+          PRIMARY KEY (referee_id, category_id),
+          FOREIGN KEY (referee_id)
+            REFERENCES tbl_referee(referee_id) ON DELETE CASCADE,
+          FOREIGN KEY (category_id)
+            REFERENCES tbl_category(category_id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      """);
+      print("✅ Migration: tbl_referee_category created.");
+    } catch (_) {
+      print("ℹ️  Migration: tbl_referee_category already present.");
+    }
   }
 
-  // ── Connection ────────────────────────────────────────────────────────────
-
+  // ── CONNECTION ────────────────────────────────────────────────────────────
   static Future<MySQLConnection> getConnection() async {
     try {
       if (_connection != null && _connection!.connected) {
@@ -55,27 +97,68 @@ class DBHelper {
   }
 
   // ── SCHOOLS ───────────────────────────────────────────────────────────────
-
   static Future<List<Map<String, dynamic>>> getSchools() async {
-    final conn = await getConnection();
+    final conn   = await getConnection();
     final result = await conn.execute(
-      "SELECT * FROM tbl_school ORDER BY school_name"
+      "SELECT * FROM tbl_school ORDER BY school_name",
     );
     return result.rows.map((r) => r.assoc()).toList();
   }
 
   // ── CATEGORIES ────────────────────────────────────────────────────────────
-
   static Future<List<Map<String, dynamic>>> getCategories() async {
-    final conn = await getConnection();
+    final conn   = await getConnection();
     final result = await conn.execute(
-      "SELECT * FROM tbl_category ORDER BY category_id"
+      "SELECT * FROM tbl_category ORDER BY category_id",
     );
     return result.rows.map((r) => r.assoc()).toList();
   }
 
-  static Future<void> seedCategories() async {
+  static Future<List<Map<String, dynamic>>> getActiveCategories() async {
+    final conn   = await getConnection();
+    final result = await conn.execute(
+      "SELECT * FROM tbl_category WHERE status = 'active' ORDER BY category_id",
+    );
+    return result.rows.map((r) => r.assoc()).toList();
+  }
+
+  static Future<void> insertCategory(String categoryType) async {
     final conn = await getConnection();
+    await conn.execute(
+      "INSERT INTO tbl_category (category_type, status) VALUES (:type, 'active')",
+      {'type': categoryType},
+    );
+    print("✅ Category '$categoryType' inserted.");
+  }
+
+  static Future<void> updateCategory(int id, String categoryType) async {
+    final conn = await getConnection();
+    await conn.execute(
+      "UPDATE tbl_category SET category_type = :type WHERE category_id = :id",
+      {'type': categoryType, 'id': id},
+    );
+    print("✅ Category $id updated.");
+  }
+
+  static Future<void> toggleCategoryStatus(int id, bool setActive) async {
+    final conn = await getConnection();
+    await conn.execute(
+      "UPDATE tbl_category SET status = :status WHERE category_id = :id",
+      {'status': setActive ? 'active' : 'inactive', 'id': id},
+    );
+    print("✅ Category $id status → ${setActive ? 'active' : 'inactive'}.");
+  }
+
+  static Future<void> deleteCategory(int id) async {
+    final conn = await getConnection();
+    await conn.execute(
+      "DELETE FROM tbl_category WHERE category_id = :id",
+      {'id': id},
+    );
+    print("✅ Category $id deleted.");
+  }
+
+  static Future<void> seedCategories() async {
     const categories = [
       'Aspiring Makers (mBot 1)',
       'Emerging Innovators (mBot 2)',
@@ -83,6 +166,7 @@ class DBHelper {
       'Soccer',
     ];
     for (final cat in categories) {
+      final conn = await getConnection();
       await conn.execute(
         "INSERT IGNORE INTO tbl_category (category_type) VALUES (:cat)",
         {"cat": cat},
@@ -91,10 +175,82 @@ class DBHelper {
     print("✅ Categories seeded.");
   }
 
-  // ── TEAMS ─────────────────────────────────────────────────────────────────
+  // ── REFEREES ──────────────────────────────────────────────────────────────
+  static Future<List<Map<String, dynamic>>> getReferees() async {
+    final conn   = await getConnection();
+    final result = await conn.execute(
+      "SELECT * FROM tbl_referee ORDER BY referee_id",
+    );
+    return result.rows.map((r) => r.assoc()).toList();
+  }
 
-  static Future<List<Map<String, dynamic>>> getTeams() async {
+  static Future<int> insertReferee(String name, String contact) async {
+    final conn   = await getConnection();
+    final result = await conn.execute(
+      "INSERT INTO tbl_referee (referee_name, contact) VALUES (:name, :contact)",
+      {"name": name, "contact": contact},
+    );
+    print("✅ Referee '$name' inserted.");
+    return result.lastInsertID.toInt();
+  }
+
+  static Future<void> updateReferee(int id, String name, String contact) async {
     final conn = await getConnection();
+    await conn.execute(
+      "UPDATE tbl_referee SET referee_name = :name, contact = :contact WHERE referee_id = :id",
+      {"name": name, "contact": contact, "id": id},
+    );
+    print("✅ Referee $id updated.");
+  }
+
+  static Future<void> deleteReferee(int id) async {
+    final conn = await getConnection();
+    await conn.execute(
+      "DELETE FROM tbl_referee WHERE referee_id = :id",
+      {"id": id},
+    );
+    print("✅ Referee $id deleted.");
+  }
+
+  // ── REFEREE ↔ CATEGORY ────────────────────────────────────────────────────
+  static Future<List<Map<String, dynamic>>> getRefereeCategories(
+      int refereeId) async {
+    final conn   = await getConnection();
+    final result = await conn.execute(
+      """
+      SELECT c.category_id, c.category_type
+      FROM tbl_referee_category rc
+      JOIN tbl_category c ON rc.category_id = c.category_id
+      WHERE rc.referee_id = :rid
+      ORDER BY c.category_type
+      """,
+      {"rid": refereeId},
+    );
+    return result.rows.map((r) => r.assoc()).toList();
+  }
+
+  static Future<void> setRefereeCategories(
+      int refereeId, List<int> categoryIds) async {
+    final conn = await getConnection();
+    await conn.execute(
+      "DELETE FROM tbl_referee_category WHERE referee_id = :rid",
+      {"rid": refereeId},
+    );
+    for (final cid in categoryIds) {
+      await conn.execute(
+        """
+        INSERT INTO tbl_referee_category (referee_id, category_id)
+        VALUES (:rid, :cid)
+        """,
+        {"rid": refereeId, "cid": cid},
+      );
+    }
+    print("✅ Referee $refereeId categories updated.");
+  }
+
+  // ── TEAMS ─────────────────────────────────────────────────────────────────
+  static Future<List<Map<String, dynamic>>> getTeams() async {
+    final conn   = await getConnection();
     final result = await conn.execute("""
       SELECT t.team_id, t.team_name, t.team_ispresent,
              c.category_type, m.mentor_name
@@ -108,7 +264,7 @@ class DBHelper {
 
   static Future<List<Map<String, dynamic>>> getTeamsByCategory(
       int categoryId) async {
-    final conn = await getConnection();
+    final conn   = await getConnection();
     final result = await conn.execute("""
       SELECT t.team_id, t.team_name, t.team_ispresent,
              c.category_type, m.mentor_name
@@ -123,15 +279,27 @@ class DBHelper {
 
   // ── SCHEDULE ──────────────────────────────────────────────────────────────
 
+  /// Clears all schedule-related data in the correct FK-safe order:
+  /// tbl_score → tbl_teamschedule → tbl_match → tbl_schedule
   static Future<void> clearSchedule() async {
     final conn = await getConnection();
+
+    // 1. Delete scores first (references tbl_match)
+    await conn.execute("DELETE FROM tbl_score");
+    await conn.execute("ALTER TABLE tbl_score AUTO_INCREMENT = 1");
+
+    // 2. Delete team schedules (references tbl_match and tbl_round)
     await conn.execute("DELETE FROM tbl_teamschedule");
-    await conn.execute("DELETE FROM tbl_match");
-    await conn.execute("DELETE FROM tbl_schedule");
-    // ✅ Reset AUTO_INCREMENT so match IDs start from 1 again
     await conn.execute("ALTER TABLE tbl_teamschedule AUTO_INCREMENT = 1");
+
+    // 3. Delete matches (references tbl_schedule)
+    await conn.execute("DELETE FROM tbl_match");
     await conn.execute("ALTER TABLE tbl_match AUTO_INCREMENT = 1");
+
+    // 4. Delete schedules last
+    await conn.execute("DELETE FROM tbl_schedule");
     await conn.execute("ALTER TABLE tbl_schedule AUTO_INCREMENT = 1");
+
     print("✅ Schedule cleared and IDs reset.");
   }
 
@@ -139,7 +307,7 @@ class DBHelper {
     required String startTime,
     required String endTime,
   }) async {
-    final conn = await getConnection();
+    final conn   = await getConnection();
     final result = await conn.execute("""
       INSERT INTO tbl_schedule (schedule_start, schedule_end)
       VALUES (:start, :end)
@@ -148,7 +316,7 @@ class DBHelper {
   }
 
   static Future<int> insertMatch(int scheduleId) async {
-    final conn = await getConnection();
+    final conn   = await getConnection();
     final result = await conn.execute("""
       INSERT INTO tbl_match (schedule_id) VALUES (:scheduleId)
     """, {"scheduleId": scheduleId});
@@ -176,7 +344,6 @@ class DBHelper {
   }
 
   // ── ROUNDS ────────────────────────────────────────────────────────────────
-
   static Future<void> seedRounds(int maxRounds) async {
     final conn = await getConnection();
     for (int i = 1; i <= maxRounds; i++) {
@@ -191,6 +358,7 @@ class DBHelper {
     print("✅ Rounds seeded up to $maxRounds.");
   }
 
+  // ── GENERATE SCHEDULE ─────────────────────────────────────────────────────
   static Future<void> generateSchedule({
     required Map<int, int> runsPerCategory,
     required Map<int, int> arenasPerCategory,
@@ -202,18 +370,15 @@ class DBHelper {
   }) async {
     final conn = await getConnection();
 
-    // ── Clear old schedule first ─────────────────────────────────────────────
     await clearSchedule();
 
-    // ── Seed rounds ──────────────────────────────────────────────────────────
     final maxRuns = runsPerCategory.values.isEmpty
         ? 1
         : runsPerCategory.values.reduce((a, b) => a > b ? a : b);
     await seedRounds(maxRuns);
 
-    // ── Get first available referee ──────────────────────────────────────────
     final refResult = await conn.execute(
-      "SELECT referee_id FROM tbl_referee ORDER BY referee_id LIMIT 1"
+      "SELECT referee_id FROM tbl_referee ORDER BY referee_id LIMIT 1",
     );
     if (refResult.rows.isEmpty) {
       throw Exception(
@@ -225,31 +390,26 @@ class DBHelper {
       refResult.rows.first.assoc()['referee_id'] ?? '0',
     );
 
-    // ── Parse start / end times ───────────────────────────────────────────────
-    final startParts  = startTime.split(':');
+    final startParts      = startTime.split(':');
     final startHourBase   = int.parse(startParts[0]);
     final startMinuteBase = int.parse(startParts[1]);
 
-    final endParts      = endTime.split(':');
-    final endLimitH     = int.parse(endParts[0]);
-    final endLimitM     = int.parse(endParts[1]);
+    final endParts        = endTime.split(':');
+    final endLimitH       = int.parse(endParts[0]);
+    final endLimitM       = int.parse(endParts[1]);
     final endLimitMinutes = endLimitH * 60 + endLimitM;
 
-    // ── Schedule each category — ALL reset to startTime ──────────────────────
     for (final entry in runsPerCategory.entries) {
       final categoryId = entry.key;
       final runs       = entry.value;
-      final teams = await getTeamsByCategory(categoryId);
+      final teams      = await getTeamsByCategory(categoryId);
       if (teams.isEmpty) continue;
 
-      // ✅ Reset time to startTime for EVERY category
       int hour   = startHourBase;
       int minute = startMinuteBase;
 
-      // ── Helper: current time in minutes ────────────────────────────────────
       int currentMinutes() => hour * 60 + minute;
 
-      // ── Helper: skip lunch break 12:00–13:00 ───────────────────────────────
       void skipLunch() {
         if (lunchBreak && hour == 12) {
           hour   = 13;
@@ -263,22 +423,20 @@ class DBHelper {
         skipLunch();
       }
 
-      // Skip lunch if category starts in lunch window
       skipLunch();
 
       for (int run = 0; run < runs; run++) {
-        // ✅ Pair teams: [0 vs 1], [2 vs 3], [4 vs 5]...
-        // If odd number of teams, last team gets a BYE (paired alone)
         int teamIndex = 0;
         while (teamIndex < teams.length) {
           if (currentMinutes() + durationMinutes > endLimitMinutes) {
-            print("⚠️  End time reached for category $categoryId — remaining slots not scheduled.");
+            print("⚠️  End time reached for category $categoryId.");
             break;
           }
 
-          // Grab up to 2 teams per match slot (1 per arena side)
           final team1 = teams[teamIndex];
-          final team2 = (teamIndex + 1) < teams.length ? teams[teamIndex + 1] : null;
+          final team2 = (teamIndex + 1) < teams.length
+              ? teams[teamIndex + 1]
+              : null;
 
           final startHH  = hour.toString().padLeft(2, '0');
           final startMM  = minute.toString().padLeft(2, '0');
@@ -288,13 +446,13 @@ class DBHelper {
           int endMinute = minute + durationMinutes;
           while (endMinute >= 60) { endMinute -= 60; endHour++; }
           final endStr =
-              '${endHour.toString().padLeft(2, '0')}:${endMinute.toString().padLeft(2, '0')}:00';
+              '${endHour.toString().padLeft(2, '0')}:'
+              '${endMinute.toString().padLeft(2, '0')}:00';
 
           final scheduleId = await insertSchedule(
               startTime: startStr, endTime: endStr);
           final matchId = await insertMatch(scheduleId);
 
-          // Insert team1 as arena 1
           await insertTeamSchedule(
             matchId:     matchId,
             roundId:     run + 1,
@@ -303,7 +461,6 @@ class DBHelper {
             arenaNumber: 1,
           );
 
-          // Insert team2 as arena 2 only if it exists (no blank slot)
           if (team2 != null) {
             await insertTeamSchedule(
               matchId:     matchId,
@@ -315,7 +472,7 @@ class DBHelper {
           }
 
           advanceTime(durationMinutes + intervalMinutes);
-          teamIndex += 2; // always advance by 2 (pair per match)
+          teamIndex += 2;
         }
       }
 
@@ -326,10 +483,9 @@ class DBHelper {
   }
 
   // ── SCORES ────────────────────────────────────────────────────────────────
-
   static Future<List<Map<String, dynamic>>> getScoresByCategory(
       int categoryId) async {
-    final conn = await getConnection();
+    final conn   = await getConnection();
     final result = await conn.execute("""
       SELECT
         t.team_id,

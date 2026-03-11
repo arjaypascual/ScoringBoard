@@ -815,7 +815,6 @@ class _TeamCardState extends State<_TeamCard>
                         p['player_ispresent'].toString() == '1';
                     final fullName =
                         p['player_name']?.toString() ?? '';
-                    final firstName = fullName.isNotEmpty ? fullName[0] : '?';
                     final isEven    = e.key % 2 == 0;
 
                     return Container(

@@ -39,109 +39,54 @@ class _RegistrationHeaderState extends State<RegistrationHeader> {
               offset: const Offset(0, 4)),
         ],
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // Left: Makeblock badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                  color: const Color(0xFF00CFFF).withOpacity(0.35), width: 1.5),
-              gradient: LinearGradient(colors: [
-                const Color(0xFF00CFFF).withOpacity(0.12),
-                const Color(0xFF00CFFF).withOpacity(0.04),
-              ]),
+
+          // ── Left: Makeblock logo — flush, no border ───────────────
+          SizedBox(
+            height: 44,
+            width: 160,
+            child: Image.asset(
+              'assets/images/MakeblockLogo.png',
+              fit: BoxFit.contain,
+              alignment: Alignment.centerLeft,
             ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 8, height: 8,
-                  decoration: const BoxDecoration(
-                      shape: BoxShape.circle, color: Color(0xFF00CFFF)),
-                ),
-                const SizedBox(width: 10),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    RichText(
-                      text: const TextSpan(children: [
-                        TextSpan(text: 'Make',
-                            style: TextStyle(color: Colors.white, fontSize: 18,
-                                fontWeight: FontWeight.bold)),
-                        TextSpan(text: 'bl',
-                            style: TextStyle(color: Color(0xFF00CFFF),
-                                fontSize: 18, fontWeight: FontWeight.bold)),
-                        TextSpan(text: 'ock',
-                            style: TextStyle(color: Colors.white, fontSize: 18,
-                                fontWeight: FontWeight.bold)),
-                      ]),
-                    ),
-                    const Text('Construct Your Dreams',
-                        style: TextStyle(
-                            color: Colors.white38, fontSize: 9, letterSpacing: 1)),
-                  ],
-                ),
+          ),
+
+          // ── Center: CenterLogo with glow ──────────────────────────
+          Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                    color: const Color(0xFF7B2FFF).withOpacity(0.35),
+                    blurRadius: 24, spreadRadius: 4),
+                BoxShadow(
+                    color: const Color(0xFF00CFFF).withOpacity(0.15),
+                    blurRadius: 16, spreadRadius: 2),
               ],
             ),
-          ),
-
-          // Center: logo with glow
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.35),
-                        blurRadius: 24, spreadRadius: 4),
-                    BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.15),
-                        blurRadius: 16, spreadRadius: 2),
-                  ],
-                ),
-                child: Image.asset('assets/images/CenterLogo.png',
-                    height: 70, fit: BoxFit.contain),
-              ),
-
-            ],
-          ),
-
-          // Right: CREOTEC badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                  color: const Color(0xFFFFD700).withOpacity(0.30), width: 1.5),
-              gradient: LinearGradient(
-                begin: Alignment.topLeft, end: Alignment.bottomRight,
-                colors: [
-                  const Color(0xFFFFD700).withOpacity(0.10),
-                  const Color(0xFFFFD700).withOpacity(0.03),
-                ],
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                const Text('CREOTEC',
-                    style: TextStyle(color: Colors.white, fontSize: 22,
-                        fontWeight: FontWeight.w900, letterSpacing: 4, height: 1.0)),
-                const SizedBox(height: 3),
-                Text('P H I L I P P I N E S ,  I N C .',
-                    style: TextStyle(
-                        color: const Color(0xFFFFD700).withOpacity(0.75),
-                        fontSize: 8, fontWeight: FontWeight.w600,
-                        letterSpacing: 2.5, height: 1.0)),
-              ],
+            child: Image.asset(
+              'assets/images/CenterLogo.png',
+              height: 70,
+              fit: BoxFit.contain,
             ),
           ),
+
+          // ── Right: CREOTEC logo — flush, no border ────────────────
+          SizedBox(
+            height: 44,
+            width: 160,
+            child: Image.asset(
+              'assets/images/CreotecLogo.png',
+              fit: BoxFit.contain,
+              alignment: Alignment.centerRight,
+            ),
+          ),
+
         ],
       ),
     );
