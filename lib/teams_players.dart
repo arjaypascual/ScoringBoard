@@ -1,3 +1,5 @@
+// ignore_for_file: unnecessary_to_list_in_spreads, deprecated_member_use
+
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'db_helper.dart';

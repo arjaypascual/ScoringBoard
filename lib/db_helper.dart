@@ -1,3 +1,5 @@
+// ignore_for_file: avoid_print
+
 import 'package:mysql_client/mysql_client.dart';
 
 class DBHelper {
