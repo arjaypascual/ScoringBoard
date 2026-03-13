@@ -45,8 +45,11 @@ class GroupMatch {
   GroupTeam? winner;
   int? score1;
   int? score2;
+  String? scheduleTime;   // e.g. "08:30"
+  int?    matchId;        // DB match_id for linking to tbl_score
   bool get isDone => winner != null;
-  GroupMatch({required this.id, required this.team1, required this.team2});
+  GroupMatch({required this.id, required this.team1, required this.team2,
+      this.scheduleTime, this.matchId});
 }
 
 class TournamentGroup {
@@ -123,6 +126,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   DateTime? _lastUpdated;
   Timer?    _autoRefreshTimer;
   String    _lastDataSignature = '';
+  String    _lastGroupSignature = '';
 
   int? _soccerCategoryId;
 
@@ -151,7 +155,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     super.initState();
     _loadData(initial: true);
     _autoRefreshTimer = Timer.periodic(
-        const Duration(seconds: 10), (_) => _silentRefresh());
+        const Duration(seconds: 2), (_) => _silentRefresh());
   }
 
   @override
@@ -194,6 +198,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   Future<void> _silentRefresh() async {
     try {
       final conn   = await DBHelper.getConnection();
+
+      // Check schedule data changes
       final result = await conn.execute("""
         SELECT c.category_id, ts.match_id, t.team_name, s.schedule_start
         FROM tbl_teamschedule ts
@@ -208,6 +214,51 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       if (signature != _lastDataSignature) {
         _lastDataSignature = signature;
         await _loadData(initial: false);
+      }
+
+      // Check group changes from DB (real-time sync for other devices)
+      if (_soccerCategoryId != null) {
+        try {
+          final gResult = await conn.execute(
+            "SELECT group_label, team_id, team_name FROM tbl_soccer_groups WHERE category_id = ${_soccerCategoryId} ORDER BY group_label, id",
+          );
+          final gRows = gResult.rows.map((r) => r.assoc()).toList();
+          final gSig  = _buildSignature(gRows);
+          if (gSig != _lastGroupSignature) {
+            _lastGroupSignature = gSig;
+            // Rebuild groups from latest DB data
+            final Map<String, List<GroupTeam>> groupMap = {};
+            for (final row in gRows) {
+              final label    = row['group_label']?.toString() ?? '';
+              final teamId   = int.tryParse(row['team_id']?.toString() ?? '0') ?? 0;
+              final teamName = row['team_name']?.toString() ?? '';
+              groupMap.putIfAbsent(label, () => []);
+              groupMap[label]!.add(GroupTeam(teamId: teamId, teamName: teamName));
+            }
+            final labels = groupMap.keys.toList()..sort();
+            final groups = <TournamentGroup>[];
+            for (final label in labels) {
+              final groupTeams = groupMap[label]!;
+              final matches    = <GroupMatch>[];
+              int matchIdx     = 0;
+              for (int i = 0; i < groupTeams.length; i++) {
+                for (int j = i + 1; j < groupTeams.length; j++) {
+                  matches.add(GroupMatch(
+                      id: 'g${label}_m$matchIdx',
+                      team1: groupTeams[i], team2: groupTeams[j]));
+                  matchIdx++;
+                }
+              }
+              groups.add(TournamentGroup(label: label, teams: groupTeams, matches: matches));
+            }
+            if (mounted) {
+              setState(() {
+                _groups          = groups;
+                _groupsGenerated = groups.isNotEmpty;
+              });
+            }
+          }
+        } catch (_) {}
       }
     } catch (_) {}
   }
@@ -310,6 +361,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       }
 
       final prevIdx = _tabController?.index ?? 0;
+      // Store soccer category id before loading groups
+      _soccerCategoryId = soccerCatId;
       _tabController?.dispose();
       _tabController = TabController(
         length: categories.length, vsync: this,
@@ -330,6 +383,15 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         _isLoading          = false;
         _lastUpdated        = DateTime.now();
       });
+
+      // Load previously saved groups from DB; auto-generate if none saved yet
+      if (!_groupsGenerated) {
+        await _loadGroupsFromDB();
+        // If still no groups after DB load, auto-generate and save
+        if (!_groupsGenerated && soccerTeams.length >= 4) {
+          await _generateGroups(teamsOverride: soccerTeams);
+        }
+      }
     } catch (e) {
       setState(() => _isLoading = false);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
@@ -340,9 +402,10 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   // ════════════════════════════════════════════════════════════════════════════
   // GROUP STAGE LOGIC
   // ════════════════════════════════════════════════════════════════════════════
-  void _generateGroups() {
-    if (_soccerTeams.isEmpty) return;
-    final shuffled = List<Map<String, dynamic>>.from(_soccerTeams)..shuffle(Random());
+  Future<void> _generateGroups({List<Map<String, dynamic>>? teamsOverride}) async {
+    final sourceTeams = teamsOverride ?? _soccerTeams;
+    if (sourceTeams.isEmpty) return;
+    final shuffled = List<Map<String, dynamic>>.from(sourceTeams)..shuffle(Random());
     final n = shuffled.length;
     const int maxGroups     = 8;
     const int teamsPerGroup = 4;
@@ -387,6 +450,149 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       _lbRounds        = [];
       _grandFinal      = null;
     });
+    // Save the newly generated groups to the database
+    await _saveGroupsToDB(groups);
+  }
+
+  // ── Save generated groups to DB ──────────────────────────────────────────
+  Future<void> _saveGroupsToDB(List<TournamentGroup> groups) async {
+    if (_soccerCategoryId == null) return;
+    try {
+      final conn = await DBHelper.getConnection();
+      // Ensure table exists
+      await conn.execute("""
+        CREATE TABLE IF NOT EXISTS tbl_soccer_groups (
+          id          INT AUTO_INCREMENT PRIMARY KEY,
+          category_id INT         NOT NULL,
+          group_label VARCHAR(5)  NOT NULL,
+          team_id     INT         NOT NULL,
+          team_name   VARCHAR(255) NOT NULL,
+          created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      """);
+      // Clear previous groups for this category
+      await conn.execute(
+        "DELETE FROM tbl_soccer_groups WHERE category_id = ${_soccerCategoryId}",
+      );
+      // Insert new groups
+      for (final g in groups) {
+        for (final t in g.teams) {
+          final catId   = _soccerCategoryId;
+          final label   = g.label.replaceAll("'", "''");
+          final teamId  = t.teamId;
+          final name    = t.teamName.replaceAll("'", "''");
+          await conn.execute(
+            "INSERT INTO tbl_soccer_groups (category_id, group_label, team_id, team_name) VALUES ($catId, '$label', $teamId, '$name')",
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('⚠️ Could not save groups to DB: $e'),
+              backgroundColor: Colors.orange));
+      }
+    }
+  }
+
+  // ── Load saved groups from DB ────────────────────────────────────────────
+  Future<void> _loadGroupsFromDB() async {
+    if (_soccerCategoryId == null) return;
+    try {
+      final conn = await DBHelper.getConnection();
+      // Check if the table exists first
+      final check = await conn.execute("""
+        SELECT COUNT(*) as cnt FROM information_schema.tables
+        WHERE table_schema = DATABASE() AND table_name = 'tbl_soccer_groups'
+      """);
+      final tableExists = check.rows.isNotEmpty &&
+          (int.tryParse(check.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0) > 0;
+      if (!tableExists) return;
+
+      final result = await conn.execute(
+        "SELECT group_label, team_id, team_name FROM tbl_soccer_groups WHERE category_id = ${_soccerCategoryId} ORDER BY group_label, id",
+      );
+      final rows = result.rows.map((r) => r.assoc()).toList();
+      if (rows.isEmpty) return;
+
+      // Reconstruct groups from DB rows
+      final Map<String, List<GroupTeam>> groupMap = {};
+      for (final row in rows) {
+        final label    = row['group_label']?.toString() ?? '';
+        final teamId   = int.tryParse(row['team_id']?.toString() ?? '0') ?? 0;
+        final teamName = row['team_name']?.toString() ?? '';
+        groupMap.putIfAbsent(label, () => []);
+        groupMap[label]!.add(GroupTeam(teamId: teamId, teamName: teamName));
+      }
+
+      // --- Fetch schedule times for soccer matches ---
+      // Key: "teamId1_teamId2" (sorted) → {scheduleTime, matchId}
+      final Map<String, Map<String, dynamic>> scheduleByPair = {};
+      try {
+        final schedResult = await conn.execute("""
+          SELECT ts.match_id, ts.team_id, s.schedule_start
+          FROM tbl_teamschedule ts
+          JOIN tbl_team t ON ts.team_id = t.team_id
+          JOIN tbl_match m ON ts.match_id = m.match_id
+          JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
+          WHERE t.category_id = ${_soccerCategoryId}
+          ORDER BY ts.match_id, ts.team_id
+        """);
+        final schedRows = schedResult.rows.map((r) => r.assoc()).toList();
+        // Group by match_id — each match has exactly 2 team rows
+        final Map<String, List<Map<String, dynamic>>> byMatch = {};
+        for (final r in schedRows) {
+          final mid = r['match_id']?.toString() ?? '';
+          byMatch.putIfAbsent(mid, () => []);
+          byMatch[mid]!.add(r);
+        }
+        for (final entry in byMatch.entries) {
+          final matchId = int.tryParse(entry.key) ?? 0;
+          final teamRows = entry.value;
+          if (teamRows.length != 2) continue;
+          final ids = [
+            int.tryParse(teamRows[0]['team_id']?.toString() ?? '0') ?? 0,
+            int.tryParse(teamRows[1]['team_id']?.toString() ?? '0') ?? 0,
+          ]..sort();
+          final pairKey = '${ids[0]}_${ids[1]}';
+          final rawTime = teamRows[0]['schedule_start']?.toString() ?? '';
+          final timeFmt = rawTime.length >= 5 ? rawTime.substring(0, 5) : rawTime; // "HH:mm"
+          scheduleByPair[pairKey] = {'time': timeFmt, 'matchId': matchId};
+        }
+      } catch (_) {}
+
+      final labels = groupMap.keys.toList()..sort();
+      final groups = <TournamentGroup>[];
+      for (final label in labels) {
+        final groupTeams = groupMap[label]!;
+        final matches    = <GroupMatch>[];
+        int matchIdx     = 0;
+        for (int i = 0; i < groupTeams.length; i++) {
+          for (int j = i + 1; j < groupTeams.length; j++) {
+            final ids = [groupTeams[i].teamId, groupTeams[j].teamId]..sort();
+            final pairKey = '${ids[0]}_${ids[1]}';
+            final sched = scheduleByPair[pairKey];
+            matches.add(GroupMatch(
+                id: 'g${label}_m$matchIdx',
+                team1: groupTeams[i],
+                team2: groupTeams[j],
+                scheduleTime: sched?['time'] as String?,
+                matchId: sched?['matchId'] as int?));
+            matchIdx++;
+          }
+        }
+        groups.add(TournamentGroup(label: label, teams: groupTeams, matches: matches));
+      }
+
+      if (mounted) {
+        setState(() {
+          _groups          = groups;
+          _groupsGenerated = true;
+        });
+      }
+    } catch (_) {
+      // Table may not exist yet — silently skip
+    }
   }
 
   void _setGroupMatchResult(GroupMatch match, GroupTeam winner, int s1, int s2) {
@@ -1799,6 +2005,15 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         allMatches.add({'groupLabel': g.label, 'match': m});
       }
     }
+    // Sort by assigned schedule time so matches appear chronologically
+    allMatches.sort((a, b) {
+      final tA = (a['match'] as GroupMatch).scheduleTime ?? '';
+      final tB = (b['match'] as GroupMatch).scheduleTime ?? '';
+      if (tA.isEmpty && tB.isEmpty) return 0;
+      if (tA.isEmpty) return 1;
+      if (tB.isEmpty) return -1;
+      return tA.compareTo(tB);
+    });
     return Column(children: [
       Container(
         decoration: const BoxDecoration(
@@ -1806,6 +2021,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 20),
         child: Row(children: [
           _headerCell('#',      flex: 1),
+          _headerCell('TIME',   flex: 2),
           _headerCell('GROUP',  flex: 1, center: true),
           _headerCell('HOME',   flex: 4, center: true),
           _headerCell('RESULT', flex: 2, center: true),
@@ -1846,6 +2062,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     Expanded(flex: 1, child: Center(child: Text('${idx + 1}',
                         style: TextStyle(color: Colors.white.withOpacity(0.35),
                             fontWeight: FontWeight.bold, fontSize: 15)))),
+                    // TIME column
+                    Expanded(flex: 2, child: Center(child: m.scheduleTime != null
+                        ? Text(m.scheduleTime!,
+                            style: const TextStyle(color: Color(0xFF00CFFF),
+                                fontSize: 13, fontWeight: FontWeight.w600))
+                        : Text('—', style: TextStyle(
+                            color: Colors.white.withOpacity(0.2), fontSize: 13)))),
                     Expanded(flex: 1, child: Center(child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
                       decoration: BoxDecoration(
@@ -2094,9 +2317,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   // GROUPS TAB
   // ════════════════════════════════════════════════════════════════════════════
   Widget _buildGroupsTab() {
-    final teamCount   = _soccerTeams.length;
-    final canGenerate = teamCount >= 4;
-    final allDone     = _allGroupMatchesDone() && _groupsGenerated;
+    final teamCount    = _soccerTeams.length;
+    final canGenerate  = teamCount >= 4;
+    final allDone      = _allGroupMatchesDone() && _groupsGenerated;
+    // Disable refresh if any group match has already started (has a score/winner)
+    final matchStarted = _groups.any((g) => g.matches.any((m) => m.isDone));
+    final canRefresh   = canGenerate && !matchStarted;
     return Column(children: [
       Container(
         color: const Color(0xFF0F0A2A),
@@ -2160,13 +2386,34 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               child: const Center(child: Text('Need ≥4 teams',
                   style: TextStyle(color: Colors.white24, fontSize: 11))),
             )
+          else if (matchStarted)
+            // Show locked button with tooltip when match has started
+            Tooltip(
+              message: 'Cannot reshuffle after matches have started',
+              child: Container(
+                height: 36,
+                padding: const EdgeInsets.symmetric(horizontal: 18),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.04),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Colors.white12, width: 1),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: const [
+                  Icon(Icons.lock, color: Colors.white24, size: 14),
+                  SizedBox(width: 8),
+                  Text('Refresh Groups',
+                      style: TextStyle(color: Colors.white24, fontSize: 13,
+                          fontWeight: FontWeight.bold)),
+                ]),
+              ),
+            )
           else
             SizedBox(
               height: 36,
               child: ElevatedButton.icon(
-                onPressed: _generateGroups,
-                icon: Icon(_groupsGenerated ? Icons.refresh : Icons.shuffle, size: 15),
-                label: Text(_groupsGenerated ? 'Regenerate Groups' : 'Generate Groups',
+                onPressed: canRefresh ? _generateGroups : null,
+                icon: const Icon(Icons.refresh, size: 15),
+                label: Text(_groupsGenerated ? 'Refresh Groups' : 'Generate Groups',
                     style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _groupsGenerated
@@ -2251,7 +2498,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   }
 
   Widget _buildFifaGroupCard(TournamentGroup group) {
-    final standings = _getGroupStandings(group);
     final doneCount = group.matches.where((m) => m.isDone).length;
     final total     = group.matches.length;
     final allDone   = doneCount == total && total > 0;
@@ -2264,6 +2510,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         boxShadow: [BoxShadow(color: groupCol.withOpacity(0.08), blurRadius: 12)],
       ),
       child: Column(children: [
+        // ── Group header ──────────────────────────────────────────────────────
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
@@ -2304,91 +2551,36 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             ),
           ]),
         ),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.03),
-            border: Border(bottom: BorderSide(color: groupCol.withOpacity(0.2), width: 1)),
-          ),
-          child: Row(children: [
-            const SizedBox(width: 22),
-            const SizedBox(width: 6),
-            const Expanded(child: Text('TEAM',
-                style: TextStyle(color: Colors.white38, fontSize: 9,
-                    fontWeight: FontWeight.bold, letterSpacing: 0.8))),
-            SizedBox(width: 24, child: Text('W', textAlign: TextAlign.center,
-                style: const TextStyle(color: Color(0xFF00FF88),
-                    fontSize: 9, fontWeight: FontWeight.bold))),
-            SizedBox(width: 24, child: Text('L', textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.redAccent,
-                    fontSize: 9, fontWeight: FontWeight.bold))),
-            SizedBox(width: 28, child: Text('PTS', textAlign: TextAlign.center,
-                style: const TextStyle(color: Color(0xFFFFD700),
-                    fontSize: 9, fontWeight: FontWeight.bold))),
-          ]),
-        ),
-        ...standings.asMap().entries.map((e) {
-          final rank     = e.key + 1;
-          final team     = e.value;
-          final advances = rank <= 2;
-          final isFirst  = rank == 1;
-          Color rowBg = Colors.transparent;
-          if (advances) {
-            rowBg = isFirst
-                ? const Color(0xFFFFD700).withOpacity(0.06)
-                : const Color(0xFF00FF88).withOpacity(0.05);
-          }
-          Color badgeColor    = Colors.white12;
-          Color rankTextColor = Colors.white38;
-          if (advances) {
-            badgeColor    = isFirst ? const Color(0xFFFFD700) : const Color(0xFF00FF88);
-            rankTextColor = badgeColor;
-          }
+        // ── Team list (draw only, no standings here) ──────────────────────────
+        ...group.teams.asMap().entries.map((e) {
+          final idx  = e.key + 1;
           return Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
-              color: rowBg,
               border: Border(bottom: BorderSide(
                   color: Colors.white.withOpacity(0.04), width: 1)),
             ),
             child: Row(children: [
               Container(
-                width: 22, height: 22,
+                width: 20, height: 20,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: advances
-                      ? badgeColor.withOpacity(0.12)
-                      : Colors.white.withOpacity(0.03),
-                  border: Border.all(color: badgeColor, width: 1),
+                  color: groupCol.withOpacity(0.1),
+                  border: Border.all(color: groupCol.withOpacity(0.4), width: 1),
                 ),
-                child: Center(child: Text('$rank',
-                    style: TextStyle(color: rankTextColor,
+                child: Center(child: Text('$idx',
+                    style: TextStyle(color: groupCol.withOpacity(0.8),
                         fontSize: 9, fontWeight: FontWeight.bold))),
               ),
-              const SizedBox(width: 6),
-              Expanded(child: Text(team.teamName, overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      color: advances ? Colors.white : Colors.white54,
-                      fontSize: 12,
-                      fontWeight: advances ? FontWeight.bold : FontWeight.w400))),
-              SizedBox(width: 24, child: Text('${team.wins}',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: team.wins > 0 ? const Color(0xFF00FF88) : Colors.white24,
-                      fontSize: 12, fontWeight: FontWeight.bold))),
-              SizedBox(width: 24, child: Text('${team.losses}',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: team.losses > 0 ? Colors.redAccent : Colors.white24,
-                      fontSize: 12, fontWeight: FontWeight.bold))),
-              SizedBox(width: 28, child: Text('${team.points}',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: team.points > 0 ? const Color(0xFFFFD700) : Colors.white24,
-                      fontSize: 12, fontWeight: FontWeight.bold))),
+              const SizedBox(width: 8),
+              Expanded(child: Text(e.value.teamName,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white70,
+                      fontSize: 12, fontWeight: FontWeight.w500))),
             ]),
           );
         }),
+        // ── Footer ────────────────────────────────────────────────────────────
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
@@ -2397,12 +2589,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             border: Border(top: BorderSide(color: groupCol.withOpacity(0.12), width: 1)),
           ),
           child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Icon(Icons.arrow_upward,
-                color: const Color(0xFF00FF88).withOpacity(0.6), size: 10),
+            Icon(Icons.leaderboard,
+                color: const Color(0xFF00FF88).withOpacity(0.5), size: 10),
             const SizedBox(width: 4),
-            Text('Top 2 advance',
+            Text('See Standings for W/L/PTS',
                 style: TextStyle(
-                    color: const Color(0xFF00FF88).withOpacity(0.55),
+                    color: const Color(0xFF00FF88).withOpacity(0.5),
                     fontSize: 9, fontWeight: FontWeight.bold)),
           ]),
         ),

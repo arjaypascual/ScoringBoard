@@ -368,7 +368,8 @@ class DBHelper {
     required String endTime,
     required int durationMinutes,
     required int intervalMinutes,
-    bool lunchBreak = true,
+    int healthBreakMinutes = 0,   // gap inserted BETWEEN runs (not lunch)
+    bool lunchBreak = true,       // blocks off 12:00–13:00 only
   }) async {
     final conn = await getConnection();
 
@@ -392,14 +393,26 @@ class DBHelper {
       refResult.rows.first.assoc()['referee_id'] ?? '0',
     );
 
-    final startParts      = startTime.split(':');
-    final startHourBase   = int.parse(startParts[0]);
-    final startMinuteBase = int.parse(startParts[1]);
+    // ── shared helpers ────────────────────────────────────────────────────
+    // Format total minutes → 'HH:MM:00'
+    String fmtMin(int t) {
+      final h = (t ~/ 60).toString().padLeft(2, '0');
+      final m = (t %  60).toString().padLeft(2, '0');
+      return '$h:$m:00';
+    }
+
+    // Skip the 12:00–13:00 lunch window (only when lunchBreak is enabled).
+    // Health break is a plain time-cursor advance and is NOT affected here.
+    int applyLunch(int t) {
+      if (!lunchBreak) return t;
+      const lunchStart = 12 * 60; // 720
+      const lunchEnd   = 13 * 60; // 780
+      if (t >= lunchStart && t < lunchEnd) return lunchEnd;
+      return t;
+    }
 
     final endParts        = endTime.split(':');
-    final endLimitH       = int.parse(endParts[0]);
-    final endLimitM       = int.parse(endParts[1]);
-    final endLimitMinutes = endLimitH * 60 + endLimitM;
+    final endLimitMinutes = int.parse(endParts[0]) * 60 + int.parse(endParts[1]);
 
     for (final entry in runsPerCategory.entries) {
       final categoryId = entry.key;
@@ -407,31 +420,22 @@ class DBHelper {
       final teams      = await getTeamsByCategory(categoryId);
       if (teams.isEmpty) continue;
 
-      int hour   = startHourBase;
-      int minute = startMinuteBase;
+      final startParts = startTime.split(':');
+      // cursor tracks the current wall-clock minute for this category
+      int cursor = int.parse(startParts[0]) * 60 + int.parse(startParts[1]);
 
-      int currentMinutes() => hour * 60 + minute;
-
-      void skipLunch() {
-        if (lunchBreak && hour == 12) {
-          hour   = 13;
-          minute = 0;
-        }
-      }
-
-      void advanceTime(int minutes) {
-        minute += minutes;
-        while (minute >= 60) { minute -= 60; hour++; }
-        skipLunch();
-      }
-
-      skipLunch();
+      // Apply lunch skip at the very start in case start time is inside lunch
+      cursor = applyLunch(cursor);
 
       for (int run = 0; run < runs; run++) {
         int teamIndex = 0;
+
         while (teamIndex < teams.length) {
-          if (currentMinutes() + durationMinutes > endLimitMinutes) {
-            print("⚠️  End time reached for category $categoryId.");
+          // Check lunch before every match slot
+          cursor = applyLunch(cursor);
+
+          if (cursor + durationMinutes > endLimitMinutes) {
+            print("⚠️  End time reached for category $categoryId run ${run + 1}.");
             break;
           }
 
@@ -440,19 +444,11 @@ class DBHelper {
               ? teams[teamIndex + 1]
               : null;
 
-          final startHH  = hour.toString().padLeft(2, '0');
-          final startMM  = minute.toString().padLeft(2, '0');
-          final startStr = '$startHH:$startMM:00';
-
-          int endHour   = hour;
-          int endMinute = minute + durationMinutes;
-          while (endMinute >= 60) { endMinute -= 60; endHour++; }
-          final endStr =
-              '${endHour.toString().padLeft(2, '0')}:'
-              '${endMinute.toString().padLeft(2, '0')}:00';
+          final matchStart = fmtMin(cursor);
+          final matchEnd   = fmtMin(cursor + durationMinutes);
 
           final scheduleId = await insertSchedule(
-              startTime: startStr, endTime: endStr);
+              startTime: matchStart, endTime: matchEnd);
           final matchId = await insertMatch(scheduleId);
 
           await insertTeamSchedule(
@@ -473,8 +469,21 @@ class DBHelper {
             );
           }
 
-          advanceTime(durationMinutes + intervalMinutes);
+          // Advance by match duration + break between matches (intervalMinutes).
+          // intervalMinutes is ONLY the short gap between consecutive matches —
+          // it is NOT the health break.
+          cursor += durationMinutes + intervalMinutes;
           teamIndex += 2;
+        }
+
+        // After every completed run except the last, insert the health break.
+        // This is a plain cursor advance — it is intentionally NOT routed
+        // through applyLunch() so that the health break is always honoured
+        // as its own distinct gap and never silently collapsed into lunch.
+        if (run < runs - 1 && healthBreakMinutes > 0) {
+          cursor += healthBreakMinutes;
+          print("💚 Health break (${healthBreakMinutes}min) after run ${run + 1} "
+                "for category $categoryId → resumes at ${fmtMin(cursor)}");
         }
       }
 
@@ -537,5 +546,118 @@ class DBHelper {
       "team":     teamId,
       "ref":      refereeId,
     });
+  }
+
+  // ── GENERATE SOCCER SCHEDULE (Group Stage) ────────────────────────────────
+  static Future<void> generateSoccerSchedule({
+    required List<List<Map<String, dynamic>>> groups,
+    required int arenas,
+    required int categoryId,
+    required String startTime,
+    required String endTime,
+    required int durationMinutes,
+    required int intervalMinutes,
+    bool lunchBreak = true,
+  }) async {
+    // Seed enough rounds to cover max matches per group (round-robin: n*(n-1)/2)
+    final maxGroupSize = groups.isEmpty ? 1 : groups.map((g) => g.length).reduce((a, b) => a > b ? a : b);
+    final maxPairs = (maxGroupSize * (maxGroupSize - 1)) ~/ 2;
+    await seedRounds(maxPairs < 1 ? 1 : maxPairs);
+
+    // Get a default referee
+    final conn = await getConnection();
+    final refResult = await conn.execute(
+      "SELECT referee_id FROM tbl_referee ORDER BY referee_id LIMIT 1",
+    );
+    if (refResult.rows.isEmpty) {
+      throw Exception(
+        'No referees found. Please add at least one referee before generating a schedule.',
+      );
+    }
+    final defaultRefereeId = int.parse(
+      refResult.rows.first.assoc()['referee_id'] ?? '0',
+    );
+
+    final startParts      = startTime.split(':');
+    final startHourBase   = int.parse(startParts[0]);
+    final startMinuteBase = int.parse(startParts[1]);
+
+    final endParts        = endTime.split(':');
+    final endLimitMinutes = int.parse(endParts[0]) * 60 + int.parse(endParts[1]);
+
+    // Each group gets assigned to an arena: groupIndex % arenas + 1
+    // We track a separate clock per arena so matches run in parallel
+    final Map<int, int> arenaMinutes = {};
+    for (int a = 1; a <= arenas; a++) {
+      arenaMinutes[a] = startHourBase * 60 + startMinuteBase;
+    }
+
+    int toMinutes(int h, int m) => h * 60 + m;
+
+    String fmtTime(int totalMin) {
+      final h = (totalMin ~/ 60).toString().padLeft(2, '0');
+      final m = (totalMin % 60).toString().padLeft(2, '0');
+      return '$h:$m:00';
+    }
+
+    int skipLunch(int totalMin) {
+      // If lunch break enabled and time falls in 12:00–13:00, jump to 13:00
+      if (lunchBreak && totalMin >= toMinutes(12, 0) && totalMin < toMinutes(13, 0)) {
+        return toMinutes(13, 0);
+      }
+      return totalMin;
+    }
+
+    for (int gIdx = 0; gIdx < groups.length; gIdx++) {
+      final group    = groups[gIdx];
+      final arenaNum = (gIdx % arenas) + 1;
+
+      // Round-robin: every pair of teams plays once
+      final pairs = <List<Map<String, dynamic>>>[];
+      for (int i = 0; i < group.length; i++) {
+        for (int j = i + 1; j < group.length; j++) {
+          pairs.add([group[i], group[j]]);
+        }
+      }
+
+      int roundNum = 1;
+      for (final pair in pairs) {
+        int cur = arenaMinutes[arenaNum]!;
+        cur     = skipLunch(cur);
+
+        if (cur + durationMinutes > endLimitMinutes) {
+          print("⚠️  End time reached for arena $arenaNum group ${String.fromCharCode(65 + gIdx)}.");
+          break;
+        }
+
+        final startStr = fmtTime(cur);
+        final endStr   = fmtTime(cur + durationMinutes);
+
+        final scheduleId = await insertSchedule(startTime: startStr, endTime: endStr);
+        final matchId    = await insertMatch(scheduleId);
+
+        await insertTeamSchedule(
+          matchId:     matchId,
+          roundId:     roundNum,
+          teamId:      int.parse(pair[0]['team_id'].toString()),
+          refereeId:   defaultRefereeId,
+          arenaNumber: arenaNum,
+        );
+        await insertTeamSchedule(
+          matchId:     matchId,
+          roundId:     roundNum,
+          teamId:      int.parse(pair[1]['team_id'].toString()),
+          refereeId:   defaultRefereeId,
+          arenaNumber: arenaNum,
+        );
+
+        arenaMinutes[arenaNum] = cur + durationMinutes + intervalMinutes;
+        roundNum++;
+      }
+
+      print("✅ Soccer Group ${String.fromCharCode(65 + gIdx)} scheduled on Arena $arenaNum.");
+    }
+
+    print("✅ Soccer schedule generated successfully!");
   }
 }

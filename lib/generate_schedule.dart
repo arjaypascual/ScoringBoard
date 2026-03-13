@@ -18,59 +18,81 @@ class GenerateSchedule extends StatefulWidget {
 
 class _GenerateScheduleState extends State<GenerateSchedule>
     with TickerProviderStateMixin {
-  static const _accent       = Color(0xFF00CFFF);
+  static const _bg          = Color(0xFF0D0625);
+  static const _accent      = Color(0xFF00CFFF);
   static const _soccerAccent = Color(0xFFFF6B35);
 
-  // ── Non-soccer data ────────────────────────────────────────────────────────
+  // ── Non-soccer category data ───────────────────────────────────────────────
   final Map<int, int>  _runsPerCategory      = {};
   final Map<int, int>  _arenasPerCategory    = {};
   final Map<int, int>  _teamCountPerCategory = {};
-  final Map<int, bool> _expandedCategories   = {};
   List<Map<String, dynamic>> _categories     = [];
 
+  // ── Per-category timing ────────────────────────────────────────────────────
+  final Map<int, TimeOfDay>             _startTimePerCat  = {};
+  final Map<int, TextEditingController> _durationPerCat   = {};
+  final Map<int, TextEditingController> _matchBreakPerCat = {};
+
+  // Health break per category (= lunch break with editable window)
+  final Map<int, bool>      _hbEnabled = {};
+  final Map<int, TimeOfDay> _hbStart   = {};
+  final Map<int, TimeOfDay> _hbEnd     = {};
+
+  // ── Per-category generate state ────────────────────────────────────────────
+  final Map<int, bool> _isGeneratingCat = {};
+  final Map<int, bool> _generatedCat    = {};
+
   // ── Soccer data ────────────────────────────────────────────────────────────
-  List<Map<String, dynamic>> _soccerTeams      = [];
-  int?                        _soccerCatId;
-  bool                        _showSoccerTeams  = false;
-  bool                        _bracketGenerated = false;
+  List<Map<String, dynamic>> _soccerTeams   = [];
+  int?  _soccerCatId;
+  bool  _showSoccerTeams  = false;
+  bool  _bracketGenerated = false;
+  bool  _isGenBracket     = false;
 
-  // ── Shared state ───────────────────────────────────────────────────────────
+  // Soccer-specific timing settings
+  TimeOfDay _soccerStartTime = const TimeOfDay(hour: 9, minute: 0);
+  final TextEditingController _soccerDurationCtrl   = TextEditingController(text: '10');
+  final TextEditingController _soccerMatchBreakCtrl = TextEditingController(text: '5');
+  bool      _soccerHbEnabled = true;
+  TimeOfDay _soccerHbStart   = const TimeOfDay(hour: 12, minute: 0);
+  TimeOfDay _soccerHbEnd     = const TimeOfDay(hour: 13, minute: 0);
+
+  // ── Shared ─────────────────────────────────────────────────────────────────
   bool _isLoadingData = true;
-  bool _isGenerating  = false;
-  bool _isGenBracket  = false;
-
-  TimeOfDay _startTime = const TimeOfDay(hour: 9,  minute: 0);
-  TimeOfDay _endTime   = const TimeOfDay(hour: 17, minute: 0);
-  final _durationController = TextEditingController(text: '6');
-  final _intervalController = TextEditingController(text: '0');
-  bool _lunchBreakEnabled   = true;
 
   static const int _maxTeamsPerArena = 30;
 
-  // ── Animation controllers ──────────────────────────────────────────────────
-  final Map<int, AnimationController> _catAnimCtrls = {};
-  final Map<int, Animation<double>>   _catAnims     = {};
-  late AnimationController _soccerTeamAnimCtrl;
-  late Animation<double>   _soccerTeamAnim;
+  static const _catColors = [
+    Color(0xFF00CFFF),
+    Color(0xFFFF9F43),
+    Color(0xFF9B6FE8),
+    Color(0xFF00E5A0),
+    Color(0xFFFF6B6B),
+    Color(0xFFFFD700),
+    Color(0xFF48CAE4),
+    Color(0xFFFF85A1),
+  ];
+
+  late AnimationController _soccerAnimCtrl;
+  late Animation<double>   _soccerAnim;
 
   @override
   void initState() {
     super.initState();
-    _soccerTeamAnimCtrl = AnimationController(
+    _soccerAnimCtrl = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 300));
-    _soccerTeamAnim = CurvedAnimation(
-        parent: _soccerTeamAnimCtrl, curve: Curves.easeInOut);
+    _soccerAnim = CurvedAnimation(
+        parent: _soccerAnimCtrl, curve: Curves.easeInOut);
     _loadCategories();
-    _durationController.addListener(() => setState(() {}));
-    _intervalController.addListener(() => setState(() {}));
   }
 
   @override
   void dispose() {
-    for (final c in _catAnimCtrls.values) c.dispose();
-    _soccerTeamAnimCtrl.dispose();
-    _durationController.dispose();
-    _intervalController.dispose();
+    _soccerAnimCtrl.dispose();
+    _soccerDurationCtrl.dispose();
+    _soccerMatchBreakCtrl.dispose();
+    for (final c in _durationPerCat.values) c.dispose();
+    for (final c in _matchBreakPerCat.values) c.dispose();
     super.dispose();
   }
 
@@ -107,12 +129,17 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       }
 
       for (final c in nonSoccer) {
-        final id   = int.tryParse(c['category_id'].toString()) ?? 0;
-        final ctrl = AnimationController(
-            vsync: this, duration: const Duration(milliseconds: 280));
-        _catAnimCtrls[id] = ctrl;
-        _catAnims[id] = CurvedAnimation(parent: ctrl, curve: Curves.easeInOut);
-        _expandedCategories[id] = false;
+        final id = int.tryParse(c['category_id'].toString()) ?? 0;
+        _startTimePerCat[id]  = const TimeOfDay(hour: 8, minute: 0);
+        _durationPerCat[id]   = TextEditingController(text: '6')
+          ..addListener(() => setState(() {}));
+        _matchBreakPerCat[id] = TextEditingController(text: '2')
+          ..addListener(() => setState(() {}));
+        _hbEnabled[id] = true;
+        _hbStart[id]   = const TimeOfDay(hour: 12, minute: 0);
+        _hbEnd[id]     = const TimeOfDay(hour: 13, minute: 0);
+        _isGeneratingCat[id] = false;
+        _generatedCat[id]    = false;
       }
 
       setState(() {
@@ -130,94 +157,141 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       });
     } catch (e) {
       setState(() => _isLoadingData = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('❌ Failed to load categories: $e'),
-            backgroundColor: Colors.red));
-      }
+      if (mounted) _snack('Failed to load: $e', Colors.red);
     }
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
+  bool _isActive(Map<String, dynamic> c) =>
+      (c['status'] ?? 'active').toString().toLowerCase() == 'active';
+
   String? _arenaWarning(int id) {
     final teams  = _teamCountPerCategory[id] ?? 0;
     final arenas = _arenasPerCategory[id]    ?? 1;
-    if (teams == 0) return null;
-    if (teams > arenas * _maxTeamsPerArena)
-      return '$teams teams — needs ≥${(teams / _maxTeamsPerArena).ceil()} arenas';
-    return null;
-  }
-
-  bool get _hasArenaError => _categories.any((c) {
-    final id = int.tryParse(c['category_id'].toString()) ?? 0;
-    return _arenaWarning(id) != null;
-  });
-
-  void _toggleCategory(int id) {
-    final open = _expandedCategories[id] ?? false;
-    setState(() => _expandedCategories[id] = !open);
-    open ? _catAnimCtrls[id]?.reverse() : _catAnimCtrls[id]?.forward();
-  }
-
-  void _toggleSoccerTeams() {
-    setState(() => _showSoccerTeams = !_showSoccerTeams);
-    _showSoccerTeams
-        ? _soccerTeamAnimCtrl.forward()
-        : _soccerTeamAnimCtrl.reverse();
+    if (teams == 0 || teams <= arenas * _maxTeamsPerArena) return null;
+    return '$teams teams — needs ≥${(teams / _maxTeamsPerArena).ceil()} arenas';
   }
 
   void _snack(String msg, Color color) => ScaffoldMessenger.of(context)
       .showSnackBar(SnackBar(content: Text(msg), backgroundColor: color));
 
-  // ── Generate Schedule ──────────────────────────────────────────────────────
-  Future<void> _generateSchedule() async {
-    final duration = int.tryParse(_durationController.text.trim()) ?? 6;
-    final interval = int.tryParse(_intervalController.text.trim()) ?? 0;
-    if (duration <= 0) { _snack('❌ Duration must be > 0.', Colors.red); return; }
-    final sm = _startTime.hour * 60 + _startTime.minute;
-    final em = _endTime.hour   * 60 + _endTime.minute;
-    if (em <= sm) { _snack('❌ End time must be after start time.', Colors.red); return; }
-    if (_hasArenaError) { _snack('❌ Some categories exceed arena capacity.', Colors.red); return; }
+  String _fmtTOD(TimeOfDay t) {
+    final p = t.hour < 12 ? 'AM' : 'PM';
+    final h = t.hourOfPeriod == 0 ? 12 : t.hourOfPeriod;
+    return '${h.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')} $p';
+  }
+
+  int _hbDuration(TimeOfDay s, TimeOfDay e) =>
+      ((e.hour * 60 + e.minute) - (s.hour * 60 + s.minute)).clamp(0, 1440);
+
+  Future<TimeOfDay?> _pickTime(TimeOfDay init, Color accent) =>
+      showTimePicker(
+        context: context,
+        initialTime: init,
+        builder: (ctx, child) => Theme(
+          data: Theme.of(ctx).copyWith(
+            colorScheme: ColorScheme.dark(
+                primary: accent, onPrimary: Colors.black,
+                surface: const Color(0xFF2D0E7A), onSurface: Colors.white),
+            timePickerTheme: TimePickerThemeData(
+              dialHandColor: accent,
+              dialBackgroundColor: const Color(0xFF1A0A4A),
+              hourMinuteColor: Colors.white.withOpacity(0.1),
+              hourMinuteTextColor: Colors.white),
+          ),
+          child: child!),
+      );
+
+  // ── Generate single category ───────────────────────────────────────────────
+  Future<void> _generateForCategory(int id) async {
+    final dur = int.tryParse(_durationPerCat[id]?.text.trim() ?? '') ?? 0;
+    if (dur <= 0) { _snack('Duration must be > 0.', Colors.red); return; }
+    final warn = _arenaWarning(id);
+    if (warn != null) { _snack(warn, Colors.red); return; }
 
     final confirmed = await _showConfirmDialog();
     if (confirmed != true) return;
-    setState(() => _isGenerating = true);
+
+    setState(() => _isGeneratingCat[id] = true);
     try {
-      final st = '${_startTime.hour.toString().padLeft(2, '0')}:${_startTime.minute.toString().padLeft(2, '0')}';
-      final et = '${_endTime.hour.toString().padLeft(2, '0')}:${_endTime.minute.toString().padLeft(2, '0')}';
+      final st       = _startTimePerCat[id] ?? const TimeOfDay(hour: 8, minute: 0);
+      final interval = int.tryParse(_matchBreakPerCat[id]?.text.trim() ?? '0') ?? 0;
+      final stStr    = '${st.hour.toString().padLeft(2, '0')}:${st.minute.toString().padLeft(2, '0')}';
+      final enabled  = _hbEnabled[id] ?? false;
+      final hbMins   = enabled
+          ? _hbDuration(
+              _hbStart[id] ?? const TimeOfDay(hour: 12, minute: 0),
+              _hbEnd[id]   ?? const TimeOfDay(hour: 13, minute: 0))
+          : 0;
+
       await DBHelper.generateSchedule(
-        runsPerCategory:   _runsPerCategory,
-        arenasPerCategory: _arenasPerCategory,
-        startTime:         st,
-        endTime:           et,
-        durationMinutes:   duration,
-        intervalMinutes:   interval,
-        lunchBreak:        _lunchBreakEnabled,
+        runsPerCategory:    {id: _runsPerCategory[id]   ?? 2},
+        arenasPerCategory:  {id: _arenasPerCategory[id] ?? 1},
+        startTime:          stStr,
+        endTime:            '23:59',
+        durationMinutes:    dur,
+        intervalMinutes:    interval,
+        healthBreakMinutes: hbMins,
+        lunchBreak:         enabled,
       );
+
+      setState(() => _generatedCat[id] = true);
       if (mounted) { _snack('✅ Schedule generated!', Colors.green); widget.onGenerated?.call(); }
     } catch (e) {
-      if (mounted) _snack('❌ Error: $e', Colors.red);
+      if (mounted) _snack('Error: $e', Colors.red);
     } finally {
-      if (mounted) setState(() => _isGenerating = false);
+      if (mounted) setState(() => _isGeneratingCat[id] = false);
     }
   }
 
-  // ── Generate Bracket ───────────────────────────────────────────────────────
+  // ── Generate Soccer bracket ────────────────────────────────────────────────
   Future<void> _generateBracket() async {
     final tc = _soccerTeams.length;
-    // CHANGED: Minimum 4 teams, no maximum limit
-    if (tc < 4) { 
-      _snack('❌ Need at least 4 Soccer teams (have $tc).', Colors.red); 
-      return; 
+    if (tc < 4) { _snack('Need at least 4 Soccer teams (have $tc).', Colors.red); return; }
+
+    final durVal = int.tryParse(_soccerDurationCtrl.text.trim()) ?? 10;
+    if (durVal <= 0) { _snack('Soccer match duration must be > 0.', Colors.red); return; }
+
+    final confirmed = await _showConfirmDialog();
+    if (confirmed != true) return;
+
+    final groups = <List<Map<String, dynamic>>>[];
+    int idx = 0;
+    while (idx < _soccerTeams.length) {
+      final rem  = _soccerTeams.length - idx;
+      final size = rem <= 4 ? rem : 4;
+      groups.add(_soccerTeams.sublist(idx, idx + size));
+      idx += size;
     }
 
     setState(() => _isGenBracket = true);
-    await Future.delayed(const Duration(milliseconds: 700));
-    setState(() { _bracketGenerated = true; _isGenBracket = false; });
-    if (mounted) {
-      _snack('✅ Bracket ready! Opening Soccer Groups...', Colors.green);
-      await Future.delayed(const Duration(milliseconds: 800));
-      widget.onGenerated?.call();
+    try {
+      final stStr    = '${_soccerStartTime.hour.toString().padLeft(2,'0')}:${_soccerStartTime.minute.toString().padLeft(2,'0')}';
+      final interval = int.tryParse(_soccerMatchBreakCtrl.text.trim()) ?? 5;
+      final hbMins   = _soccerHbEnabled
+          ? _hbDuration(_soccerHbStart, _soccerHbEnd)
+          : 0;
+
+      await DBHelper.generateSoccerSchedule(
+        groups:          groups,
+        arenas:          1,
+        categoryId:      _soccerCatId!,
+        startTime:       stStr,
+        endTime:         '23:59',
+        durationMinutes: durVal,
+        intervalMinutes: interval,
+        lunchBreak:      _soccerHbEnabled,
+      );
+
+      setState(() { _bracketGenerated = true; _isGenBracket = false; });
+      if (mounted) {
+        _snack('Soccer bracket generated!', Colors.green);
+        await Future.delayed(const Duration(milliseconds: 800));
+        widget.onGenerated?.call();
+      }
+    } catch (e) {
+      setState(() => _isGenBracket = false);
+      if (mounted) _snack('Error: $e', Colors.red);
     }
   }
 
@@ -227,49 +301,42 @@ class _GenerateScheduleState extends State<GenerateSchedule>
     builder: (ctx) => Dialog(
       backgroundColor: Colors.transparent,
       child: Container(
-        width: 400, padding: const EdgeInsets.all(28),
+        width: 360, padding: const EdgeInsets.all(28),
         decoration: BoxDecoration(
           gradient: const LinearGradient(
               begin: Alignment.topLeft, end: Alignment.bottomRight,
               colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)]),
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.orange.withOpacity(0.4), width: 1.5),
-          boxShadow: [BoxShadow(color: Colors.orange.withOpacity(0.1),
-              blurRadius: 30, spreadRadius: 4)],
-        ),
+          border: Border.all(color: Colors.orange.withOpacity(0.4), width: 1.5)),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            width: 56, height: 56,
+          Container(width: 54, height: 54,
             decoration: BoxDecoration(shape: BoxShape.circle,
                 color: Colors.orange.withOpacity(0.15),
                 border: Border.all(color: Colors.orange.withOpacity(0.4))),
             child: const Icon(Icons.warning_amber_rounded,
-                color: Colors.orange, size: 30),
-          ),
-          const SizedBox(height: 16),
+                color: Colors.orange, size: 28)),
+          const SizedBox(height: 14),
           const Text('Regenerate Schedule?',
-              style: TextStyle(color: Colors.white, fontSize: 18,
+              style: TextStyle(color: Colors.white, fontSize: 17,
                   fontWeight: FontWeight.w800)),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           Text('This will DELETE the existing schedule\nand generate a new one.',
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white.withOpacity(0.6),
+              style: TextStyle(color: Colors.white.withOpacity(0.55),
                   fontSize: 13, height: 1.5)),
-          const SizedBox(height: 24),
+          const SizedBox(height: 22),
           Row(children: [
             Expanded(child: OutlinedButton(
               onPressed: () => Navigator.of(ctx).pop(false),
               style: OutlinedButton.styleFrom(
                 side: BorderSide(color: Colors.white.withOpacity(0.2)),
-                padding: const EdgeInsets.symmetric(vertical: 14),
+                padding: const EdgeInsets.symmetric(vertical: 13),
                 shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-              ),
+                    borderRadius: BorderRadius.circular(10))),
               child: Text('CANCEL', style: TextStyle(
-                  color: Colors.white.withOpacity(0.5),
-                  fontWeight: FontWeight.bold)),
-            )),
-            const SizedBox(width: 12),
+                  color: Colors.white.withOpacity(0.45),
+                  fontWeight: FontWeight.bold)))),
+            const SizedBox(width: 10),
             Expanded(child: ElevatedButton(
               onPressed: () => Navigator.of(ctx).pop(true),
               style: ElevatedButton.styleFrom(
@@ -277,22 +344,17 @@ class _GenerateScheduleState extends State<GenerateSchedule>
                 shadowColor: Colors.transparent,
                 padding: EdgeInsets.zero,
                 shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-              ),
+                    borderRadius: BorderRadius.circular(10))),
               child: Ink(
                 decoration: BoxDecoration(
                   gradient: const LinearGradient(
-                      colors: [Colors.orange, Color(0xFFE65100)]),
-                  borderRadius: BorderRadius.circular(10),
-                ),
+                      colors: [Colors.orange, Color(0xFFCC4400)]),
+                  borderRadius: BorderRadius.circular(10)),
                 child: const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 14),
+                  padding: EdgeInsets.symmetric(vertical: 13),
                   child: Center(child: Text('REGENERATE',
                       style: TextStyle(color: Colors.white,
-                          fontWeight: FontWeight.bold, letterSpacing: 1))),
-                ),
-              ),
-            )),
+                          fontWeight: FontWeight.bold, letterSpacing: 1))))))),
           ]),
         ]),
       ),
@@ -305,829 +367,520 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF1A0A4A),
+      backgroundColor: _bg,
       body: Column(children: [
         const RegistrationHeader(),
         Expanded(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.symmetric(vertical: 24),
-              child: Column(children: [
-                _buildScheduleCard(),
-                const SizedBox(height: 20),
-                if (_soccerCatId != null) _buildSoccerCard(),
-                const SizedBox(height: 24),
-              ]),
-            ),
-          ),
-        ),
-      ]),
-    );
-  }
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 36),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // CARD 1 — GENERATE SCHEDULE
-  // ══════════════════════════════════════════════════════════════════════════
-  Widget _buildScheduleCard() {
-    return Container(
-      width: 820,
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-            begin: Alignment.topLeft, end: Alignment.bottomRight,
-            colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)]),
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: _accent.withOpacity(0.3), width: 1.5),
-        boxShadow: [
-          BoxShadow(color: _accent.withOpacity(0.08),
-              blurRadius: 40, spreadRadius: 4),
-          BoxShadow(color: Colors.black.withOpacity(0.4),
-              blurRadius: 30, offset: const Offset(0, 10)),
-        ],
-      ),
-      child: Stack(children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(40, 36, 40, 36),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-
-            // Title
-            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(shape: BoxShape.circle,
-                    color: _accent.withOpacity(0.1),
-                    border: Border.all(color: _accent.withOpacity(0.3))),
-                child: const Icon(Icons.calendar_month_rounded,
-                    color: _accent, size: 22),
-              ),
-              const SizedBox(width: 14),
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text('GENERATE SCHEDULE',
-                    style: TextStyle(color: Colors.white, fontSize: 20,
-                        fontWeight: FontWeight.w800, letterSpacing: 2)),
-                Text('Configure match schedule for all categories (except Soccer)',
-                    style: TextStyle(color: Colors.white.withOpacity(0.4),
-                        fontSize: 12)),
-              ]),
-            ]),
-
-            const SizedBox(height: 24),
-            buildDivider(_accent),
-            const SizedBox(height: 16),
-
-            // ── Categories accordion ─────────────────────────────────────
-            _buildAccordionList(),
-
-            const SizedBox(height: 24),
-            buildDivider(_accent),
-            const SizedBox(height: 20),
-
-            // ── Schedule settings ────────────────────────────────────────
-            _buildScheduleSettings(),
-
-            const SizedBox(height: 28),
-            buildDivider(_accent),
-            const SizedBox(height: 20),
-
-            // ── Generate button ──────────────────────────────────────────
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: _isGenerating ? null : _generateSchedule,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.transparent,
-                  shadowColor: Colors.transparent,
-                  padding: EdgeInsets.zero,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                ),
-                child: Ink(
+              // ── Page title ───────────────────────────────────────────────
+              Row(children: [
+                IconButton(
+                    icon: const Icon(Icons.arrow_back_ios_new,
+                        color: _accent, size: 18),
+                    onPressed: widget.onBack),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.all(9),
                   decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                        colors: [Color(0xFF00CFFF), Color(0xFF0099CC)]),
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: [BoxShadow(color: _accent.withOpacity(0.4),
-                        blurRadius: 20, spreadRadius: 2)],
-                  ),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 18),
-                    alignment: Alignment.center,
-                    child: _isGenerating
-                        ? const SizedBox(width: 22, height: 22,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white))
-                        : const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.auto_awesome_rounded,
-                                  color: Colors.white, size: 20),
-                              SizedBox(width: 10),
-                              Text('GENERATE SCHEDULE',
-                                  style: TextStyle(color: Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 15, letterSpacing: 2)),
-                            ]),
-                  ),
-                ),
-              ),
-            ),
-          ]),
-        ),
-
-        Positioned(top: 12, left: 12,
-          child: IconButton(
-            icon: const Icon(Icons.arrow_back_ios_new, color: _accent, size: 18),
-            onPressed: widget.onBack)),
-        Positioned(top: 12, right: 12,
-          child: IconButton(
-            icon: Icon(Icons.close,
-                color: Colors.white.withOpacity(0.35), size: 20),
-            onPressed: () => Navigator.of(context).maybePop())),
-      ]),
-    );
-  }
-
-  // ── Accordion category list ────────────────────────────────────────────────
-  Widget _buildAccordionList() {
-    if (_isLoadingData) {
-      return const Center(child: Padding(
-          padding: EdgeInsets.all(24),
-          child: CircularProgressIndicator(strokeWidth: 2, color: _accent)));
-    }
-    if (_categories.isEmpty) {
-      return Container(
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(color: Colors.white.withOpacity(0.03),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.white12)),
-        child: Center(child: Text('No categories found.',
-            style: TextStyle(color: Colors.white.withOpacity(0.3),
-                fontSize: 13))),
-      );
-    }
-
-    return Column(
-      children: _categories.map((c) {
-        final id      = int.tryParse(c['category_id'].toString()) ?? 0;
-        final name    = (c['category_type'] ?? '').toString();
-        final count   = _teamCountPerCategory[id] ?? 0;
-        final runs    = _runsPerCategory[id]      ?? 2;
-        final arenas  = _arenasPerCategory[id]    ?? 1;
-        final warning = _arenaWarning(id);
-        final isOpen  = _expandedCategories[id]   ?? false;
-
-        final statusColor = warning != null
-            ? Colors.orange
-            : count == 0 ? Colors.white24 : Colors.green;
-
-        return Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.03),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: warning != null
-                  ? Colors.orange.withOpacity(0.4)
-                  : isOpen
-                      ? _accent.withOpacity(0.4)
-                      : Colors.white.withOpacity(0.08),
-              width: 1.5,
-            ),
-          ),
-          child: Column(children: [
-
-            // ── Row header ──────────────────────────────────────────────
-            InkWell(
-              borderRadius: BorderRadius.circular(12),
-              onTap: () => _toggleCategory(id),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 16, vertical: 13),
-                child: Row(children: [
-                  // Status dot
-                  Container(width: 8, height: 8,
-                      decoration: BoxDecoration(
-                          shape: BoxShape.circle, color: statusColor)),
-                  const SizedBox(width: 10),
-
-                  // Name
-                  Expanded(child: Text(name.toUpperCase(),
-                      style: const TextStyle(color: Colors.white,
-                          fontWeight: FontWeight.bold, fontSize: 13))),
-
-                  // Team count pill
-                  Container(
-                    margin: const EdgeInsets.only(right: 8),
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 9, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: count == 0
-                          ? Colors.white.withOpacity(0.04)
-                          : _accent.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                        color: count == 0
-                            ? Colors.white12
-                            : _accent.withOpacity(0.35)),
-                    ),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.groups_rounded, size: 11,
-                          color: count == 0 ? Colors.white24 : _accent),
-                      const SizedBox(width: 4),
-                      Text('$count team${count != 1 ? 's' : ''}',
-                          style: TextStyle(fontSize: 11,
-                              color: count == 0 ? Colors.white24 : _accent,
-                              fontWeight: FontWeight.bold)),
-                    ]),
-                  ),
-
-                  // Collapsed summary chips
-                  if (!isOpen) ...[
-                    _chip('$runs run${runs != 1 ? 's' : ''}', _accent),
-                    const SizedBox(width: 5),
-                    _chip('$arenas arena${arenas != 1 ? 's' : ''}',
-                        const Color(0xFF967BB6)),
-                    const SizedBox(width: 8),
-                  ],
-
-                  // Warning badge
-                  if (warning != null)
-                    Container(
-                      margin: const EdgeInsets.only(right: 8),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 7, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: Colors.orange.withOpacity(0.12),
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(
-                            color: Colors.orange.withOpacity(0.4)),
-                      ),
-                      child: const Row(mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.warning_amber_rounded,
-                                size: 11, color: Colors.orange),
-                            SizedBox(width: 4),
-                            Text('Needs more arenas',
-                                style: TextStyle(fontSize: 9,
-                                    color: Colors.orange,
-                                    fontWeight: FontWeight.bold)),
-                          ]),
-                    ),
-
-                  // Chevron
-                  AnimatedRotation(
-                    turns: isOpen ? 0.5 : 0,
-                    duration: const Duration(milliseconds: 280),
-                    child: const Icon(Icons.keyboard_arrow_down_rounded,
-                        color: Colors.white38, size: 20),
-                  ),
+                      shape: BoxShape.circle,
+                      color: _accent.withOpacity(0.1),
+                      border: Border.all(color: _accent.withOpacity(0.3))),
+                  child: const Icon(Icons.calendar_month_rounded,
+                      color: _accent, size: 20)),
+                const SizedBox(width: 12),
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('GENERATE SCHEDULE',
+                      style: TextStyle(color: Colors.white, fontSize: 20,
+                          fontWeight: FontWeight.w900, letterSpacing: 2)),
+                  Text('Configure & generate schedule per category independently',
+                      style: TextStyle(
+                          color: Colors.white.withOpacity(0.4), fontSize: 11)),
                 ]),
-              ),
-            ),
-
-            // ── Expanded body ───────────────────────────────────────────
-            SizeTransition(
-              sizeFactor: _catAnims[id] ??
-                  const AlwaysStoppedAnimation(0),
-              child: Column(children: [
-                Container(height: 1,
-                    margin: const EdgeInsets.symmetric(horizontal: 16),
-                    color: _accent.withOpacity(0.1)),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-                  child: Column(children: [
-                    Row(children: [
-                      Expanded(child: _spinnerTile(
-                        id: id, isRuns: true,
-                        label: 'RUNS PER TEAM',
-                        icon: Icons.repeat_rounded,
-                        color: _accent,
-                      )),
-                      const SizedBox(width: 12),
-                      Expanded(child: _spinnerTile(
-                        id: id, isRuns: false,
-                        label: 'ARENAS',
-                        icon: Icons.place_rounded,
-                        color: const Color(0xFF967BB6),
-                        subLabel: 'max $_maxTeamsPerArena teams each',
-                      )),
-                    ]),
-                    const SizedBox(height: 10),
-                    if (warning != null)
-                      _infoRow(icon: Icons.warning_amber_rounded,
-                          color: Colors.orange, text: warning)
-                    else if (count > 0)
-                      _infoRow(
-                        icon: Icons.check_circle_outline_rounded,
-                        color: const Color(0xFF00E5A0),
-                        text: 'Capacity OK: '
-                            '${arenas * _maxTeamsPerArena} teams '
-                            '($arenas × $_maxTeamsPerArena)',
-                      ),
-                  ]),
-                ),
               ]),
-            ),
-          ]),
-        );
-      }).toList(),
+
+              const SizedBox(height: 28),
+
+              // ── Category grid ─────────────────────────────────────────────
+              if (_isLoadingData)
+                const Center(child: Padding(
+                    padding: EdgeInsets.all(60),
+                    child: CircularProgressIndicator(color: _accent)))
+              else if (_categories.isEmpty)
+                _emptyBox()
+              else
+                _buildCategoryGrid(),
+
+              // ── Soccer card (full width below grid) ───────────────────────
+              if (_soccerCatId != null) ...[
+                const SizedBox(height: 20),
+                _buildSoccerCard(),
+              ],
+
+              const SizedBox(height: 36),
+            ]),
+          ),
+        ),
+      ]),
     );
   }
 
-  Widget _chip(String text, Color color) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+  Widget _emptyBox() => Container(
+    padding: const EdgeInsets.all(36),
     decoration: BoxDecoration(
-      color: color.withOpacity(0.08),
-      borderRadius: BorderRadius.circular(6),
-      border: Border.all(color: color.withOpacity(0.25)),
-    ),
-    child: Text(text, style: TextStyle(
-        color: color.withOpacity(0.85), fontSize: 10,
-        fontWeight: FontWeight.bold)),
-  );
-
-  Widget _infoRow({
-    required IconData icon,
-    required Color color,
-    required String text,
-  }) =>
-      Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.07),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: color.withOpacity(0.25)),
-        ),
-        child: Row(children: [
-          Icon(icon, size: 12, color: color),
-          const SizedBox(width: 6),
-          Expanded(child: Text(text,
-              style: TextStyle(fontSize: 11, color: color))),
-        ]),
-      );
-
-  Widget _spinnerTile({
-    required int id,
-    required bool isRuns,
-    required String label,
-    required IconData icon,
-    required Color color,
-    String? subLabel,
-  }) {
-    final value  = isRuns
-        ? (_runsPerCategory[id]   ?? 2)
-        : (_arenasPerCategory[id] ?? 1);
-    final maxVal = isRuns ? 99 : 3;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
         color: Colors.white.withOpacity(0.03),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withOpacity(0.2)),
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Icon(icon, size: 11, color: color.withOpacity(0.7)),
-          const SizedBox(width: 5),
-          Text(label, style: TextStyle(color: color.withOpacity(0.8),
-              fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
-        ]),
-        if (subLabel != null) ...[
-          const SizedBox(height: 2),
-          Text(subLabel, style: TextStyle(
-              color: Colors.white.withOpacity(0.25), fontSize: 9,
-              fontStyle: FontStyle.italic)),
-        ],
-        const SizedBox(height: 8),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          _spinBtn(icon: Icons.remove, color: color,
-              onTap: value > 1 ? () => setState(() {
-                if (isRuns) _runsPerCategory[id]   = value - 1;
-                else        _arenasPerCategory[id] = value - 1;
-              }) : null),
-          Text('$value', style: TextStyle(color: color, fontSize: 22,
-              fontWeight: FontWeight.w900)),
-          _spinBtn(icon: Icons.add, color: color,
-              onTap: value < maxVal ? () => setState(() {
-                if (isRuns) _runsPerCategory[id]   = value + 1;
-                else        _arenasPerCategory[id] = value + 1;
-              }) : null),
-        ]),
-      ]),
-    );
-  }
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white12)),
+    child: Center(child: Text('No categories found.',
+        style: TextStyle(
+            color: Colors.white.withOpacity(0.3), fontSize: 14))));
 
-  Widget _spinBtn({
-    required IconData icon,
-    required Color color,
-    required VoidCallback? onTap,
-  }) =>
-      GestureDetector(
-        onTap: onTap,
-        child: Container(
-          width: 30, height: 30,
-          decoration: BoxDecoration(shape: BoxShape.circle,
-            color: onTap != null
-                ? color.withOpacity(0.12)
-                : Colors.white.withOpacity(0.03),
-            border: Border.all(color: onTap != null
-                ? color.withOpacity(0.4) : Colors.white12),
-          ),
-          child: Icon(icon, size: 14,
-              color: onTap != null ? color : Colors.white12),
-        ),
+  // ══════════════════════════════════════════════════════════════════════════
+  // 2-COLUMN GRID
+  // ══════════════════════════════════════════════════════════════════════════
+  Widget _buildCategoryGrid() {
+    return LayoutBuilder(builder: (ctx, constraints) {
+      // 2 columns if wide enough, else 1
+      final cols      = constraints.maxWidth >= 700 ? 2 : 1;
+      final spacing   = 18.0;
+      final cardWidth = (constraints.maxWidth - spacing * (cols - 1)) / cols;
+
+      return Wrap(
+        spacing: spacing,
+        runSpacing: spacing,
+        children: _categories.asMap().entries.map((e) {
+          final color = _catColors[e.key % _catColors.length];
+          return SizedBox(
+            width: cardWidth,
+            child: _buildCategoryCard(e.value, color),
+          );
+        }).toList(),
       );
-
-  // ── Schedule Settings ──────────────────────────────────────────────────────
-  Widget _buildScheduleSettings() {
-    final timeError = (_endTime.hour * 60 + _endTime.minute) <=
-        (_startTime.hour * 60 + _startTime.minute);
-
-    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        _sectionLabel('TIME SETTINGS'),
-        const SizedBox(height: 10),
-        _timeTile(label: 'START TIME', time: _startTime, isStart: true),
-        const SizedBox(height: 8),
-        _timeTile(label: 'END TIME',   time: _endTime,   isStart: false),
-        if (timeError) ...[
-          const SizedBox(height: 6),
-          _infoRow(icon: Icons.error_outline_rounded, color: Colors.red,
-              text: 'End time must be after start time'),
-        ],
-        const SizedBox(height: 12),
-        _buildLunchToggle(),
-      ])),
-      const SizedBox(width: 20),
-      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        _sectionLabel('MATCH TIMING'),
-        const SizedBox(height: 10),
-        Row(children: [
-          Expanded(child: _buildNumberField(
-              label: 'DURATION', subtitle: 'min / match',
-              controller: _durationController)),
-          const SizedBox(width: 12),
-          Expanded(child: _buildNumberField(
-              label: 'BREAK', subtitle: 'min between',
-              controller: _intervalController)),
-        ]),
-        const SizedBox(height: 10),
-        _buildTimingPreview(),
-      ])),
-    ]);
-  }
-
-  Widget _sectionLabel(String text) => Row(children: [
-    Container(width: 3, height: 14,
-        decoration: BoxDecoration(color: _accent,
-            borderRadius: BorderRadius.circular(2))),
-    const SizedBox(width: 8),
-    Text(text, style: TextStyle(color: _accent.withOpacity(0.85),
-        fontWeight: FontWeight.w800, fontSize: 11, letterSpacing: 1.5)),
-  ]);
-
-  Widget _timeTile({
-    required String label,
-    required TimeOfDay time,
-    required bool isStart,
-  }) {
-    return GestureDetector(
-      onTap: () => _pickTime(isStart),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.05),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: _accent.withOpacity(0.25)),
-        ),
-        child: Row(children: [
-          Container(padding: const EdgeInsets.all(7),
-            decoration: BoxDecoration(shape: BoxShape.circle,
-                color: _accent.withOpacity(0.1)),
-            child: const Icon(Icons.access_time_rounded,
-                size: 14, color: _accent)),
-          const SizedBox(width: 10),
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(label, style: TextStyle(fontSize: 9,
-                color: Colors.white.withOpacity(0.4),
-                fontWeight: FontWeight.bold, letterSpacing: 0.5)),
-            Text(_fmtTime(time), style: const TextStyle(fontSize: 16,
-                fontWeight: FontWeight.bold, color: Colors.white)),
-          ]),
-          const Spacer(),
-          Icon(Icons.edit_rounded, size: 14,
-              color: Colors.white.withOpacity(0.3)),
-        ]),
-      ),
-    );
-  }
-
-  Widget _buildNumberField({
-    required String label,
-    required String subtitle,
-    required TextEditingController controller,
-  }) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(label, style: const TextStyle(color: Colors.white,
-          fontWeight: FontWeight.w700, fontSize: 11, letterSpacing: 1)),
-      const SizedBox(height: 6),
-      TextField(
-        controller: controller,
-        keyboardType: TextInputType.number,
-        textAlign: TextAlign.center,
-        style: const TextStyle(color: Colors.white,
-            fontSize: 18, fontWeight: FontWeight.bold),
-        decoration: InputDecoration(
-          contentPadding: const EdgeInsets.symmetric(
-              horizontal: 8, vertical: 12),
-          filled: true,
-          fillColor: Colors.white.withOpacity(0.05),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: BorderSide(color: Colors.white.withOpacity(0.15)),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: _accent, width: 2),
-          ),
-        ),
-      ),
-      const SizedBox(height: 4),
-      Text(subtitle, style: TextStyle(fontSize: 9,
-          color: Colors.white.withOpacity(0.35))),
-    ]);
-  }
-
-  Widget _buildTimingPreview() {
-    final duration  = int.tryParse(_durationController.text.trim()) ?? 0;
-    final breakMins = int.tryParse(_intervalController.text.trim())  ?? 0;
-    if (duration <= 0) return const SizedBox.shrink();
-
-    String fmt(int hour, int min) {
-      final total  = hour * 60 + min;
-      final th     = total ~/ 60;
-      final tm     = total % 60;
-      final period = th < 12 ? 'AM' : 'PM';
-      final h12    = th % 12 == 0 ? 12 : th % 12;
-      return '${h12.toString().padLeft(2, '0')}:${tm.toString().padLeft(2, '0')} $period';
-    }
-
-    final h = _startTime.hour, m = _startTime.minute;
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: _accent.withOpacity(0.06),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: _accent.withOpacity(0.2)),
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          const Icon(Icons.schedule_rounded, size: 11, color: _accent),
-          const SizedBox(width: 5),
-          const Text('EXAMPLE TIMING',
-              style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold,
-                  color: _accent, letterSpacing: 1)),
-        ]),
-        const SizedBox(height: 8),
-        _previewRow('Match 1', fmt(h, m),
-            fmt(h, m + duration), _accent),
-        if (breakMins > 0) ...[
-          const SizedBox(height: 4),
-          Row(children: [
-            const SizedBox(width: 6),
-            Icon(Icons.coffee_rounded, size: 10,
-                color: Colors.orange.shade400),
-            const SizedBox(width: 4),
-            Text('$breakMins min break',
-                style: TextStyle(fontSize: 9,
-                    color: Colors.orange.shade400,
-                    fontStyle: FontStyle.italic)),
-          ]),
-          const SizedBox(height: 4),
-        ] else
-          const SizedBox(height: 4),
-        _previewRow('Match 2',
-            fmt(h, m + duration + breakMins),
-            fmt(h, m + duration + breakMins + duration),
-            const Color(0xFF00E5A0)),
-      ]),
-    );
-  }
-
-  Widget _previewRow(String label, String start, String end, Color color) =>
-      Row(children: [
-        Container(width: 3, height: 16,
-            decoration: BoxDecoration(color: color,
-                borderRadius: BorderRadius.circular(2))),
-        const SizedBox(width: 8),
-        Text('$label  ', style: TextStyle(fontSize: 10,
-            fontWeight: FontWeight.bold, color: color)),
-        Text('$start – $end', style: TextStyle(fontSize: 10,
-            color: Colors.white.withOpacity(0.5))),
-      ]);
-
-  Widget _buildLunchToggle() {
-    return GestureDetector(
-      onTap: () => setState(() => _lunchBreakEnabled = !_lunchBreakEnabled),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-        decoration: BoxDecoration(
-          color: _lunchBreakEnabled
-              ? const Color(0xFFFFD700).withOpacity(0.07)
-              : Colors.white.withOpacity(0.03),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: _lunchBreakEnabled
-                ? const Color(0xFFFFD700).withOpacity(0.35)
-                : Colors.white.withOpacity(0.1),
-          ),
-        ),
-        child: Row(children: [
-          Container(
-            padding: const EdgeInsets.all(7),
-            decoration: BoxDecoration(shape: BoxShape.circle,
-              color: _lunchBreakEnabled
-                  ? const Color(0xFFFFD700).withOpacity(0.15)
-                  : Colors.white.withOpacity(0.05),
-            ),
-            child: Icon(Icons.restaurant_rounded, size: 14,
-                color: _lunchBreakEnabled
-                    ? const Color(0xFFFFD700) : Colors.white38),
-          ),
-          const SizedBox(width: 10),
-          Expanded(child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('LUNCH BREAK', style: TextStyle(
-                    fontWeight: FontWeight.bold, fontSize: 11,
-                    letterSpacing: 0.5,
-                    color: _lunchBreakEnabled
-                        ? const Color(0xFFFFD700) : Colors.white38)),
-                Text('12:00 PM – 1:00 PM  •  No matches',
-                    style: TextStyle(fontSize: 9, height: 1.4,
-                        color: _lunchBreakEnabled
-                            ? Colors.white38 : Colors.white24)),
-              ])),
-          Switch(
-            value: _lunchBreakEnabled,
-            onChanged: (v) => setState(() => _lunchBreakEnabled = v),
-            activeColor: const Color(0xFFFFD700),
-            inactiveThumbColor: Colors.white24,
-            inactiveTrackColor: Colors.white12,
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          ),
-        ]),
-      ),
-    );
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // CARD 2 — SOCCER BRACKET
+  // CATEGORY CARD
   // ══════════════════════════════════════════════════════════════════════════
-  Widget _buildSoccerCard() {
-    final tc          = _soccerTeams.length;
-    // CHANGED: Now requires minimum 4 teams, no maximum limit
-    final canGenerate = tc >= 4;
+  Widget _buildCategoryCard(Map<String, dynamic> cat, Color accent) {
+    final id     = int.tryParse(cat['category_id'].toString()) ?? 0;
+    final name   = (cat['category_type'] ?? '').toString();
+    final active = _isActive(cat);
+    final count  = _teamCountPerCategory[id] ?? 0;
+    final warn   = _arenaWarning(id);
+    final isGen  = _isGeneratingCat[id] ?? false;
+    final isDone = _generatedCat[id]    ?? false;
+
+    final catIdx = _categories.indexWhere(
+        (c) => int.tryParse(c['category_id'].toString()) == id);
+    final letter = catIdx >= 0 && catIdx < 26
+        ? String.fromCharCode(65 + catIdx) : '?';
 
     return Container(
-      width: 820,
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
             begin: Alignment.topLeft, end: Alignment.bottomRight,
-            colors: [Color(0xFF1E0A3A), Color(0xFF110720)]),
-        borderRadius: BorderRadius.circular(24),
+            colors: active
+                ? [accent.withOpacity(0.14), const Color(0xFF110730)]
+                : [Colors.white.withOpacity(0.04), const Color(0xFF0D0625)]),
+        borderRadius: BorderRadius.circular(20),
         border: Border.all(
-            color: _soccerAccent.withOpacity(0.35), width: 1.5),
-        boxShadow: [
-          BoxShadow(color: _soccerAccent.withOpacity(0.07),
-              blurRadius: 40, spreadRadius: 4),
-          BoxShadow(color: Colors.black.withOpacity(0.4),
-              blurRadius: 30, offset: const Offset(0, 10)),
-        ],
+          color: !active
+              ? Colors.white.withOpacity(0.08)
+              : isDone
+                  ? const Color(0xFF00E5A0).withOpacity(0.55)
+                  : accent.withOpacity(0.45),
+          width: 1.5),
+        boxShadow: active
+            ? [BoxShadow(color: accent.withOpacity(0.1),
+                blurRadius: 28, spreadRadius: 2)]
+            : [],
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(40, 32, 40, 32),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
+        padding: const EdgeInsets.fromLTRB(24, 22, 24, 24),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
           // ── Header ──────────────────────────────────────────────────────
           Row(children: [
             Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(shape: BoxShape.circle,
-                  color: _soccerAccent.withOpacity(0.12),
-                  border: Border.all(
-                      color: _soccerAccent.withOpacity(0.4))),
-              child: const Icon(Icons.sports_soccer,
-                  color: _soccerAccent, size: 22),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('MBOT SOCCER — BRACKET',
-                        style: TextStyle(color: Colors.white, fontSize: 18,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 1.5)),
-                    Text(
-                        'Separate from schedule  ·  '
-                        'Group Stage → Play-In → Double Elim → Grand Final',
-                        style: TextStyle(
-                            color: Colors.white.withOpacity(0.35),
-                            fontSize: 11)),
-                  ]),
-            ),
-            const SizedBox(width: 14),
-
-            // ── Prominent team count badge ─────────────────────────────
-            Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 16, vertical: 8),
+              width: 40, height: 40,
               decoration: BoxDecoration(
-                color: canGenerate
-                    ? _accent.withOpacity(0.12)
-                    : Colors.redAccent.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(24),
+                shape: BoxShape.circle,
+                color: active
+                    ? accent.withOpacity(0.18)
+                    : Colors.white.withOpacity(0.06),
                 border: Border.all(
-                  color: canGenerate
-                      ? _accent.withOpacity(0.65)
-                      : Colors.redAccent.withOpacity(0.65),
-                  width: 2,
-                ),
-                boxShadow: [BoxShadow(
-                  color: (canGenerate ? _accent : Colors.redAccent)
-                      .withOpacity(0.2),
-                  blurRadius: 10, spreadRadius: 1,
-                )],
-              ),
+                    color: active ? accent.withOpacity(0.7) : Colors.white24,
+                    width: 2.5)),
+              child: Center(child: Text(letter,
+                  style: TextStyle(
+                    color: active ? accent : Colors.white38,
+                    fontWeight: FontWeight.w900, fontSize: 15)))),
+            const SizedBox(width: 12),
+            Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(name.toUpperCase(),
+                  style: TextStyle(
+                    color: active ? Colors.white : Colors.white38,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 14, letterSpacing: 0.8)),
+              Text(active
+                  ? '$count team${count != 1 ? 's' : ''} registered'
+                  : 'Inactive — locked',
+                  style: TextStyle(
+                    color: active
+                        ? Colors.white.withOpacity(0.4)
+                        : Colors.white24,
+                    fontSize: 11)),
+            ])),
+            // Team badge
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: active
+                    ? accent.withOpacity(0.12)
+                    : Colors.white.withOpacity(0.04),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                    color: active
+                        ? accent.withOpacity(0.55)
+                        : Colors.white12,
+                    width: 1.5)),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.groups,
-                    color: canGenerate ? _accent : Colors.redAccent,
-                    size: 20),
-                const SizedBox(width: 8),
-                Column(crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('$tc',
-                          style: TextStyle(
-                            color: canGenerate
-                                ? _accent : Colors.redAccent,
-                            fontSize: 22,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 1,
-                            height: 1.0,
-                          )),
-                      Text('Teams Registered',
-                          style: TextStyle(
-                            color: (canGenerate
-                                ? _accent : Colors.redAccent)
-                                .withOpacity(0.7),
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 0.8,
-                          )),
-                    ]),
+                Icon(Icons.groups_rounded,
+                    color: active ? accent : Colors.white24, size: 16),
+                const SizedBox(width: 6),
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('$count',
+                      style: TextStyle(
+                        color: active ? accent : Colors.white24,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900, height: 1.0)),
+                  Text('Teams',
+                      style: TextStyle(
+                        color: (active ? accent : Colors.white24)
+                            .withOpacity(0.65),
+                        fontSize: 9, fontWeight: FontWeight.bold)),
+                ]),
               ]),
             ),
           ]),
 
-          const SizedBox(height: 20),
-          Container(height: 1,
-              color: _soccerAccent.withOpacity(0.15)),
-          const SizedBox(height: 16),
+          // ── Inactive notice ──────────────────────────────────────────────
+          if (!active) ...[
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+              decoration: BoxDecoration(
+                color: Colors.red.withOpacity(0.07),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.red.withOpacity(0.2))),
+              child: Row(children: [
+                const Icon(Icons.lock_outline_rounded,
+                    size: 14, color: Colors.white38),
+                const SizedBox(width: 10),
+                Expanded(child: Text(
+                    'This category is inactive. Activate it in the Category Manager to configure and generate a schedule.',
+                    style: TextStyle(color: Colors.white38, fontSize: 11,
+                        fontStyle: FontStyle.italic, height: 1.4))),
+              ]),
+            ),
+          ],
 
-          // ── Bracket flow diagram ─────────────────────────────────────
-          _buildBracketFlow(),
-          const SizedBox(height: 16),
+          // ── Active body ──────────────────────────────────────────────────
+          if (active) ...[
+            const SizedBox(height: 18),
+            _hDivider(accent),
+            const SizedBox(height: 18),
 
-          // ── Status notice ────────────────────────────────────────────
-          if (!canGenerate)
-            _infoRow(
-              icon: Icons.error_outline_rounded,
-              color: Colors.redAccent,
-              // CHANGED: Updated message for minimum 4 teams
-              text: 'Need at least 4 teams — ${4 - tc} more required.',
-            )
-          else if (_bracketGenerated)
-            _infoRow(
-              icon: Icons.check_circle_outline_rounded,
-              color: Colors.green,
-              text: 'Bracket generated! Go to the Soccer tab to manage groups.',
+            // Row 1: Start Time | Runs | Arenas
+            _buildRow1(id, accent),
+            const SizedBox(height: 12),
+
+            // Row 2: Duration | Match Break
+            _buildRow2(id, accent),
+            const SizedBox(height: 16),
+
+            // Health break
+            _buildHealthBreak(
+              enabled: _hbEnabled[id] ?? true,
+              hbStart: _hbStart[id]   ?? const TimeOfDay(hour: 12, minute: 0),
+              hbEnd:   _hbEnd[id]     ?? const TimeOfDay(hour: 13, minute: 0),
+              accent:  accent,
+              onToggle: (v) => setState(() => _hbEnabled[id] = v),
+              onPickStart: () async {
+                final p = await _pickTime(
+                    _hbStart[id] ?? const TimeOfDay(hour: 12, minute: 0),
+                    accent);
+                if (p != null) setState(() => _hbStart[id] = p);
+              },
+              onPickEnd: () async {
+                final p = await _pickTime(
+                    _hbEnd[id] ?? const TimeOfDay(hour: 13, minute: 0),
+                    accent);
+                if (p != null) setState(() => _hbEnd[id] = p);
+              },
             ),
 
+            // Capacity info
+            if (warn != null) ...[
+              const SizedBox(height: 12),
+              _infoRow(icon: Icons.warning_amber_rounded,
+                  color: Colors.orange, text: warn),
+            ] else if (count > 0) ...[
+              const SizedBox(height: 12),
+              _infoRow(
+                icon: Icons.check_circle_outline_rounded,
+                color: const Color(0xFF00E5A0),
+                text: 'Capacity OK — '
+                    '${(_arenasPerCategory[id] ?? 1) * _maxTeamsPerArena} slots '
+                    '(${_arenasPerCategory[id] ?? 1} × $_maxTeamsPerArena)',
+              ),
+            ],
+
+            const SizedBox(height: 18),
+            _hDivider(accent),
+            const SizedBox(height: 16),
+
+            // Generate button
+            _buildGenerateBtn(
+              label:  isDone ? 'REGENERATE SCHEDULE' : 'GENERATE SCHEDULE',
+              icon:   isDone ? Icons.refresh_rounded : Icons.auto_awesome_rounded,
+              color:  accent,
+              isLoading: isGen,
+              onTap:  () => _generateForCategory(id),
+            ),
+          ],
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildRow1(int id, Color accent) {
+    final startT = _startTimePerCat[id] ?? const TimeOfDay(hour: 8, minute: 0);
+    final runs   = _runsPerCategory[id]   ?? 2;
+    final arenas = _arenasPerCategory[id] ?? 1;
+
+    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      // Start time
+      Expanded(flex: 5, child: _tile(
+        label: 'START TIME', icon: Icons.access_time_rounded, color: accent,
+        child: _timePill(time: startT, color: accent,
+            onTap: () async {
+              final p = await _pickTime(startT, accent);
+              if (p != null) setState(() => _startTimePerCat[id] = p);
+            }),
+      )),
+      const SizedBox(width: 10),
+      // Runs
+      Expanded(flex: 3, child: _tile(
+        label: 'RUNS / TEAM', icon: Icons.repeat_rounded,
+        color: const Color(0xFF9B6FE8),
+        child: _spinnerWidget(
+          value: runs, color: const Color(0xFF9B6FE8),
+          onDec: runs > 1
+              ? () => setState(() => _runsPerCategory[id] = runs - 1) : null,
+          onInc: runs < 99
+              ? () => setState(() => _runsPerCategory[id] = runs + 1) : null,
+        ),
+      )),
+      const SizedBox(width: 10),
+      // Arenas
+      Expanded(flex: 3, child: _tile(
+        label: 'ARENAS', icon: Icons.place_rounded,
+        color: const Color(0xFFFFD700),
+        sublabel: 'max $_maxTeamsPerArena ea.',
+        child: _spinnerWidget(
+          value: arenas, color: const Color(0xFFFFD700),
+          onDec: arenas > 1
+              ? () => setState(() => _arenasPerCategory[id] = arenas - 1) : null,
+          onInc: arenas < 10
+              ? () => setState(() => _arenasPerCategory[id] = arenas + 1) : null,
+        ),
+      )),
+    ]);
+  }
+
+  Widget _buildRow2(int id, Color accent) => Row(
+      crossAxisAlignment: CrossAxisAlignment.start, children: [
+    Expanded(child: _tile(
+      label: 'MATCH DURATION', icon: Icons.timer_rounded, color: accent,
+      child: _numField(
+          controller: _durationPerCat[id]!, color: accent, suffix: 'min'),
+    )),
+    const SizedBox(width: 10),
+    Expanded(child: _tile(
+      label: 'MATCH BREAK', icon: Icons.pause_circle_outline_rounded,
+      color: Colors.orange.shade300,
+      sublabel: 'optional',
+      child: _numField(
+          controller: _matchBreakPerCat[id]!,
+          color: Colors.orange.shade300, suffix: 'min'),
+    )),
+  ]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SOCCER CARD  (full width, has own timing — no runs spinner)
+  // ══════════════════════════════════════════════════════════════════════════
+  Widget _buildSoccerCard() {
+    final tc          = _soccerTeams.length;
+    final canGenerate = tc >= 4;
+    const accent      = _soccerAccent;
+
+    return Container(
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+            begin: Alignment.topLeft, end: Alignment.bottomRight,
+            colors: [Color(0xFF251040), Color(0xFF110720)]),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: accent.withOpacity(0.45), width: 1.5),
+        boxShadow: [BoxShadow(color: accent.withOpacity(0.09),
+            blurRadius: 30, spreadRadius: 2)]),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 22, 24, 24),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+          // ── Header ────────────────────────────────────────────────────────
+          Row(children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(shape: BoxShape.circle,
+                  color: accent.withOpacity(0.14),
+                  border: Border.all(color: accent.withOpacity(0.5))),
+              child: const Icon(Icons.sports_soccer,
+                  color: accent, size: 22)),
+            const SizedBox(width: 14),
+            Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('MBOT SOCCER — BRACKET',
+                  style: TextStyle(color: Colors.white, fontSize: 15,
+                      fontWeight: FontWeight.w800, letterSpacing: 1.2)),
+              Text('Group Stage → Play-In → Double Elim → Grand Final',
+                  style: TextStyle(
+                      color: Colors.white.withOpacity(0.4), fontSize: 11)),
+            ])),
+            const SizedBox(width: 12),
+            // Teams badge
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+              decoration: BoxDecoration(
+                color: canGenerate
+                    ? _accent.withOpacity(0.12)
+                    : Colors.redAccent.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(
+                  color: canGenerate
+                      ? _accent.withOpacity(0.65)
+                      : Colors.redAccent.withOpacity(0.65),
+                  width: 2)),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.groups,
+                    color: canGenerate ? _accent : Colors.redAccent, size: 18),
+                const SizedBox(width: 8),
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('$tc', style: TextStyle(
+                      color: canGenerate ? _accent : Colors.redAccent,
+                      fontSize: 20, fontWeight: FontWeight.w900, height: 1.0)),
+                  Text('Teams Registered', style: TextStyle(
+                      color: (canGenerate ? _accent : Colors.redAccent)
+                          .withOpacity(0.7),
+                      fontSize: 9, fontWeight: FontWeight.bold)),
+                ]),
+              ]),
+            ),
+          ]),
+
+          const SizedBox(height: 18),
+          Container(height: 1,
+              color: accent.withOpacity(0.2)),
+          const SizedBox(height: 16),
+
+          // ── Bracket flow ──────────────────────────────────────────────────
+          _buildBracketFlow(),
+          const SizedBox(height: 18),
+          _hDivider(accent),
+          const SizedBox(height: 18),
+
+          // ── Soccer schedule settings ─────────────────────────────────────
+          // Row 1: Start Time | Match Duration | Match Break
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(flex: 4, child: _tile(
+              label: 'START TIME', icon: Icons.access_time_rounded,
+              color: accent,
+              child: _timePill(
+                time: _soccerStartTime, color: accent,
+                onTap: () async {
+                  final p = await _pickTime(_soccerStartTime, accent);
+                  if (p != null) setState(() => _soccerStartTime = p);
+                }),
+            )),
+            const SizedBox(width: 10),
+            Expanded(flex: 3, child: _tile(
+              label: 'MATCH DURATION', icon: Icons.timer_rounded,
+              color: accent,
+              child: _numField(
+                  controller: _soccerDurationCtrl,
+                  color: accent, suffix: 'min'),
+            )),
+            const SizedBox(width: 10),
+            Expanded(flex: 3, child: _tile(
+              label: 'MATCH BREAK', icon: Icons.pause_circle_outline_rounded,
+              color: Colors.orange.shade300,
+              sublabel: 'optional',
+              child: _numField(
+                  controller: _soccerMatchBreakCtrl,
+                  color: Colors.orange.shade300, suffix: 'min'),
+            )),
+          ]),
           const SizedBox(height: 14),
 
-          // ── View Teams toggle ────────────────────────────────────────
+          // Health break for soccer
+          _buildHealthBreak(
+            enabled:  _soccerHbEnabled,
+            hbStart:  _soccerHbStart,
+            hbEnd:    _soccerHbEnd,
+            accent:   accent,
+            onToggle: (v) => setState(() => _soccerHbEnabled = v),
+            onPickStart: () async {
+              final p = await _pickTime(_soccerHbStart, accent);
+              if (p != null) setState(() => _soccerHbStart = p);
+            },
+            onPickEnd: () async {
+              final p = await _pickTime(_soccerHbEnd, accent);
+              if (p != null) setState(() => _soccerHbEnd = p);
+            },
+          ),
+
+          if (!canGenerate) ...[
+            const SizedBox(height: 12),
+            _infoRow(icon: Icons.error_outline_rounded,
+                color: Colors.redAccent,
+                text: 'Need at least 4 teams — ${4 - tc} more required.'),
+          ] else if (_bracketGenerated) ...[
+            const SizedBox(height: 12),
+            _infoRow(icon: Icons.check_circle_outline_rounded,
+                color: Colors.green,
+                text: 'Bracket generated! Go to the Soccer tab to manage groups.'),
+          ],
+
+          const SizedBox(height: 16),
+
+          // ── View teams toggle ─────────────────────────────────────────────
           GestureDetector(
-            onTap: _toggleSoccerTeams,
+            onTap: () {
+              setState(() => _showSoccerTeams = !_showSoccerTeams);
+              _showSoccerTeams
+                  ? _soccerAnimCtrl.forward()
+                  : _soccerAnimCtrl.reverse();
+            },
             child: Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 16, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.04),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.white12),
-              ),
+                  color: Colors.white.withOpacity(0.04),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.white12)),
               child: Row(children: [
                 const Icon(Icons.people_alt_rounded,
                     color: Colors.white38, size: 16),
@@ -1137,174 +890,361 @@ class _GenerateScheduleState extends State<GenerateSchedule>
                         fontSize: 13, fontWeight: FontWeight.w600)),
                 const Spacer(),
                 AnimatedRotation(
-                  turns: _showSoccerTeams ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 300),
-                  child: const Icon(Icons.keyboard_arrow_down_rounded,
-                      color: Colors.white38, size: 20),
-                ),
+                    turns: _showSoccerTeams ? 0.5 : 0,
+                    duration: const Duration(milliseconds: 300),
+                    child: const Icon(Icons.keyboard_arrow_down_rounded,
+                        color: Colors.white38, size: 20)),
               ]),
             ),
           ),
 
-          // ── Team list ────────────────────────────────────────────────
           SizeTransition(
-            sizeFactor: _soccerTeamAnim,
+            sizeFactor: _soccerAnim,
             child: Column(children: [
               const SizedBox(height: 10),
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF0A0620),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: Colors.white.withOpacity(0.06)),
-                ),
-                child: Column(children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
-                    decoration: const BoxDecoration(
-                      gradient: LinearGradient(
-                          colors: [Color(0xFF2D0E7A), Color(0xFF1A0850)]),
-                      borderRadius: BorderRadius.vertical(
-                          top: Radius.circular(11)),
-                    ),
-                    child: Row(children: [
-                      _th('#',         flex: 1),
-                      _th('ID',        flex: 2),
-                      _th('TEAM NAME', flex: 5),
-                    ]),
-                  ),
-                  if (_soccerTeams.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.all(24),
-                      child: Text('No teams registered yet.',
-                          style: TextStyle(color: Colors.white24,
-                              fontSize: 14)),
-                    )
-                  else
-                    ..._soccerTeams.asMap().entries.map((e) {
-                      final idx    = e.key;
-                      final team   = e.value;
-                      final rawId  = team['team_id']?.toString() ?? '';
-                      final n      = int.tryParse(rawId);
-                      final dispId = n != null
-                          ? 'C${n.toString().padLeft(3, '0')}R' : rawId;
-                      return Container(
-                        decoration: BoxDecoration(
-                          color: idx % 2 == 0
-                              ? const Color(0xFF0D0830)
-                              : const Color(0xFF090620),
-                          border: const Border(bottom: BorderSide(
-                              color: Color(0xFF1A1050), width: 1)),
-                        ),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 11),
-                        child: Row(children: [
-                          Expanded(flex: 1, child: Text('${idx + 1}',
-                              style: TextStyle(
-                                  color: Colors.white.withOpacity(0.3),
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.bold))),
-                          Expanded(flex: 2, child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: _accent.withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(5),
-                              border: Border.all(
-                                  color: _accent.withOpacity(0.4)),
-                            ),
-                            child: Text(dispId,
-                                style: const TextStyle(
-                                    color: _accent, fontSize: 11,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 1)),
-                          )),
-                          Expanded(flex: 5, child: Text(
-                              team['team_name']?.toString() ?? '',
-                              style: const TextStyle(color: Colors.white,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w600))),
-                        ]),
-                      );
-                    }),
-                ]),
-              ),
+              _buildTeamTable(),
             ]),
           ),
 
           const SizedBox(height: 20),
 
-          // ── Generate Bracket button ──────────────────────────────────
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: (canGenerate && !_isGenBracket)
-                  ? _generateBracket
-                  : null,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.transparent,
-                shadowColor: Colors.transparent,
-                disabledBackgroundColor: Colors.transparent,
-                padding: EdgeInsets.zero,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12)),
-              ),
-              child: Ink(
-                decoration: BoxDecoration(
-                  gradient: canGenerate
-                      ? const LinearGradient(
-                          colors: [Color(0xFFFF6B35), Color(0xFFCC4A1A)])
-                      : null,
-                  color: canGenerate
-                      ? null : Colors.white.withOpacity(0.04),
-                  borderRadius: BorderRadius.circular(12),
-                  border: canGenerate
-                      ? null : Border.all(color: Colors.white12),
-                  boxShadow: canGenerate
-                      ? [BoxShadow(
-                          color: _soccerAccent.withOpacity(0.35),
-                          blurRadius: 20, spreadRadius: 2)]
-                      : [],
-                ),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 18),
-                  alignment: Alignment.center,
-                  child: _isGenBracket
-                      ? const SizedBox(width: 22, height: 22,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
-                      : Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              _bracketGenerated
-                                  ? Icons.refresh_rounded
-                                  : Icons.account_tree_rounded,
-                              color: canGenerate
-                                  ? Colors.white : Colors.white24,
-                              size: 20),
-                            const SizedBox(width: 10),
-                            Text(
-                              _bracketGenerated
-                                  ? 'REGENERATE BRACKET'
-                                  : 'GENERATE BRACKET',
-                              style: TextStyle(
-                                color: canGenerate
-                                    ? Colors.white : Colors.white24,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 15, letterSpacing: 2,
-                              )),
-                          ]),
-                ),
-              ),
-            ),
+          // ── Generate bracket button ───────────────────────────────────────
+          _buildGenerateBtn(
+            label:     _bracketGenerated ? 'REGENERATE BRACKET' : 'GENERATE BRACKET',
+            icon:      _bracketGenerated ? Icons.refresh_rounded : Icons.account_tree_rounded,
+            color:     canGenerate ? accent : Colors.white24,
+            isLoading: _isGenBracket,
+            onTap:     canGenerate ? _generateBracket : null,
+            disabled:  !canGenerate,
           ),
         ]),
       ),
     );
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // SHARED WIDGETS
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // Health break row (reused by both category cards and soccer card)
+  Widget _buildHealthBreak({
+    required bool enabled,
+    required TimeOfDay hbStart,
+    required TimeOfDay hbEnd,
+    required Color accent,
+    required ValueChanged<bool> onToggle,
+    required VoidCallback onPickStart,
+    required VoidCallback onPickEnd,
+  }) {
+    const hbColor   = Color(0xFF00E5A0);
+    final durationM = _hbDuration(hbStart, hbEnd);
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+      decoration: BoxDecoration(
+        color: enabled
+            ? hbColor.withOpacity(0.06)
+            : Colors.white.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+            color: enabled ? hbColor.withOpacity(0.35) : Colors.white12)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+        // Toggle header
+        Row(children: [
+          Container(
+            padding: const EdgeInsets.all(7),
+            decoration: BoxDecoration(shape: BoxShape.circle,
+              color: enabled
+                  ? hbColor.withOpacity(0.15)
+                  : Colors.white.withOpacity(0.05)),
+            child: Icon(Icons.favorite_rounded, size: 14,
+                color: enabled ? hbColor : Colors.white38)),
+          const SizedBox(width: 11),
+          Expanded(child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('HEALTH BREAK',
+                style: TextStyle(
+                  color: enabled ? hbColor : Colors.white38,
+                  fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 0.8)),
+            Text(enabled
+                ? '${_fmtTOD(hbStart)} – ${_fmtTOD(hbEnd)}  •  ${durationM}min  •  No matches during this window'
+                : 'Disabled — matches run continuously',
+                style: TextStyle(
+                  color: enabled ? Colors.white38 : Colors.white24,
+                  fontSize: 10, height: 1.4)),
+          ])),
+          Switch(
+            value: enabled,
+            onChanged: onToggle,
+            activeColor: hbColor,
+            inactiveThumbColor: Colors.white24,
+            inactiveTrackColor: Colors.white12,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+        ]),
+
+        // Start / End time pickers
+        if (enabled) ...[
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('BREAK STARTS',
+                  style: TextStyle(color: hbColor.withOpacity(0.7),
+                      fontSize: 9, fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8)),
+              const SizedBox(height: 5),
+              GestureDetector(onTap: onPickStart,
+                  child: _timePill(time: hbStart, color: hbColor)),
+            ])),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Column(children: [
+                const SizedBox(height: 14),
+                Icon(Icons.arrow_forward_rounded,
+                    color: hbColor.withOpacity(0.4), size: 16),
+              ])),
+            Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('BREAK ENDS',
+                  style: TextStyle(color: hbColor.withOpacity(0.7),
+                      fontSize: 9, fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8)),
+              const SizedBox(height: 5),
+              GestureDetector(onTap: onPickEnd,
+                  child: _timePill(time: hbEnd, color: hbColor)),
+            ])),
+            const SizedBox(width: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              decoration: BoxDecoration(
+                color: hbColor.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: hbColor.withOpacity(0.3))),
+              child: Column(children: [
+                Text('$durationM',
+                    style: TextStyle(color: hbColor, fontSize: 18,
+                        fontWeight: FontWeight.w900, height: 1.0)),
+                Text('min', style: TextStyle(
+                    color: hbColor.withOpacity(0.6), fontSize: 9,
+                    fontWeight: FontWeight.bold)),
+              ]),
+            ),
+          ]),
+          if (durationM <= 0) ...[
+            const SizedBox(height: 8),
+            _infoRow(icon: Icons.error_outline_rounded,
+                color: Colors.orange,
+                text: 'Break end must be after break start.'),
+          ],
+        ],
+      ]),
+    );
+  }
+
+  Widget _tile({
+    required String label,
+    required IconData icon,
+    required Color color,
+    required Widget child,
+    String? sublabel,
+  }) =>
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(icon, size: 10, color: color.withOpacity(0.75)),
+          const SizedBox(width: 4),
+          Flexible(child: Text(label, style: TextStyle(
+              color: color.withOpacity(0.85), fontSize: 9,
+              fontWeight: FontWeight.bold, letterSpacing: 0.8))),
+        ]),
+        if (sublabel != null) ...[
+          const SizedBox(height: 1),
+          Text(sublabel, style: TextStyle(
+              color: Colors.white.withOpacity(0.28), fontSize: 8,
+              fontStyle: FontStyle.italic)),
+        ],
+        const SizedBox(height: 6),
+        child,
+      ]);
+
+  Widget _timePill({
+    required TimeOfDay time,
+    required Color color,
+    VoidCallback? onTap,
+  }) =>
+      GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withOpacity(0.3))),
+          child: Row(children: [
+            Icon(Icons.access_time_rounded, size: 13, color: color),
+            const SizedBox(width: 7),
+            Expanded(child: Text(_fmtTOD(time),
+                style: TextStyle(color: color, fontSize: 14,
+                    fontWeight: FontWeight.bold))),
+            if (onTap != null)
+              Icon(Icons.edit_rounded, size: 11,
+                  color: color.withOpacity(0.45)),
+          ]),
+        ),
+      );
+
+  Widget _spinnerWidget({
+    required int value,
+    required Color color,
+    required VoidCallback? onDec,
+    required VoidCallback? onInc,
+  }) =>
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.07),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withOpacity(0.25))),
+        child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+          _spinBtn(icon: Icons.remove, color: color, onTap: onDec),
+          Text('$value', style: TextStyle(color: color, fontSize: 20,
+              fontWeight: FontWeight.w900)),
+          _spinBtn(icon: Icons.add, color: color, onTap: onInc),
+        ]),
+      );
+
+  Widget _spinBtn({required IconData icon, required Color color,
+      required VoidCallback? onTap}) =>
+      GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 28, height: 28,
+          decoration: BoxDecoration(shape: BoxShape.circle,
+            color: onTap != null
+                ? color.withOpacity(0.14)
+                : Colors.white.withOpacity(0.03),
+            border: Border.all(
+                color: onTap != null
+                    ? color.withOpacity(0.5) : Colors.white12)),
+          child: Icon(icon, size: 13,
+              color: onTap != null ? color : Colors.white12)));
+
+  Widget _numField({
+    required TextEditingController controller,
+    required Color color,
+    required String suffix,
+  }) =>
+      Container(
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.06),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withOpacity(0.25))),
+        child: Row(children: [
+          Expanded(child: TextField(
+            controller: controller,
+            keyboardType: TextInputType.number,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: color, fontSize: 18,
+                fontWeight: FontWeight.bold),
+            decoration: InputDecoration(
+              contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 8, vertical: 10),
+              border: InputBorder.none,
+              hintText: '0',
+              hintStyle: TextStyle(color: color.withOpacity(0.3))),
+          )),
+          Padding(padding: const EdgeInsets.only(right: 10),
+              child: Text(suffix, style: TextStyle(
+                  color: color.withOpacity(0.5), fontSize: 11,
+                  fontWeight: FontWeight.bold))),
+        ]),
+      );
+
+  Widget _buildGenerateBtn({
+    required String label,
+    required IconData icon,
+    required Color color,
+    required bool isLoading,
+    required VoidCallback? onTap,
+    bool disabled = false,
+  }) =>
+      SizedBox(
+        width: double.infinity,
+        child: ElevatedButton(
+          onPressed: isLoading || disabled ? null : onTap,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.transparent,
+            shadowColor: Colors.transparent,
+            disabledBackgroundColor: Colors.transparent,
+            padding: EdgeInsets.zero,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(13))),
+          child: Ink(
+            decoration: BoxDecoration(
+              gradient: (!isLoading && !disabled)
+                  ? LinearGradient(colors: [
+                      color, Color.lerp(color, Colors.black, 0.28)!,
+                    ])
+                  : null,
+              color: (isLoading || disabled)
+                  ? Colors.white.withOpacity(0.05) : null,
+              borderRadius: BorderRadius.circular(13),
+              border: (isLoading || disabled)
+                  ? Border.all(color: Colors.white12) : null,
+              boxShadow: (!isLoading && !disabled)
+                  ? [BoxShadow(color: color.withOpacity(0.38),
+                      blurRadius: 18, spreadRadius: 1)]
+                  : []),
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              alignment: Alignment.center,
+              child: isLoading
+                  ? SizedBox(width: 20, height: 20,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2.5, color: color))
+                  : Row(mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(icon,
+                            color: disabled
+                                ? Colors.white24 : Colors.white, size: 18),
+                        const SizedBox(width: 10),
+                        Text(label,
+                            style: TextStyle(
+                              color: disabled ? Colors.white24 : Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13, letterSpacing: 1.8)),
+                      ]),
+            ),
+          ),
+        ),
+      );
+
+  Widget _hDivider(Color color) => Container(
+    height: 1,
+    decoration: BoxDecoration(gradient: LinearGradient(colors: [
+      Colors.transparent, color.withOpacity(0.25), Colors.transparent,
+    ])));
+
+  Widget _infoRow({required IconData icon, required Color color,
+      required String text}) =>
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+            color: color.withOpacity(0.07),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withOpacity(0.25))),
+        child: Row(children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 8),
+          Expanded(child: Text(text,
+              style: TextStyle(fontSize: 11, color: color, height: 1.4))),
+        ]));
+
+  // ── Bracket flow steps ──────────────────────────────────────────────────────
   Widget _buildBracketFlow() {
     const steps = [
       (Icons.grid_view_rounded,    'GROUP\nSTAGE', Color(0xFF00CFFF)),
@@ -1317,75 +1257,95 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(0.03),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withOpacity(0.07)),
-      ),
-      child: Row(
-        children: steps.asMap().entries.expand((e) {
-          final idx  = e.key;
-          final step = e.value;
-          return [
-            Expanded(child: Column(children: [
-              Container(
-                width: 40, height: 40,
-                decoration: BoxDecoration(shape: BoxShape.circle,
-                    color: step.$3.withOpacity(0.12),
-                    border: Border.all(
-                        color: step.$3.withOpacity(0.5), width: 1.5)),
-                child: Icon(step.$1, color: step.$3, size: 18),
-              ),
-              const SizedBox(height: 6),
-              Text(step.$2, textAlign: TextAlign.center,
-                  style: TextStyle(color: step.$3, fontSize: 9,
-                      fontWeight: FontWeight.bold, height: 1.3)),
-            ])),
-            if (idx < steps.length - 1)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 16),
+        border: Border.all(color: Colors.white.withOpacity(0.07))),
+      child: Row(children: steps.asMap().entries.expand((e) {
+        final idx = e.key; final step = e.value;
+        return [
+          Expanded(child: Column(children: [
+            Container(width: 38, height: 38,
+              decoration: BoxDecoration(shape: BoxShape.circle,
+                  color: step.$3.withOpacity(0.12),
+                  border: Border.all(
+                      color: step.$3.withOpacity(0.5), width: 1.5)),
+              child: Icon(step.$1, color: step.$3, size: 16)),
+            const SizedBox(height: 5),
+            Text(step.$2, textAlign: TextAlign.center,
+                style: TextStyle(color: step.$3, fontSize: 9,
+                    fontWeight: FontWeight.bold, height: 1.3)),
+          ])),
+          if (idx < steps.length - 1)
+            Padding(padding: const EdgeInsets.only(bottom: 14),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Container(width: 12, height: 1.5,
+                  Container(width: 10, height: 1.5,
                       color: Colors.white.withOpacity(0.1)),
                   Icon(Icons.chevron_right,
-                      color: Colors.white.withOpacity(0.15), size: 14),
-                ]),
-              ),
-          ];
-        }).toList(),
-      ),
+                      color: Colors.white.withOpacity(0.15), size: 13),
+                ])),
+        ];
+      }).toList()),
     );
   }
 
-  Widget _th(String text, {int flex = 1}) => Expanded(
-    flex: flex,
-    child: Text(text, style: const TextStyle(color: Colors.white54,
-        fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 1)),
+  // ── Team table (inside soccer card) ────────────────────────────────────────
+  Widget _buildTeamTable() => Container(
+    decoration: BoxDecoration(
+        color: const Color(0xFF0A0620),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withOpacity(0.06))),
+    child: Column(children: [
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        decoration: const BoxDecoration(
+            gradient: LinearGradient(
+                colors: [Color(0xFF2D0E7A), Color(0xFF1A0850)]),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(11))),
+        child: Row(children: [
+          _th('#', flex: 1), _th('ID', flex: 2), _th('TEAM NAME', flex: 5),
+        ]),
+      ),
+      if (_soccerTeams.isEmpty)
+        const Padding(padding: EdgeInsets.all(24),
+            child: Text('No teams registered yet.',
+                style: TextStyle(color: Colors.white24, fontSize: 14)))
+      else
+        ..._soccerTeams.asMap().entries.map((e) {
+          final idx    = e.key; final team = e.value;
+          final rawId  = team['team_id']?.toString() ?? '';
+          final n      = int.tryParse(rawId);
+          final dispId = n != null
+              ? 'C${n.toString().padLeft(3, '0')}R' : rawId;
+          return Container(
+            decoration: BoxDecoration(
+              color: idx % 2 == 0
+                  ? const Color(0xFF0D0830) : const Color(0xFF090620),
+              border: const Border(
+                  bottom: BorderSide(color: Color(0xFF1A1050), width: 1))),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+            child: Row(children: [
+              Expanded(flex: 1, child: Text('${idx + 1}',
+                  style: TextStyle(color: Colors.white.withOpacity(0.3),
+                      fontSize: 13, fontWeight: FontWeight.bold))),
+              Expanded(flex: 2, child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                    color: _accent.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(5),
+                    border: Border.all(color: _accent.withOpacity(0.4))),
+                child: Text(dispId, style: const TextStyle(
+                    color: _accent, fontSize: 11,
+                    fontWeight: FontWeight.bold, letterSpacing: 1)))),
+              Expanded(flex: 5, child: Text(
+                  team['team_name']?.toString() ?? '',
+                  style: const TextStyle(color: Colors.white,
+                      fontSize: 14, fontWeight: FontWeight.w600))),
+            ]),
+          );
+        }),
+    ]),
   );
 
-  Future<void> _pickTime(bool isStart) async {
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: isStart ? _startTime : _endTime,
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: const ColorScheme.dark(
-              primary: _accent, onPrimary: Colors.black,
-              surface: Color(0xFF2D0E7A), onSurface: Colors.white),
-          timePickerTheme: TimePickerThemeData(
-            dialHandColor: _accent,
-            dialBackgroundColor: const Color(0xFF1E0A5A),
-            hourMinuteColor: Colors.white.withOpacity(0.1),
-            hourMinuteTextColor: Colors.white),
-        ),
-        child: child!,
-      ),
-    );
-    if (picked != null) setState(() {
-      if (isStart) _startTime = picked; else _endTime = picked;
-    });
-  }
-
-  String _fmtTime(TimeOfDay t) {
-    final period = t.hour < 12 ? 'AM' : 'PM';
-    final h12    = t.hourOfPeriod == 0 ? 12 : t.hourOfPeriod;
-    return '${h12.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')} $period';
-  }
+  Widget _th(String text, {int flex = 1}) => Expanded(
+      flex: flex,
+      child: Text(text, style: const TextStyle(color: Colors.white54,
+          fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 1)));
 }
