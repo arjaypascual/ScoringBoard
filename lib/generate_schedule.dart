@@ -42,6 +42,18 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   final Map<int, bool> _isGeneratingCat = {};
   final Map<int, bool> _generatedCat    = {};
 
+  // ── Shared generate state ──────────────────────────────────────────────────
+  bool _isGeneratingAll = false;
+  bool _generatedAll    = false;
+
+  // ── Shared timing for non-soccer ──────────────────────────────────────────
+  TimeOfDay             _sharedStartTime = const TimeOfDay(hour: 8, minute: 0);
+  final TextEditingController _sharedDuration = TextEditingController(text: '6');
+  final TextEditingController _sharedBreak    = TextEditingController(text: '2');
+  bool      _sharedHbEnabled = true;
+  TimeOfDay _sharedHbStart   = const TimeOfDay(hour: 12, minute: 0);
+  TimeOfDay _sharedHbEnd     = const TimeOfDay(hour: 13, minute: 0);
+
   // ── Soccer data ────────────────────────────────────────────────────────────
   List<Map<String, dynamic>> _soccerTeams   = [];
   int?  _soccerCatId;
@@ -56,6 +68,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   bool      _soccerHbEnabled = true;
   TimeOfDay _soccerHbStart   = const TimeOfDay(hour: 12, minute: 0);
   TimeOfDay _soccerHbEnd     = const TimeOfDay(hour: 13, minute: 0);
+  int       _soccerArenas    = 1;
 
   // ── Shared ─────────────────────────────────────────────────────────────────
   bool _isLoadingData = true;
@@ -91,6 +104,8 @@ class _GenerateScheduleState extends State<GenerateSchedule>
     _soccerAnimCtrl.dispose();
     _soccerDurationCtrl.dispose();
     _soccerMatchBreakCtrl.dispose();
+    _sharedDuration.dispose();
+    _sharedBreak.dispose();
     for (final c in _durationPerCat.values) c.dispose();
     for (final c in _matchBreakPerCat.values) c.dispose();
     super.dispose();
@@ -178,7 +193,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   String _fmtTOD(TimeOfDay t) {
     final p = t.hour < 12 ? 'AM' : 'PM';
     final h = t.hourOfPeriod == 0 ? 12 : t.hourOfPeriod;
-    return '${h.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')} $p';
+    return '${h.toString().padLeft(2, "0")}:${t.minute.toString().padLeft(2, "0")} $p';
   }
 
   int _hbDuration(TimeOfDay s, TimeOfDay e) =>
@@ -216,7 +231,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
     try {
       final st       = _startTimePerCat[id] ?? const TimeOfDay(hour: 8, minute: 0);
       final interval = int.tryParse(_matchBreakPerCat[id]?.text.trim() ?? '0') ?? 0;
-      final stStr    = '${st.hour.toString().padLeft(2, '0')}:${st.minute.toString().padLeft(2, '0')}';
+      final stStr    = '${st.hour.toString().padLeft(2, "0")}:${st.minute.toString().padLeft(2, "0")}';
       final enabled  = _hbEnabled[id] ?? false;
       final hbMins   = enabled
           ? _hbDuration(
@@ -245,36 +260,165 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   }
 
   // ── Generate Soccer bracket ────────────────────────────────────────────────
+  // ── Generate EVERYTHING ────────────────────────────────────────────────────
+  Future<void> _generateEverything() async {
+    final activeCats = _categories.where(_isActive).toList();
+    final tc         = _soccerTeams.length;
+    final hasSoccer  = _soccerCatId != null && tc >= 4;
+    if (activeCats.isEmpty && !hasSoccer) {
+      _snack('Nothing to generate.', Colors.orange); return;
+    }
+    final dur = int.tryParse(_sharedDuration.text.trim()) ?? 0;
+    if (activeCats.isNotEmpty && dur <= 0) {
+      _snack('Duration must be > 0.', Colors.red); return;
+    }
+    final soccerDur = int.tryParse(_soccerDurationCtrl.text.trim()) ?? 10;
+    if (hasSoccer && soccerDur <= 0) {
+      _snack('Soccer match duration must be > 0.', Colors.red); return;
+    }
+    final confirmed = await _showConfirmDialog();
+    if (confirmed != true) return;
+    setState(() { _isGeneratingAll = true; _isGenBracket = true; });
+    try {
+      // ── Non-soccer categories ──────────────────────────────────────────────
+      if (activeCats.isNotEmpty) {
+        final h      = _sharedStartTime.hour.toString().padLeft(2, '0');
+        final m      = _sharedStartTime.minute.toString().padLeft(2, '0');
+        final stStr  = '$h:$m';
+        final interval = int.tryParse(_sharedBreak.text.trim()) ?? 0;
+        final hbMins   = _sharedHbEnabled
+            ? _hbDuration(_sharedHbStart, _sharedHbEnd) : 0;
+        final runsMap = <int, int>{};
+        final areMap  = <int, int>{};
+        for (final cat in activeCats) {
+          final id = int.tryParse(cat['category_id'].toString()) ?? 0;
+          runsMap[id] = _runsPerCategory[id]   ?? 2;
+          areMap[id]  = _arenasPerCategory[id] ?? 1;
+        }
+        await DBHelper.generateSchedule(
+          runsPerCategory: runsMap, arenasPerCategory: areMap,
+          startTime: stStr, endTime: '23:59',
+          durationMinutes: dur, intervalMinutes: interval,
+          healthBreakMinutes: hbMins, lunchBreak: _sharedHbEnabled,
+        );
+        setState(() {
+          _generatedAll = true;
+          for (final cat in activeCats) {
+            final id = int.tryParse(cat['category_id'].toString()) ?? 0;
+            _generatedCat[id] = true;
+          }
+        });
+      }
+      // ── Soccer ─────────────────────────────────────────────────────────────
+      if (hasSoccer) {
+        final sh     = _soccerStartTime.hour.toString().padLeft(2, '0');
+        final sm     = _soccerStartTime.minute.toString().padLeft(2, '0');
+        final stStr  = '$sh:$sm';
+        final interval = int.tryParse(_soccerMatchBreakCtrl.text.trim()) ?? 5;
+        final shuffled = List<Map<String, dynamic>>.from(_soccerTeams)..shuffle();
+        const tpg = 4;
+        final ng  = (shuffled.length / tpg).ceil().clamp(1, 8);
+        final bs  = shuffled.length ~/ ng;
+        final ex  = shuffled.length % ng;
+        final gl  = List.generate(ng, (i) => String.fromCharCode(65 + i));
+        final List<List<Map<String, dynamic>>> groups = [];
+        int cur = 0;
+        for (int gi = 0; gi < ng; gi++) {
+          final sz = bs + (gi < ex ? 1 : 0);
+          groups.add(shuffled.sublist(cur, cur + sz));
+          cur += sz;
+        }
+        final conn = await DBHelper.getConnection();
+        await conn.execute("""CREATE TABLE IF NOT EXISTS tbl_soccer_groups (
+          id INT AUTO_INCREMENT PRIMARY KEY, category_id INT NOT NULL,
+          group_label VARCHAR(5) NOT NULL, team_id INT NOT NULL,
+          team_name VARCHAR(255) NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""");
+        await conn.execute(
+            'DELETE FROM tbl_soccer_groups WHERE category_id = ${_soccerCatId!}');
+        for (int gi = 0; gi < groups.length; gi++) {
+          for (final t in groups[gi]) {
+            final tid  = t['team_id']?.toString() ?? '0';
+            final name = (t['team_name']?.toString() ?? '').replaceAll("'", "''");
+            await conn.execute(
+                "INSERT INTO tbl_soccer_groups "
+                "(category_id, group_label, team_id, team_name) "
+                "VALUES (${_soccerCatId!}, '${gl[gi]}', $tid, '$name')");
+          }
+        }
+        await DBHelper.generateFifaSchedule(
+          groups: groups, arenas: _soccerArenas, categoryId: _soccerCatId!,
+          startTime: stStr, endTime: '23:59',
+          durationMinutes: soccerDur, intervalMinutes: interval,
+          lunchBreak: _soccerHbEnabled,
+        );
+        setState(() => _bracketGenerated = true);
+      }
+      if (mounted) {
+        final parts = <String>[];
+        if (activeCats.isNotEmpty) parts.add('${activeCats.length} categories');
+        if (hasSoccer) parts.add('soccer');
+        _snack('✅ Generated: ${parts.join(" + ")}!', Colors.green);
+        widget.onGenerated?.call();
+      }
+    } catch (e) {
+      if (mounted) _snack('Error: $e', Colors.red);
+    } finally {
+      if (mounted) setState(() { _isGeneratingAll = false; _isGenBracket = false; });
+    }
+  }
+
   Future<void> _generateBracket() async {
     final tc = _soccerTeams.length;
     if (tc < 4) { _snack('Need at least 4 Soccer teams (have $tc).', Colors.red); return; }
-
     final durVal = int.tryParse(_soccerDurationCtrl.text.trim()) ?? 10;
-    if (durVal <= 0) { _snack('Soccer match duration must be > 0.', Colors.red); return; }
-
+    if (durVal <= 0) { _snack('Match duration must be > 0.', Colors.red); return; }
     final confirmed = await _showConfirmDialog();
     if (confirmed != true) return;
-
-    final groups = <List<Map<String, dynamic>>>[];
-    int idx = 0;
-    while (idx < _soccerTeams.length) {
-      final rem  = _soccerTeams.length - idx;
-      final size = rem <= 4 ? rem : 4;
-      groups.add(_soccerTeams.sublist(idx, idx + size));
-      idx += size;
-    }
-
     setState(() => _isGenBracket = true);
     try {
-      final stStr    = '${_soccerStartTime.hour.toString().padLeft(2,'0')}:${_soccerStartTime.minute.toString().padLeft(2,'0')}';
+      final stStr    = '${_soccerStartTime.hour.toString().padLeft(2, "0")}:${_soccerStartTime.minute.toString().padLeft(2, "0")}';
       final interval = int.tryParse(_soccerMatchBreakCtrl.text.trim()) ?? 5;
-      final hbMins   = _soccerHbEnabled
-          ? _hbDuration(_soccerHbStart, _soccerHbEnd)
-          : 0;
 
-      await DBHelper.generateSoccerSchedule(
+      // Build balanced groups of 4
+      final shuffled = List<Map<String, dynamic>>.from(_soccerTeams)..shuffle();
+      const teamsPerGroup = 4;
+      final numGroups   = (shuffled.length / teamsPerGroup).ceil().clamp(1, 8);
+      final baseSize    = shuffled.length ~/ numGroups;
+      final extras      = shuffled.length % numGroups;
+      final groupLabels = List.generate(numGroups, (i) => String.fromCharCode(65 + i));
+      final List<List<Map<String, dynamic>>> groups = [];
+      int cursor = 0;
+      for (int gi = 0; gi < numGroups; gi++) {
+        final size = baseSize + (gi < extras ? 1 : 0);
+        groups.add(shuffled.sublist(cursor, cursor + size));
+        cursor += size;
+      }
+
+      // Save groups to tbl_soccer_groups
+      final conn = await DBHelper.getConnection();
+      await conn.execute("""CREATE TABLE IF NOT EXISTS tbl_soccer_groups (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        category_id INT NOT NULL, group_label VARCHAR(5) NOT NULL,
+        team_id INT NOT NULL, team_name VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""");
+      await conn.execute(
+          'DELETE FROM tbl_soccer_groups WHERE category_id = \${_soccerCatId!}');
+      for (int gi = 0; gi < groups.length; gi++) {
+        for (final team in groups[gi]) {
+          final tid  = team['team_id']?.toString() ?? '0';
+          final name = (team['team_name']?.toString() ?? '').replaceAll("'", "''");
+          await conn.execute(
+              "INSERT INTO tbl_soccer_groups (category_id, group_label, team_id, team_name) "
+              "VALUES (\${_soccerCatId!}, '\${groupLabels[gi]}', \$tid, '\$name')");
+        }
+      }
+
+      await DBHelper.generateFifaSchedule(
         groups:          groups,
-        arenas:          1,
+        arenas:          _soccerArenas,
         categoryId:      _soccerCatId!,
         startTime:       stStr,
         endTime:         '23:59',
@@ -285,7 +429,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
 
       setState(() { _bracketGenerated = true; _isGenBracket = false; });
       if (mounted) {
-        _snack('Soccer bracket generated!', Colors.green);
+        _snack('✅ FIFA schedule generated! $numGroups groups, ${shuffled.length} teams.', Colors.green);
         await Future.delayed(const Duration(milliseconds: 800));
         widget.onGenerated?.call();
       }
@@ -403,21 +547,47 @@ class _GenerateScheduleState extends State<GenerateSchedule>
 
               const SizedBox(height: 28),
 
-              // ── Category grid ─────────────────────────────────────────────
+              // ── 2-column: Left = categories, Right = soccer ───────────────
               if (_isLoadingData)
                 const Center(child: Padding(
                     padding: EdgeInsets.all(60),
                     child: CircularProgressIndicator(color: _accent)))
-              else if (_categories.isEmpty)
-                _emptyBox()
               else
-                _buildCategoryGrid(),
+                IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Left — non-soccer categories
+                      Expanded(flex: 5,
+                        child: _buildLeftColumn()),
+                      const SizedBox(width: 20),
+                      // Right — soccer
+                      Expanded(flex: 5,
+                        child: _soccerCatId != null
+                            ? _buildSoccerCard()
+                            : const SizedBox()),
+                    ],
+                  ),
+                ),
 
-              // ── Soccer card (full width below grid) ───────────────────────
-              if (_soccerCatId != null) ...[
-                const SizedBox(height: 20),
-                _buildSoccerCard(),
-              ],
+              // ── ONE generate button — bottom center ───────────────────────
+              const SizedBox(height: 28),
+              Center(child: SizedBox(width: 520,
+                child: _buildGenerateBtn(
+                  label:     (_generatedAll || _bracketGenerated)
+                      ? 'REGENERATE EVERYTHING'
+                      : 'GENERATE ALL SCHEDULES',
+                  icon:      (_generatedAll || _bracketGenerated)
+                      ? Icons.refresh_rounded
+                      : Icons.auto_awesome_rounded,
+                  color:     (_categories.where(_isActive).isEmpty && _soccerCatId == null)
+                      ? Colors.white24 : _accent,
+                  isLoading: _isGeneratingAll || _isGenBracket,
+                  disabled:  _categories.where(_isActive).isEmpty && _soccerCatId == null,
+                  onTap:     (_categories.where(_isActive).isEmpty && _soccerCatId == null)
+                      ? null : _generateEverything,
+                ),
+              )),
 
               const SizedBox(height: 36),
             ]),
@@ -438,28 +608,238 @@ class _GenerateScheduleState extends State<GenerateSchedule>
             color: Colors.white.withOpacity(0.3), fontSize: 14))));
 
   // ══════════════════════════════════════════════════════════════════════════
-  // 2-COLUMN GRID
+  // LEFT COLUMN — shared settings + category tiles + mini spinners
   // ══════════════════════════════════════════════════════════════════════════
-  Widget _buildCategoryGrid() {
-    return LayoutBuilder(builder: (ctx, constraints) {
-      // 2 columns if wide enough, else 1
-      final cols      = constraints.maxWidth >= 700 ? 2 : 1;
-      final spacing   = 18.0;
-      final cardWidth = (constraints.maxWidth - spacing * (cols - 1)) / cols;
+  Widget _buildLeftColumn() {
+    final activeCats = _categories.where(_isActive).toList();
+    return Container(
+      padding: const EdgeInsets.fromLTRB(22, 20, 22, 22),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+            begin: Alignment.topLeft, end: Alignment.bottomRight,
+            colors: [_accent.withOpacity(0.1), const Color(0xFF0D0625)]),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: _accent.withOpacity(0.35), width: 1.5),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
-      return Wrap(
-        spacing: spacing,
-        runSpacing: spacing,
-        children: _categories.asMap().entries.map((e) {
-          final color = _catColors[e.key % _catColors.length];
-          return SizedBox(
-            width: cardWidth,
-            child: _buildCategoryCard(e.value, color),
-          );
-        }).toList(),
-      );
-    });
+        // ── Shared settings ─────────────────────────────────────────────
+        _buildSharedSettings(),
+        const SizedBox(height: 18),
+        Container(height: 1, color: _accent.withOpacity(0.15)),
+        const SizedBox(height: 16),
+
+        // ── Category tiles ───────────────────────────────────────────────
+        // 2-column grid of tiles
+        ...() {
+          final rows = <Widget>[];
+          for (int i = 0; i < _categories.length; i += 2) {
+            rows.add(Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: _buildCategoryTile(
+                    _categories[i], _catColors[i % _catColors.length])),
+                const SizedBox(width: 10),
+                Expanded(child: i + 1 < _categories.length
+                    ? _buildCategoryTile(_categories[i + 1],
+                        _catColors[(i + 1) % _catColors.length])
+                    : const SizedBox()),
+              ],
+            ));
+            rows.add(const SizedBox(height: 10));
+          }
+          return rows;
+        }(),
+      ]),
+    );
   }
+
+  // ── Shared settings panel ──────────────────────────────────────────────────
+  Widget _buildSharedSettings() {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('SHARED SETTINGS',
+          style: TextStyle(color: _accent.withOpacity(0.7),
+              fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
+      const SizedBox(height: 12),
+      Row(children: [
+        Expanded(flex: 4, child: _tile(
+          label: 'START TIME', icon: Icons.access_time_rounded, color: _accent,
+          child: _timePill(time: _sharedStartTime, color: _accent,
+            onTap: () async {
+              final p = await _pickTime(_sharedStartTime, _accent);
+              if (p != null) setState(() => _sharedStartTime = p);
+            }),
+        )),
+        const SizedBox(width: 8),
+        Expanded(flex: 3, child: _tile(
+          label: 'DURATION', icon: Icons.timer_rounded, color: _accent,
+          child: _numField(controller: _sharedDuration, color: _accent, suffix: 'min'),
+        )),
+        const SizedBox(width: 8),
+        Expanded(flex: 3, child: _tile(
+          label: 'BREAK', icon: Icons.pause_rounded,
+          color: Colors.orange.shade300, sublabel: 'optional',
+          child: _numField(controller: _sharedBreak,
+              color: Colors.orange.shade300, suffix: 'min'),
+        )),
+      ]),
+      const SizedBox(height: 10),
+      _buildHealthBreak(
+        enabled: _sharedHbEnabled, hbStart: _sharedHbStart, hbEnd: _sharedHbEnd,
+        accent: _accent,
+        onToggle: (v) => setState(() => _sharedHbEnabled = v),
+        onPickStart: () async {
+          final p = await _pickTime(_sharedHbStart, _accent);
+          if (p != null) setState(() => _sharedHbStart = p);
+        },
+        onPickEnd: () async {
+          final p = await _pickTime(_sharedHbEnd, _accent);
+          if (p != null) setState(() => _sharedHbEnd = p);
+        },
+      ),
+    ]);
+  }
+
+  // ── Single category tile (compact) ────────────────────────────────────────
+  Widget _buildCategoryTile(Map<String, dynamic> cat, Color accent) {
+    final id     = int.tryParse(cat['category_id'].toString()) ?? 0;
+    final name   = (cat['category_type'] ?? '').toString();
+    final active = _isActive(cat);
+    final count  = _teamCountPerCategory[id] ?? 0;
+    final runs   = _runsPerCategory[id]   ?? 2;
+    final arenas = _arenasPerCategory[id] ?? 1;
+    final isDone = _generatedCat[id]      ?? false;
+    final warn   = _arenaWarning(id);
+
+    return AnimatedOpacity(
+      opacity: active ? 1.0 : 0.4,
+      duration: const Duration(milliseconds: 200),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: active ? accent.withOpacity(0.07) : Colors.white.withOpacity(0.02),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: !active ? Colors.white.withOpacity(0.08)
+                : isDone ? Colors.green.withOpacity(0.45)
+                : accent.withOpacity(0.4),
+            width: 1.5),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+          // Name + status dot
+          Row(children: [
+            Container(width: 7, height: 7,
+              decoration: BoxDecoration(shape: BoxShape.circle,
+                color: !active ? Colors.white24
+                    : isDone ? Colors.green : accent)),
+            const SizedBox(width: 7),
+            Expanded(child: Text(name,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    color: active ? Colors.white : Colors.white38,
+                    fontSize: 11, fontWeight: FontWeight.w700))),
+            if (!active)
+              const Icon(Icons.lock_rounded, color: Colors.white24, size: 13)
+            else if (isDone)
+              const Icon(Icons.check_circle, color: Colors.green, size: 13),
+          ]),
+          const SizedBox(height: 6),
+
+          // Team count
+          Row(children: [
+            Icon(Icons.groups_rounded,
+                color: active ? accent.withOpacity(0.6) : Colors.white24, size: 12),
+            const SizedBox(width: 4),
+            Text('$count team${count != 1 ? "s" : ""}',
+                style: TextStyle(
+                    color: active ? Colors.white.withOpacity(0.5) : Colors.white24,
+                    fontSize: 10)),
+          ]),
+
+          // Inactive — locked message
+          if (!active) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: Colors.red.withOpacity(0.07),
+                borderRadius: BorderRadius.circular(7),
+                border: Border.all(color: Colors.red.withOpacity(0.2))),
+              child: const Row(children: [
+                Icon(Icons.block_rounded, color: Colors.white38, size: 10),
+                SizedBox(width: 5),
+                Expanded(child: Text('Inactive — locked',
+                    style: TextStyle(color: Colors.white38, fontSize: 9,
+                        fontStyle: FontStyle.italic))),
+              ]),
+            ),
+          ],
+
+          // Active — runs + arenas spinners
+          if (active) ...[
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('RUNS', style: TextStyle(color: accent.withOpacity(0.6),
+                      fontSize: 8, fontWeight: FontWeight.bold, letterSpacing: 0.8)),
+                  const SizedBox(height: 3),
+                  _miniSpinner(value: runs, color: accent,
+                    onDec: runs > 1 ? () => setState(() => _runsPerCategory[id] = runs - 1) : null,
+                    onInc: runs < 10 ? () => setState(() => _runsPerCategory[id] = runs + 1) : null),
+                ],
+              )),
+              const SizedBox(width: 8),
+              Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('ARENAS', style: TextStyle(
+                      color: const Color(0xFFFFD700).withOpacity(0.7),
+                      fontSize: 8, fontWeight: FontWeight.bold, letterSpacing: 0.8)),
+                  const SizedBox(height: 3),
+                  _miniSpinner(value: arenas, color: const Color(0xFFFFD700),
+                    onDec: arenas > 1 ? () => setState(() => _arenasPerCategory[id] = arenas - 1) : null,
+                    onInc: arenas < 10 ? () => setState(() => _arenasPerCategory[id] = arenas + 1) : null),
+                ],
+              )),
+            ]),
+            if (warn != null) ...[
+              const SizedBox(height: 6),
+              Row(children: [
+                Icon(Icons.warning_amber_rounded, color: Colors.orange.withOpacity(0.8), size: 10),
+                const SizedBox(width: 4),
+                Expanded(child: Text(warn,
+                    style: const TextStyle(color: Colors.orange, fontSize: 9))),
+              ]),
+            ],
+          ],
+        ]),
+      ),
+    );
+  }
+
+  Widget _miniSpinner({required int value, required Color color,
+      required VoidCallback? onDec, required VoidCallback? onInc}) =>
+      Container(
+        height: 30,
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(7),
+          border: Border.all(color: color.withOpacity(0.3))),
+        child: Row(children: [
+          _miniBtn(Icons.remove, onDec, color),
+          Expanded(child: Center(child: Text('$value',
+              style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold)))),
+          _miniBtn(Icons.add, onInc, color),
+        ]),
+      );
+
+  Widget _miniBtn(IconData icon, VoidCallback? onTap, Color color) =>
+      GestureDetector(onTap: onTap, child: Container(width: 26, alignment: Alignment.center,
+          child: Icon(icon, size: 13,
+              color: onTap != null ? color.withOpacity(0.8) : Colors.white12)));
 
   // ══════════════════════════════════════════════════════════════════════════
   // CATEGORY CARD
@@ -754,10 +1134,10 @@ class _GenerateScheduleState extends State<GenerateSchedule>
             const SizedBox(width: 14),
             Expanded(child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('MBOT SOCCER — BRACKET',
+              const Text('MBOT SOCCER — FIFA FORMAT',
                   style: TextStyle(color: Colors.white, fontSize: 15,
                       fontWeight: FontWeight.w800, letterSpacing: 1.2)),
-              Text('Group Stage → Play-In → Double Elim → Grand Final',
+              Text('Group Stage → R16 → Quarter Finals → Semi Finals → Final',
                   style: TextStyle(
                       color: Colors.white.withOpacity(0.4), fontSize: 11)),
             ])),
@@ -804,7 +1184,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
           const SizedBox(height: 18),
 
           // ── Soccer schedule settings ─────────────────────────────────────
-          // Row 1: Start Time | Match Duration | Match Break
+          // Row 1: Start Time | Match Duration | Match Break | Arenas
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Expanded(flex: 4, child: _tile(
               label: 'START TIME', icon: Icons.access_time_rounded,
@@ -832,6 +1212,22 @@ class _GenerateScheduleState extends State<GenerateSchedule>
               child: _numField(
                   controller: _soccerMatchBreakCtrl,
                   color: Colors.orange.shade300, suffix: 'min'),
+            )),
+            const SizedBox(width: 10),
+            Expanded(flex: 3, child: _tile(
+              label: 'ARENAS', icon: Icons.place_rounded,
+              color: const Color(0xFFFFD700),
+              sublabel: _soccerArenas == 1 ? 'single' : 'parallel',
+              child: _spinnerWidget(
+                value: _soccerArenas,
+                color: const Color(0xFFFFD700),
+                onDec: _soccerArenas > 1
+                    ? () => setState(() => _soccerArenas--)
+                    : null,
+                onInc: _soccerArenas < 8
+                    ? () => setState(() => _soccerArenas++)
+                    : null,
+              ),
             )),
           ]),
           const SizedBox(height: 14),
@@ -865,58 +1261,12 @@ class _GenerateScheduleState extends State<GenerateSchedule>
                 text: 'Bracket generated! Go to the Soccer tab to manage groups.'),
           ],
 
-          const SizedBox(height: 16),
-
-          // ── View teams toggle ─────────────────────────────────────────────
-          GestureDetector(
-            onTap: () {
-              setState(() => _showSoccerTeams = !_showSoccerTeams);
-              _showSoccerTeams
-                  ? _soccerAnimCtrl.forward()
-                  : _soccerAnimCtrl.reverse();
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.04),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.white12)),
-              child: Row(children: [
-                const Icon(Icons.people_alt_rounded,
-                    color: Colors.white38, size: 16),
-                const SizedBox(width: 10),
-                Text('View All Registered Teams ($tc)',
-                    style: const TextStyle(color: Colors.white54,
-                        fontSize: 13, fontWeight: FontWeight.w600)),
-                const Spacer(),
-                AnimatedRotation(
-                    turns: _showSoccerTeams ? 0.5 : 0,
-                    duration: const Duration(milliseconds: 300),
-                    child: const Icon(Icons.keyboard_arrow_down_rounded,
-                        color: Colors.white38, size: 20)),
-              ]),
-            ),
-          ),
-
-          SizeTransition(
-            sizeFactor: _soccerAnim,
-            child: Column(children: [
-              const SizedBox(height: 10),
-              _buildTeamTable(),
-            ]),
-          ),
-
-          const SizedBox(height: 20),
-
-          // ── Generate bracket button ───────────────────────────────────────
-          _buildGenerateBtn(
-            label:     _bracketGenerated ? 'REGENERATE BRACKET' : 'GENERATE BRACKET',
-            icon:      _bracketGenerated ? Icons.refresh_rounded : Icons.account_tree_rounded,
-            color:     canGenerate ? accent : Colors.white24,
-            isLoading: _isGenBracket,
-            onTap:     canGenerate ? _generateBracket : null,
-            disabled:  !canGenerate,
-          ),
+          if (_bracketGenerated) ...[
+            const SizedBox(height: 12),
+            _infoRow(icon: Icons.check_circle_outline_rounded,
+                color: Colors.green,
+                text: 'Schedule generated! View in the Soccer tab.'),
+          ],
         ]),
       ),
     );
@@ -1246,12 +1596,24 @@ class _GenerateScheduleState extends State<GenerateSchedule>
 
   // ── Bracket flow steps ──────────────────────────────────────────────────────
   Widget _buildBracketFlow() {
-    const steps = [
-      (Icons.grid_view_rounded,    'GROUP\nSTAGE', Color(0xFF00CFFF)),
-      (Icons.sports_rounded,       'PLAY-IN',      Color(0xFF9B6FE8)),
-      (Icons.account_tree_rounded, 'DOUBLE\nELIM', Color(0xFF7B6AFF)),
-      (Icons.emoji_events_rounded, 'GRAND\nFINAL', Color(0xFFFFD700)),
+    final tc = _soccerTeams.length;
+    final numGroups = (tc / 4).ceil().clamp(1, 8);
+    final advancing = numGroups * 2;
+    int bracketSize = 1;
+    while (bracketSize < advancing) bracketSize <<= 1;
+
+    final steps = <(IconData, String, Color)>[
+      (Icons.grid_view_rounded,     'GROUP\nSTAGE',   const Color(0xFF00CFFF)),
+      if (bracketSize >= 32)
+        (Icons.sports_soccer,       'R32',             const Color(0xFF7B6AFF)),
+      if (bracketSize >= 16)
+        (Icons.sports_soccer,       'R16',             const Color(0xFF9B6FE8)),
+      (Icons.shield_rounded,        'QUARTER\nFINALS',const Color(0xFF00FF88)),
+      (Icons.whatshot_rounded,      'SEMI\nFINALS',   const Color(0xFFFF9F43)),
+      (Icons.military_tech_rounded, '3RD\nPLACE',     const Color(0xFFCD7F32)),
+      (Icons.emoji_events_rounded,  'FINAL',           const Color(0xFFFFD700)),
     ];
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
@@ -1265,8 +1627,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
             Container(width: 38, height: 38,
               decoration: BoxDecoration(shape: BoxShape.circle,
                   color: step.$3.withOpacity(0.12),
-                  border: Border.all(
-                      color: step.$3.withOpacity(0.5), width: 1.5)),
+                  border: Border.all(color: step.$3.withOpacity(0.5), width: 1.5)),
               child: Icon(step.$1, color: step.$3, size: 16)),
             const SizedBox(height: 5),
             Text(step.$2, textAlign: TextAlign.center,
@@ -1275,12 +1636,12 @@ class _GenerateScheduleState extends State<GenerateSchedule>
           ])),
           if (idx < steps.length - 1)
             Padding(padding: const EdgeInsets.only(bottom: 14),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Container(width: 10, height: 1.5,
-                      color: Colors.white.withOpacity(0.1)),
-                  Icon(Icons.chevron_right,
-                      color: Colors.white.withOpacity(0.15), size: 13),
-                ])),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Container(width: 10, height: 1.5,
+                    color: Colors.white.withOpacity(0.1)),
+                Icon(Icons.chevron_right,
+                    color: Colors.white.withOpacity(0.15), size: 13),
+              ])),
         ];
       }).toList()),
     );

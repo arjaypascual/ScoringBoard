@@ -10,7 +10,7 @@ import 'schedule_viewer.dart';
 import 'standings.dart';
 import 'excel_import.dart';
 import 'referee_registration.dart';
-import 'category_registration.dart'; // ← NEW
+
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -55,7 +55,6 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
   // 0   = choose mode
   // -1  = excel import
   // -2  = referee registration
-  // -3  = category registration  ← NEW
   // 1–7 = manual steps
   int _currentStep = 0;
   int? _teamId;
@@ -69,11 +68,10 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
       // ── Step 0: Choose registration mode ─────────────────────────────
       case 0:
         return _RegistrationChooser(
-          onManual:   () => _goToStep(1),
-          onExcel:    () => _goToStep(-1),
-          onReferee:  () => _goToStep(-2),
-          onCategory: () => _goToStep(-3), // ← NEW
-          onBack:     () => Navigator.of(context).pop(),
+          onManual:  () => _goToStep(1),
+          onExcel:   () => _goToStep(-1),
+          onReferee: () => _goToStep(-2),
+          onBack:    () => Navigator.of(context).pop(),
         );
 
       // ── Step -1: Excel Bulk Import ────────────────────────────────────
@@ -87,12 +85,6 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
         return RefereeRegistrationPage(
           onBack: () => _goToStep(0),
           onDone: () => _goToStep(0),
-        );
-
-      // ── Step -3: Category Registration ────────────────────────────────
-      case -3:
-        return CategoryRegistrationPage(  // ← NEW
-          onBack: () => _goToStep(0),
         );
 
       // ── Step 1: School ────────────────────────────────────────────────
@@ -166,14 +158,12 @@ class _RegistrationChooser extends StatelessWidget {
   final VoidCallback onManual;
   final VoidCallback onExcel;
   final VoidCallback onReferee;
-  final VoidCallback onCategory; // ← NEW
   final VoidCallback onBack;
 
   const _RegistrationChooser({
     required this.onManual,
     required this.onExcel,
     required this.onReferee,
-    required this.onCategory,
     required this.onBack,
   });
 
@@ -227,7 +217,7 @@ class _RegistrationChooser extends StatelessWidget {
                           fontWeight: FontWeight.bold)),
                   const SizedBox(height: 48),
 
-                  // ── Row 1: Manual · Excel · Referee ───────────────────
+                  // ── Manual · Excel · Referee ───────────────────────────
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
@@ -253,15 +243,6 @@ class _RegistrationChooser extends StatelessWidget {
                         subtitle: 'Register referees &\nassign categories',
                         color:    const Color(0xFF00FF9C),
                         onTap:    onReferee,
-                      ),
-                      const SizedBox(width: 32),
-                      // ── NEW: Category card ─────────────────────────────
-                      _ModeCard(
-                        icon:     Icons.category_rounded,
-                        title:    'CATEGORIES',
-                        subtitle: 'Add categories &\nset active / inactive',
-                        color:    const Color(0xFFAA80FF),
-                        onTap:    onCategory,
                       ),
                     ],
                   ),

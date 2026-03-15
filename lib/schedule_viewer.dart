@@ -136,6 +136,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   bool                       _groupsGenerated = false;
   final Set<String>          _expandedGroups  = {};
 
+  // ── Soccer Schedule — loaded directly from DB, no pairKey dependency ────
+  // Each entry: {matchId, groupLabel, time, team1, team2}
+  List<Map<String, dynamic>> _soccerScheduleRows = [];
+  String _lastScheduleSig = '';
+
   // ── Soccer Bracket ───────────────────────────────────────────────────────
   List<BracketMatch> _playInMatches = [];
   bool _playInSeeded = false;
@@ -258,6 +263,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               });
             }
           }
+      // Reload schedule rows directly from DB on every refresh
+      if (_soccerCategoryId != null) await _loadSoccerSchedule();
         } catch (_) {}
       }
     } catch (_) {}
@@ -391,6 +398,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         if (!_groupsGenerated && soccerTeams.length >= 4) {
           await _generateGroups(teamsOverride: soccerTeams);
         }
+      // Always load schedule directly from DB
+      await _loadSoccerSchedule();
       }
     } catch (e) {
       setState(() => _isLoading = false);
@@ -525,59 +534,22 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         groupMap[label]!.add(GroupTeam(teamId: teamId, teamName: teamName));
       }
 
-      // --- Fetch schedule times for soccer matches ---
-      // Key: "teamId1_teamId2" (sorted) → {scheduleTime, matchId}
-      final Map<String, Map<String, dynamic>> scheduleByPair = {};
-      try {
-        final schedResult = await conn.execute("""
-          SELECT ts.match_id, ts.team_id, s.schedule_start
-          FROM tbl_teamschedule ts
-          JOIN tbl_team t ON ts.team_id = t.team_id
-          JOIN tbl_match m ON ts.match_id = m.match_id
-          JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
-          WHERE t.category_id = ${_soccerCategoryId}
-          ORDER BY ts.match_id, ts.team_id
-        """);
-        final schedRows = schedResult.rows.map((r) => r.assoc()).toList();
-        // Group by match_id — each match has exactly 2 team rows
-        final Map<String, List<Map<String, dynamic>>> byMatch = {};
-        for (final r in schedRows) {
-          final mid = r['match_id']?.toString() ?? '';
-          byMatch.putIfAbsent(mid, () => []);
-          byMatch[mid]!.add(r);
-        }
-        for (final entry in byMatch.entries) {
-          final matchId = int.tryParse(entry.key) ?? 0;
-          final teamRows = entry.value;
-          if (teamRows.length != 2) continue;
-          final ids = [
-            int.tryParse(teamRows[0]['team_id']?.toString() ?? '0') ?? 0,
-            int.tryParse(teamRows[1]['team_id']?.toString() ?? '0') ?? 0,
-          ]..sort();
-          final pairKey = '${ids[0]}_${ids[1]}';
-          final rawTime = teamRows[0]['schedule_start']?.toString() ?? '';
-          final timeFmt = rawTime.length >= 5 ? rawTime.substring(0, 5) : rawTime; // "HH:mm"
-          scheduleByPair[pairKey] = {'time': timeFmt, 'matchId': matchId};
-        }
-      } catch (_) {}
 
       final labels = groupMap.keys.toList()..sort();
       final groups = <TournamentGroup>[];
       for (final label in labels) {
         final groupTeams = groupMap[label]!;
         final matches    = <GroupMatch>[];
-        int matchIdx     = 0;
+        int   matchIdx   = 0;
         for (int i = 0; i < groupTeams.length; i++) {
           for (int j = i + 1; j < groupTeams.length; j++) {
-            final ids = [groupTeams[i].teamId, groupTeams[j].teamId]..sort();
-            final pairKey = '${ids[0]}_${ids[1]}';
-            final sched = scheduleByPair[pairKey];
+            // scheduleTime and matchId are now populated by _loadSoccerSchedule()
+            // via _soccerScheduleRows — no pairKey lookup needed here
             matches.add(GroupMatch(
-                id: 'g${label}_m$matchIdx',
-                team1: groupTeams[i],
-                team2: groupTeams[j],
-                scheduleTime: sched?['time'] as String?,
-                matchId: sched?['matchId'] as int?));
+              id:    'g${label}_m$matchIdx',
+              team1: groupTeams[i],
+              team2: groupTeams[j],
+            ));
             matchIdx++;
           }
         }
@@ -594,6 +566,99 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       // Table may not exist yet — silently skip
     }
   }
+
+
+  // ── Load soccer match schedule DIRECTLY from DB ──────────────────────────
+  // Single query joining tbl_teamschedule, tbl_match, tbl_schedule,
+  // tbl_soccer_groups. Groups rows by match_id into {matchId, groupLabel,
+  // time, team1, team2}. No pairKey logic needed.
+  Future<void> _loadSoccerSchedule() async {
+    if (_soccerCategoryId == null) return;
+    try {
+      final conn = await DBHelper.getConnection();
+      final result = await conn.execute("""
+        SELECT
+          m.match_id,
+          COALESCE(sg.group_label, '?') AS group_label,
+          TIME_FORMAT(s.schedule_start, '%H:%i') AS match_time,
+          t.team_id,
+          t.team_name,
+          ts.teamschedule_id,
+          m.bracket_type,
+          ts.arena_number
+        FROM tbl_match m
+        JOIN tbl_schedule     s  ON m.schedule_id  = s.schedule_id
+        JOIN tbl_teamschedule ts ON ts.match_id     = m.match_id
+        JOIN tbl_team         t  ON ts.team_id      = t.team_id
+        LEFT JOIN tbl_soccer_groups sg
+               ON sg.team_id     = ts.team_id
+              AND sg.category_id = ${_soccerCategoryId}
+        WHERE t.category_id = ${_soccerCategoryId}
+          AND m.bracket_type IN ('group','round-of-32','round-of-16','quarter-finals','semi-finals','third-place','final')
+        ORDER BY s.schedule_start, m.match_id, ts.teamschedule_id
+      """);
+
+      final rows = result.rows.map((r) => r.assoc()).toList();
+      final sig  = rows.map((r) => r.toString()).join('|');
+      if (sig == _lastScheduleSig) return;
+      _lastScheduleSig = sig;
+
+      // Pivot: group rows by match_id, collect up to 2 teams per match
+      final Map<int, Map<String, dynamic>> byMatch = {};
+      for (final row in rows) {
+        final matchId = int.tryParse(row['match_id']?.toString() ?? '0') ?? 0;
+        final teamId  = int.tryParse(row['team_id']?.toString()  ?? '0') ?? 0;
+        if (matchId == 0 || teamId == 0) continue;
+
+        byMatch.putIfAbsent(matchId, () => {
+          'matchId':    matchId,
+          'groupLabel': row['group_label']?.toString() ?? '?',
+          'time':       row['match_time']?.toString()  ?? '',
+          'team1':      '',
+          'team2':      '',
+          'team1Id':    0,
+          'team2Id':    0,
+          'arena':      0,
+          'bracketType': '',
+        });
+
+        final entry = byMatch[matchId]!;
+        if ((entry['team1'] as String).isEmpty) {
+          entry['team1']   = row['team_name']?.toString() ?? '';
+          entry['arena']   = int.tryParse(row['arena_number']?.toString() ?? '0') ?? 0;
+          entry['bracketType'] = row['bracket_type']?.toString() ?? 'group';
+          entry['team1Id'] = teamId;
+        } else if ((entry['team2'] as String).isEmpty) {
+          entry['team2']   = row['team_name']?.toString() ?? '';
+          entry['team2Id'] = teamId;
+        }
+      }
+
+      final scheduleRows = byMatch.values
+          .where((e) =>
+              (e['team1'] as String).isNotEmpty &&
+              (e['team2'] as String).isNotEmpty)
+          .toList()
+        ..sort((a, b) {
+          final tA = a['time'] as String;
+          final tB = b['time'] as String;
+          if (tA.isEmpty && tB.isEmpty) return 0;
+          if (tA.isEmpty) return 1;
+          if (tB.isEmpty) return -1;
+          return tA.compareTo(tB);
+        });
+
+      if (mounted) {
+        setState(() {
+          _soccerScheduleRows = scheduleRows;
+          if (scheduleRows.isNotEmpty) _groupsGenerated = true;
+        });
+      }
+    } catch (e) {
+      debugPrint('⚠️ _loadSoccerSchedule error: $e');
+    }
+  }
+
 
   void _setGroupMatchResult(GroupMatch match, GroupTeam winner, int s1, int s2) {
     final wasLoser1 = !match.isDone
@@ -1203,81 +1268,494 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   );
 
   // ════════════════════════════════════════════════════════════════════════════
-  // ████████  BRACKET TAB — MPL Double Elimination  ████████
+  // ████████  BRACKET TAB — FIFA Single Elimination  ████████
+  // ════════════════════════════════════════════════════════════════════════════
+  // FIFA BRACKET TAB — Single Elimination
+  // Reads knockout rows from _soccerScheduleRows (bracket_type != 'group')
+  // Rounds: R32 → R16 → QF → SF → 3rd Place → Final
   // ════════════════════════════════════════════════════════════════════════════
   Widget _buildBracketTab() {
-    final seeds    = _buildPreviewSeeds();
-    final isPreview = !_bracketSeeded;
+    // Get knockout rows from already-loaded schedule data
+    final koRows = _soccerScheduleRows
+        .where((r) => (r['bracketType'] as String? ?? 'group') != 'group')
+        .toList();
+
+    // Group standings for seeding preview
+    final advancing = _getAdvancingTeams();
 
     return Column(children: [
-      // Phase indicator
+      // ── Phase indicator ─────────────────────────────────────────────────
       Container(
         color: const Color(0xFF0A0620),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: _buildPhaseIndicator(),
+        child: _buildFifaPhaseIndicator(),
       ),
 
-      // Legend + indicator row
+      // ── Status bar ──────────────────────────────────────────────────────
       Container(
         color: const Color(0xFF0D0826),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            _legendDot(const Color(0xFF00CFFF), 'Upper Bracket'),
-            const SizedBox(width: 14),
-            _legendDot(const Color(0xFFFF6B6B), 'Lower Bracket'),
-            const SizedBox(width: 14),
-            _legendDot(const Color(0xFFFFD700), 'Grand Final'),
-            const Spacer(),
-            if (!_groupsGenerated)
-              _previewChip('Generate groups to enable bracket', Colors.white24)
-            else if (isPreview && seeds.isNotEmpty)
-              _previewChip('PREVIEW  ·  updates as groups finish', const Color(0xFF00CFFF))
-            else if (_bracketSeeded)
-              _previewChip('BRACKET LIVE', const Color(0xFF00FF88)),
-          ]),
-          if (_bracketSeeded) ...[
-            const SizedBox(height: 5),
-            Row(children: [
-              _destChip(Icons.arrow_upward, const Color(0xFF00FF88), 'Win → stays/advances in UB'),
-              const SizedBox(width: 10),
-              _destChip(Icons.arrow_downward, const Color(0xFFFF6B6B), 'Lose → drops to LB'),
-              const SizedBox(width: 10),
-              _destChip(Icons.close, Colors.redAccent, 'LB loss → Eliminated'),
-            ]),
-          ],
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(children: [
+          Icon(Icons.emoji_events,
+              color: const Color(0xFFFFD700).withOpacity(0.7), size: 14),
+          const SizedBox(width: 8),
+          Text(
+            koRows.isEmpty
+                ? 'Knockout bracket will appear after schedule is generated.'
+                : advancing.isEmpty
+                    ? 'Groups in progress — bracket preview below.'
+                    : 'Bracket live — top 2 per group advance.',
+            style: TextStyle(
+                color: koRows.isEmpty
+                    ? Colors.white24
+                    : Colors.white.withOpacity(0.6),
+                fontSize: 12),
+          ),
+          const Spacer(),
+          if (koRows.isNotEmpty)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFF00FF88).withOpacity(0.08),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(
+                    color: const Color(0xFF00FF88).withOpacity(0.3)),
+              ),
+              child: Text('${koRows.length} MATCHES',
+                  style: const TextStyle(
+                      color: Color(0xFF00FF88),
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold)),
+            ),
         ]),
       ),
 
-      // ── Play-In / seed banner — always shown when groups exist ────────────
-      // Reactively updates as group matches complete (no manual refresh needed)
-      if (_groupsGenerated || _playInSeeded || _bracketSeeded)
-        _buildSeedBanner(seeds),
-
-      // ── Main bracket canvas ──────────────────────────────────────────────
+      // ── Bracket content ─────────────────────────────────────────────────
       Expanded(
-        child: seeds.isEmpty && !_bracketSeeded
+        child: koRows.isEmpty
             ? _bracketEmptyState()
-            : SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.vertical,
-                  padding: const EdgeInsets.all(20),
-                  child: _MplBracketCanvas(
-                    seeds:        seeds,
-                    ubRounds:     _ubRounds,
-                    lbRounds:     _lbRounds,
-                    grandFinal:   _grandFinal,
-                    isPreview:    isPreview,
-                    onUBResult:   _setUBMatchResult,
-                    onLBResult:   _setLBMatchResult,
-                    onGFTap:      _showGrandFinalScoreDialog,
-                    onShowDialog: _showBracketMatchDialog,
-                  ),
-                ),
-              ),
+            : _buildFifaBracketCanvas(koRows, advancing),
       ),
     ]);
+  }
+
+  // ── FIFA phase indicator ─────────────────────────────────────────────────
+  Widget _buildFifaPhaseIndicator() {
+    final koRows = _soccerScheduleRows
+        .where((r) => (r['bracketType'] as String? ?? 'group') != 'group')
+        .toList();
+
+    final Map<String, int> roundCounts = {};
+    for (final r in koRows) {
+      final bt = r['bracketType'] as String? ?? '';
+      roundCounts[bt] = (roundCounts[bt] ?? 0) + 1;
+    }
+
+    const roundOrder = [
+      'round-of-32', 'round-of-16', 'quarter-finals',
+      'semi-finals', 'third-place', 'final'
+    ];
+    const roundShort = {
+      'round-of-32':    'R32',
+      'round-of-16':    'R16',
+      'quarter-finals': 'QF',
+      'semi-finals':    'SF',
+      'third-place':    '3RD',
+      'final':          'FINAL',
+    };
+
+    // Which rounds exist in our data
+    final existingRounds = roundOrder
+        .where((r) => roundCounts.containsKey(r))
+        .toList();
+
+    // Always show at least GROUP STAGE + the existing rounds
+    final phases = <Map<String, dynamic>>[
+      {
+        'label': 'GROUP\nSTAGE',
+        'done': _allGroupMatchesDone() && _groupsGenerated,
+        'active': !(_allGroupMatchesDone() && _groupsGenerated),
+      },
+      ...existingRounds.map((r) => {
+        'label': roundShort[r] ?? r.toUpperCase(),
+        'done': false,
+        'active': false,
+      }),
+    ];
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0F0A2A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF3D1E88).withOpacity(0.4)),
+      ),
+      child: Row(children: phases.asMap().entries.expand((e) {
+        final idx    = e.key;
+        final phase  = e.value;
+        final done   = phase['done'] as bool;
+        final active = phase['active'] as bool;
+        final label  = phase['label'] as String;
+
+        return [
+          Expanded(child: Column(children: [
+            Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: done
+                    ? Colors.green.withOpacity(0.15)
+                    : active
+                        ? const Color(0xFF00CFFF).withOpacity(0.15)
+                        : Colors.white.withOpacity(0.04),
+                border: Border.all(
+                    color: done
+                        ? Colors.green
+                        : active
+                            ? const Color(0xFF00CFFF)
+                            : Colors.white12,
+                    width: 1.5),
+              ),
+              child: Center(child: done
+                  ? const Icon(Icons.check, color: Colors.green, size: 16)
+                  : active
+                      ? Container(width: 8, height: 8,
+                          decoration: const BoxDecoration(
+                              color: Color(0xFF00CFFF),
+                              shape: BoxShape.circle))
+                      : Text('${idx + 1}',
+                          style: const TextStyle(
+                              color: Colors.white24, fontSize: 11))),
+            ),
+            const SizedBox(height: 4),
+            Text(label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: done
+                        ? Colors.green
+                        : active
+                            ? const Color(0xFF00CFFF)
+                            : Colors.white24,
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                    height: 1.2)),
+          ])),
+          if (idx < phases.length - 1)
+            Container(
+                width: 24, height: 1.5,
+                margin: const EdgeInsets.only(bottom: 20),
+                color: done
+                    ? Colors.green.withOpacity(0.4)
+                    : Colors.white12),
+        ];
+      }).toList()),
+    );
+  }
+
+  // ── FIFA Bracket Canvas ───────────────────────────────────────────────────
+  Widget _buildFifaBracketCanvas(
+      List<Map<String, dynamic>> koRows,
+      List<GroupTeam> advancing) {
+
+    const roundOrder = [
+      'round-of-32', 'round-of-16', 'quarter-finals',
+      'semi-finals', 'third-place', 'final',
+    ];
+    const roundLabels = {
+      'round-of-32':    'ROUND OF 32',
+      'round-of-16':    'ROUND OF 16',
+      'quarter-finals': 'QUARTER FINALS',
+      'semi-finals':    'SEMI FINALS',
+      'third-place':    '3RD PLACE',
+      'final':          'FINAL',
+    };
+    const roundColors = {
+      'round-of-32':    Color(0xFF7B6AFF),
+      'round-of-16':    Color(0xFF00CFFF),
+      'quarter-finals': Color(0xFF00FF88),
+      'semi-finals':    Color(0xFFFF9F43),
+      'third-place':    Color(0xFFCD7F32),
+      'final':          Color(0xFFFFD700),
+    };
+
+    // Group by bracket_type
+    final Map<String, List<Map<String, dynamic>>> byRound = {};
+    for (final row in koRows) {
+      final bt = row['bracketType'] as String? ?? 'quarter-finals';
+      byRound.putIfAbsent(bt, () => []);
+      byRound[bt]!.add(row);
+    }
+
+    final rounds = roundOrder.where((r) => byRound.containsKey(r)).toList();
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: rounds.asMap().entries.map((re) {
+          final ri         = re.key;
+          final roundKey   = re.value;
+          final matches    = byRound[roundKey]!;
+          final label      = roundLabels[roundKey] ?? roundKey.toUpperCase();
+          final color      = roundColors[roundKey] ?? const Color(0xFF00CFFF);
+          final isFinal    = roundKey == 'final';
+          final is3rd      = roundKey == 'third-place';
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // ── Round header ────────────────────────────────────────────
+              if (ri > 0) const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 16, vertical: 10),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(colors: [
+                    color.withOpacity(0.2),
+                    color.withOpacity(0.05),
+                  ]),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: color.withOpacity(0.5)),
+                ),
+                child: Row(children: [
+                  Icon(
+                    isFinal
+                        ? Icons.emoji_events
+                        : is3rd
+                            ? Icons.military_tech
+                            : Icons.sports_soccer,
+                    color: color, size: 18),
+                  const SizedBox(width: 10),
+                  Text(label,
+                      style: TextStyle(
+                          color: color,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1.5)),
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: color.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                        '${matches.length} match${matches.length != 1 ? "es" : ""}',
+                        style: TextStyle(
+                            color: color.withOpacity(0.9),
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold)),
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 10),
+
+              // ── Match cards ─────────────────────────────────────────────
+              ...matches.asMap().entries.map((me) {
+                final mi    = me.key;
+                final row   = me.value;
+                final time  = row['time']  as String? ?? '';
+                final team1 = row['team1'] as String? ?? '';
+                final team2 = row['team2'] as String? ?? '';
+                final arena = (row['arena'] as int?) ?? 0;
+                final isEven = mi % 2 == 0;
+
+                final hasTeams = team1.isNotEmpty && team2.isNotEmpty;
+
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  decoration: BoxDecoration(
+                    color: isFinal
+                        ? const Color(0xFF1A1200)
+                        : isEven
+                            ? const Color(0xFF0F0A2A)
+                            : const Color(0xFF120C35),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                        color: color.withOpacity(isFinal ? 0.5 : 0.25),
+                        width: isFinal ? 2 : 1.5),
+                    boxShadow: isFinal
+                        ? [BoxShadow(
+                            color: color.withOpacity(0.15),
+                            blurRadius: 20, spreadRadius: 2)]
+                        : [],
+                  ),
+                  child: Column(children: [
+                    // Match header: number + time + arena
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: color.withOpacity(0.07),
+                        borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(10)),
+                      ),
+                      child: Row(children: [
+                        Container(
+                          width: 22, height: 22,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: color.withOpacity(0.15),
+                            border: Border.all(
+                                color: color.withOpacity(0.4)),
+                          ),
+                          child: Center(child: Text('${mi + 1}',
+                              style: TextStyle(
+                                  color: color,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold))),
+                        ),
+                        const SizedBox(width: 10),
+                        if (time.isNotEmpty) ...[
+                          Icon(Icons.access_time,
+                              color: Colors.white38, size: 12),
+                          const SizedBox(width: 4),
+                          Text(time,
+                              style: const TextStyle(
+                                  color: Color(0xFF00CFFF),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600)),
+                          const SizedBox(width: 12),
+                        ],
+                        if (arena > 0) ...[
+                          Icon(Icons.place_rounded,
+                              color: const Color(0xFFFFD700).withOpacity(0.6),
+                              size: 12),
+                          const SizedBox(width: 3),
+                          Text('Arena $arena',
+                              style: TextStyle(
+                                  color: const Color(0xFFFFD700)
+                                      .withOpacity(0.8),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold)),
+                        ],
+                        const Spacer(),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 7, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: hasTeams
+                                ? Colors.green.withOpacity(0.1)
+                                : Colors.white.withOpacity(0.04),
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(
+                                color: hasTeams
+                                    ? Colors.green.withOpacity(0.3)
+                                    : Colors.white12),
+                          ),
+                          child: Text(
+                            hasTeams ? 'READY' : 'TBD',
+                            style: TextStyle(
+                                color: hasTeams
+                                    ? Colors.green
+                                    : Colors.white24,
+                                fontSize: 9,
+                                fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ]),
+                    ),
+
+                    // Teams row
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
+                      child: Row(children: [
+                        // Team 1
+                        Expanded(child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              team1.isEmpty ? 'TBD' : team1,
+                              textAlign: TextAlign.right,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: team1.isEmpty
+                                    ? Colors.white24
+                                    : Colors.white,
+                                fontSize: isFinal ? 16 : 14,
+                                fontWeight: FontWeight.w700),
+                            ),
+                          ],
+                        )),
+
+                        // VS badge
+                        Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 16),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: color.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                                color: color.withOpacity(0.4), width: 1.5),
+                          ),
+                          child: Text('VS',
+                              style: TextStyle(
+                                  color: color,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 1)),
+                        ),
+
+                        // Team 2
+                        Expanded(child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              team2.isEmpty ? 'TBD' : team2,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: team2.isEmpty
+                                    ? Colors.white24
+                                    : Colors.white,
+                                fontSize: isFinal ? 16 : 14,
+                                fontWeight: FontWeight.w700),
+                            ),
+                          ],
+                        )),
+                      ]),
+                    ),
+
+                    // Final trophy footer
+                    if (isFinal)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFD700).withOpacity(0.08),
+                          borderRadius: const BorderRadius.vertical(
+                              bottom: Radius.circular(10)),
+                        ),
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.emoji_events,
+                                color: Color(0xFFFFD700), size: 16),
+                            SizedBox(width: 8),
+                            Text('CHAMPION',
+                                style: TextStyle(
+                                    color: Color(0xFFFFD700),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 2)),
+                            SizedBox(width: 8),
+                            Icon(Icons.emoji_events,
+                                color: Color(0xFFFFD700), size: 16),
+                          ],
+                        ),
+                      ),
+                  ]),
+                );
+              }),
+            ],
+          );
+        }).toList(),
+      ),
+    );
   }
 
   Widget _legendDot(Color color, String label) =>
@@ -1972,7 +2450,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             )),
           ]),
         ),
-        Expanded(child: _buildGroupStageScheduleList()),
+        Expanded(child: _buildFifaScheduleList()),
       ] else ...[
         _soccerScheduleHeader(),
         Expanded(
@@ -1998,22 +2476,453 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     ]);
   }
 
-  Widget _buildGroupStageScheduleList() {
-    final allMatches = <Map<String, dynamic>>[];
-    for (final g in _groups) {
-      for (final m in g.matches) {
-        allMatches.add({'groupLabel': g.label, 'match': m});
-      }
+  Widget _buildFifaScheduleList() {
+    final allRows    = _soccerScheduleRows;
+    final groupRows  = allRows.where((r) =>
+        (r['bracketType'] as String? ?? 'group') == 'group').toList();
+    final koRows     = allRows.where((r) =>
+        (r['bracketType'] as String? ?? 'group') != 'group').toList();
+
+    if (allRows.isEmpty) {
+      return Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+        Icon(Icons.calendar_today, size: 48, color: Colors.white.withOpacity(0.06)),
+        const SizedBox(height: 14),
+        const Text('No schedule yet. Tap Generate Schedule to create one.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white24, fontSize: 15)),
+      ]));
     }
-    // Sort by assigned schedule time so matches appear chronologically
-    allMatches.sort((a, b) {
-      final tA = (a['match'] as GroupMatch).scheduleTime ?? '';
-      final tB = (b['match'] as GroupMatch).scheduleTime ?? '';
-      if (tA.isEmpty && tB.isEmpty) return 0;
-      if (tA.isEmpty) return 1;
-      if (tB.isEmpty) return -1;
-      return tA.compareTo(tB);
-    });
+
+    // Detect arenas from group rows only
+    final arenaSet   = groupRows.map((r) => (r['arena'] as int?) ?? 1).toSet();
+    final arenaCount = arenaSet.isEmpty ? 1 : arenaSet.reduce((a, b) => a > b ? a : b);
+
+    // If only 1 arena — use simple single-column layout
+    if (arenaCount <= 1) {
+      return _buildFifaFullView(groupRows, koRows, useSingleColumn: true);
+    }
+
+    // Multi-arena: delegate to full FIFA view
+    return _buildFifaFullView(groupRows, koRows, useSingleColumn: false);
+  }
+
+  // ── Single arena fallback (original list layout) ─────────────────────────
+  // ── FIFA Full View: Group Stage (parallel arenas) + Knockout Bracket ───────
+  Widget _buildFifaFullView(
+    List<Map<String, dynamic>> groupRows,
+    List<Map<String, dynamic>> koRows, {
+    required bool useSingleColumn,
+  }) {
+    // Detect arenas
+    final arenaSet   = groupRows.map((r) => (r['arena'] as int?) ?? 1).toSet();
+    final arenaCount = arenaSet.isEmpty ? 1 : arenaSet.reduce((a, b) => a > b ? a : b);
+
+    return DefaultTabController(
+      length: koRows.isEmpty ? 1 : 2,
+      child: Column(children: [
+        // Tab bar: Group Stage | Knockout
+        if (koRows.isNotEmpty)
+          Container(
+            color: const Color(0xFF0F0A2A),
+            child: TabBar(
+              indicatorColor: const Color(0xFF00FF88),
+              indicatorWeight: 3,
+              labelColor: const Color(0xFF00FF88),
+              unselectedLabelColor: Colors.white38,
+              labelStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+              tabs: const [
+                Tab(text: '⚽  GROUP STAGE'),
+                Tab(text: '🏆  KNOCKOUT'),
+              ],
+            ),
+          ),
+        Expanded(child: TabBarView(
+          children: [
+            // ── GROUP STAGE TAB ───────────────────────────────────────────
+            _buildGroupScheduleView(groupRows, arenaCount, useSingleColumn),
+            // ── KNOCKOUT TAB ──────────────────────────────────────────────
+            if (koRows.isNotEmpty)
+              _buildKnockoutView(koRows),
+          ],
+        )),
+      ]),
+    );
+  }
+
+  // ── Group schedule: side-by-side arenas ────────────────────────────────────
+  Widget _buildGroupScheduleView(
+      List<Map<String, dynamic>> rows, int arenaCount, bool singleColumn) {
+
+    if (rows.isEmpty) {
+      return Center(child: Text('No group matches yet.',
+          style: TextStyle(color: Colors.white.withOpacity(0.3))));
+    }
+
+    if (singleColumn || arenaCount <= 1) {
+      return _buildSingleArenaList(rows);
+    }
+
+    // Side-by-side arena view
+    final arenas = List.generate(arenaCount, (i) => i + 1);
+
+    // Group rows by time slot
+    final Map<String, Map<int, Map<String, dynamic>>> byTime = {};
+    for (final row in rows) {
+      final time  = (row['time'] as String).isNotEmpty ? row['time'] as String : '__notime__';
+      final arena = (row['arena'] as int?) ?? 1;
+      byTime.putIfAbsent(time, () => {});
+      byTime[time]![arena] = row;
+    }
+    final slots = byTime.keys.toList()
+      ..sort((a, b) {
+        if (a == '__notime__') return 1;
+        if (b == '__notime__') return -1;
+        return a.compareTo(b);
+      });
+
+    return Column(children: [
+      // Arena header
+      Container(
+        decoration: const BoxDecoration(
+            gradient: LinearGradient(colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+        child: Row(children: [
+          const SizedBox(width: 28),
+          const SizedBox(width: 54, child: Text('TIME',
+              style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold,
+                  fontSize: 12, letterSpacing: 0.8))),
+          ...arenas.map((a) => Expanded(child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFD700).withOpacity(0.12),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.4)),
+            ),
+            child: Center(child: Text('ARENA $a',
+                style: const TextStyle(color: Color(0xFFFFD700),
+                    fontSize: 11, fontWeight: FontWeight.w900, letterSpacing: 1))),
+          ))),
+        ]),
+      ),
+      Expanded(
+        child: ListView.builder(
+          itemCount: slots.length,
+          itemBuilder: (_, idx) {
+            final timeKey     = slots[idx];
+            final displayTime = timeKey == '__notime__' ? '—' : timeKey;
+            final slotMatches = byTime[timeKey]!;
+            final isEven      = idx % 2 == 0;
+
+            return Container(
+              decoration: BoxDecoration(
+                color: isEven ? const Color(0xFF160C40) : const Color(0xFF100830),
+                border: const Border(bottom: BorderSide(color: Color(0xFF1A1050), width: 1)),
+              ),
+              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
+              child: IntrinsicHeight(child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  SizedBox(width: 28, child: Center(child: Text('${idx + 1}',
+                      style: TextStyle(color: Colors.white.withOpacity(0.3),
+                          fontSize: 13, fontWeight: FontWeight.bold)))),
+                  SizedBox(width: 54, child: Text(displayTime,
+                      style: TextStyle(
+                          color: displayTime == '—'
+                              ? Colors.white.withOpacity(0.2)
+                              : const Color(0xFF00CFFF),
+                          fontSize: 13, fontWeight: FontWeight.w600))),
+                  ...arenas.map((a) {
+                    final row = slotMatches[a];
+                    if (row == null) {
+                      return Expanded(child: Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.02),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.white.withOpacity(0.06)),
+                        ),
+                        child: Center(child: Text('—', style: TextStyle(
+                            color: Colors.white.withOpacity(0.15), fontSize: 12))),
+                      ));
+                    }
+                    final matchId    = row['matchId']    as int;
+                    final groupLabel = row['groupLabel'] as String;
+                    final team1      = row['team1']      as String;
+                    final team2      = row['team2']      as String;
+                    final gc         = _groupColor(groupLabel);
+                    GroupMatch? gm;
+                    for (final g in _groups) {
+                      for (final m in g.matches) {
+                        if (m.matchId == matchId) { gm = m; break; }
+                      }
+                      if (gm != null) break;
+                    }
+                    final isDone = gm?.isDone ?? false;
+                    final t1Wins = isDone && gm?.winner == gm?.team1;
+                    final t2Wins = isDone && gm?.winner == gm?.team2;
+
+                    return Expanded(child: GestureDetector(
+                      onTap: gm != null ? () => _showGroupMatchDialog(gm!) : null,
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: isDone ? const Color(0xFF0A1A0E) : gc.withOpacity(0.07),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: isDone ? Colors.green.withOpacity(0.4) : gc.withOpacity(0.35),
+                              width: 1.5),
+                        ),
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: gc.withOpacity(0.18),
+                              borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+                            ),
+                            child: Center(child: Text('G$groupLabel',
+                                style: TextStyle(color: gc, fontSize: 11,
+                                    fontWeight: FontWeight.w900))),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                            child: Row(children: [
+                              Expanded(child: Text(team1.isNotEmpty ? team1 : '—',
+                                  textAlign: TextAlign.right, maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      color: t1Wins ? const Color(0xFF00FF88) : Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: t1Wins ? FontWeight.bold : FontWeight.w600))),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 6),
+                                child: isDone
+                                    ? Text('${gm!.score1}–${gm.score2}',
+                                        style: const TextStyle(color: Colors.white,
+                                            fontSize: 11, fontWeight: FontWeight.bold))
+                                    : Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 5, vertical: 3),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF00CFFF).withOpacity(0.1),
+                                          borderRadius: BorderRadius.circular(4),
+                                          border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.3)),
+                                        ),
+                                        child: const Text('vs', style: TextStyle(
+                                            color: Color(0xFF00CFFF), fontSize: 10,
+                                            fontWeight: FontWeight.bold))),
+                              ),
+                              Expanded(child: Text(team2.isNotEmpty ? team2 : '—',
+                                  maxLines: 2, overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      color: t2Wins ? const Color(0xFF00FF88) : Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: t2Wins ? FontWeight.bold : FontWeight.w600))),
+                            ]),
+                          ),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(vertical: 3),
+                            decoration: BoxDecoration(
+                              color: isDone ? Colors.green.withOpacity(0.12) : Colors.white.withOpacity(0.03),
+                              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(8)),
+                            ),
+                            child: Center(child: isDone
+                                ? const Row(mainAxisSize: MainAxisSize.min, children: [
+                                    Icon(Icons.check_circle, color: Colors.green, size: 10),
+                                    SizedBox(width: 4),
+                                    Text('Done', style: TextStyle(color: Colors.green,
+                                        fontSize: 9, fontWeight: FontWeight.bold)),
+                                  ])
+                                : Text('Pending', style: TextStyle(
+                                    color: Colors.white.withOpacity(0.2),
+                                    fontSize: 9, fontWeight: FontWeight.bold))),
+                          ),
+                        ]),
+                      ),
+                    ));
+                  }),
+                ],
+              )),
+            );
+          },
+        ),
+      ),
+    ]);
+  }
+
+  // ── FIFA Knockout Bracket View ───────────────────────────────────────────────
+  Widget _buildKnockoutView(List<Map<String, dynamic>> koRows) {
+    // Group by bracket_type
+    const roundOrder = [
+      'round-of-32', 'round-of-16', 'quarter-finals',
+      'semi-finals', 'third-place', 'final'
+    ];
+    const roundLabels = {
+      'round-of-32':   'ROUND OF 32',
+      'round-of-16':   'ROUND OF 16',
+      'quarter-finals':'QUARTER FINALS',
+      'semi-finals':   'SEMI FINALS',
+      'third-place':   '3RD PLACE',
+      'final':         'FINAL',
+    };
+
+    final Map<String, List<Map<String, dynamic>>> byRound = {};
+    for (final row in koRows) {
+      final bt = row['bracketType'] as String? ?? 'quarter-finals';
+      byRound.putIfAbsent(bt, () => []);
+      byRound[bt]!.add(row);
+    }
+
+    final rounds = roundOrder.where((r) => byRound.containsKey(r)).toList();
+
+    if (rounds.isEmpty) {
+      return Center(child: Text('Knockout matches will appear here after group stage.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 14)));
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: rounds.length,
+      itemBuilder: (_, ri) {
+        final roundKey    = rounds[ri];
+        final roundLabel  = roundLabels[roundKey] ?? roundKey.toUpperCase();
+        final matches     = byRound[roundKey]!;
+        final isFinal     = roundKey == 'final';
+        final is3rd       = roundKey == 'third-place';
+        final accentColor = isFinal
+            ? const Color(0xFFFFD700)
+            : is3rd
+            ? const Color(0xFFCD7F32)
+            : const Color(0xFF00CFFF);
+
+        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // Round header
+          Container(
+            margin: EdgeInsets.only(bottom: 10, top: ri == 0 ? 0 : 20),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: accentColor.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: accentColor.withOpacity(0.4)),
+            ),
+            child: Row(children: [
+              Icon(isFinal ? Icons.emoji_events : Icons.sports_soccer,
+                  color: accentColor, size: 16),
+              const SizedBox(width: 10),
+              Text(roundLabel, style: TextStyle(
+                  color: accentColor, fontSize: 13,
+                  fontWeight: FontWeight.w900, letterSpacing: 1.5)),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: accentColor.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text('${matches.length} match${matches.length != 1 ? "es" : ""}',
+                    style: TextStyle(color: accentColor.withOpacity(0.8),
+                        fontSize: 10, fontWeight: FontWeight.bold)),
+              ),
+            ]),
+          ),
+
+          // Match cards
+          ...matches.asMap().entries.map((e) {
+            final idx   = e.key;
+            final row   = e.value;
+            final time  = row['time'] as String? ?? '';
+            final team1 = row['team1'] as String? ?? 'TBD';
+            final team2 = row['team2'] as String? ?? 'TBD';
+            final arena = (row['arena'] as int?) ?? 0;
+
+            return Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: isFinal
+                    ? const Color(0xFF1A1200)
+                    : const Color(0xFF0F0A2A),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: accentColor.withOpacity(0.3), width: 1.5),
+              ),
+              child: Row(children: [
+                // Match number
+                Container(
+                  width: 28, height: 28,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: accentColor.withOpacity(0.12),
+                    border: Border.all(color: accentColor.withOpacity(0.4)),
+                  ),
+                  child: Center(child: Text('${idx + 1}',
+                      style: TextStyle(color: accentColor, fontSize: 11,
+                          fontWeight: FontWeight.bold))),
+                ),
+                const SizedBox(width: 12),
+                // Time
+                if (time.isNotEmpty) ...[
+                  Text(time, style: const TextStyle(
+                      color: Color(0xFF00CFFF), fontSize: 13, fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 12),
+                ],
+                // Team 1
+                Expanded(child: Text(
+                  team1.isEmpty ? 'TBD' : team1,
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                      color: team1.isEmpty ? Colors.white24 : Colors.white,
+                      fontSize: 14, fontWeight: FontWeight.w700),
+                )),
+                // VS
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: accentColor.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: accentColor.withOpacity(0.3)),
+                    ),
+                    child: Text('vs', style: TextStyle(
+                        color: accentColor, fontSize: 11,
+                        fontWeight: FontWeight.bold)),
+                  ),
+                ),
+                // Team 2
+                Expanded(child: Text(
+                  team2.isEmpty ? 'TBD' : team2,
+                  style: TextStyle(
+                      color: team2.isEmpty ? Colors.white24 : Colors.white,
+                      fontSize: 14, fontWeight: FontWeight.w700),
+                )),
+                // Arena badge
+                if (arena > 0) ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFD700).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.3)),
+                    ),
+                    child: Text('A$arena', style: const TextStyle(
+                        color: Color(0xFFFFD700), fontSize: 10,
+                        fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ]),
+            );
+          }),
+        ]);
+      },
+    );
+  }
+
+  Widget _buildSingleArenaList(List<Map<String, dynamic>> rows) {
     return Column(children: [
       Container(
         decoration: const BoxDecoration(
@@ -2022,148 +2931,159 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         child: Row(children: [
           _headerCell('#',      flex: 1),
           _headerCell('TIME',   flex: 2),
-          _headerCell('GROUP',  flex: 1, center: true),
+          _headerCell('GROUP',  flex: 2, center: true),
           _headerCell('HOME',   flex: 4, center: true),
-          _headerCell('RESULT', flex: 2, center: true),
+          _headerCell('VS',     flex: 1, center: true),
           _headerCell('AWAY',   flex: 4, center: true),
           _headerCell('STATUS', flex: 2, center: true),
         ]),
       ),
       Expanded(
         child: ListView.builder(
-          itemCount: allMatches.length,
+          itemCount: rows.length,
           itemBuilder: (_, idx) {
-            final item  = allMatches[idx];
-            final label = item['groupLabel'] as String;
-            final m     = item['match'] as GroupMatch;
-            final isEven = idx % 2 == 0;
-            final isDone = m.isDone;
-            final t1Wins = isDone && m.winner == m.team1;
-            final t2Wins = isDone && m.winner == m.team2;
+            final row        = rows[idx];
+            final matchId    = row['matchId']    as int;
+            final groupLabel = row['groupLabel'] as String;
+            final time       = row['time']       as String;
+            final team1      = row['team1']      as String;
+            final team2      = row['team2']      as String;
+            final isEven     = idx % 2 == 0;
+            final gc         = _groupColor(groupLabel);
+            GroupMatch? gm;
+            for (final g in _groups) {
+              for (final m in g.matches) {
+                if (m.matchId == matchId) { gm = m; break; }
+              }
+              if (gm != null) break;
+            }
+            final isDone = gm?.isDone ?? false;
+            final t1Wins = isDone && gm?.winner == gm?.team1;
+            final t2Wins = isDone && gm?.winner == gm?.team2;
             return GestureDetector(
-              onTap: () => _showGroupMatchDialog(m),
+              onTap: gm != null ? () => _showGroupMatchDialog(gm!) : null,
               child: Container(
                 decoration: BoxDecoration(
-                  color: isDone
-                      ? const Color(0xFF0D1A10)
+                  color: isDone ? const Color(0xFF0D1A10)
                       : isEven ? const Color(0xFF160C40) : const Color(0xFF100830),
                   border: Border(
                     bottom: const BorderSide(color: Color(0xFF1A1050), width: 1),
                     left: BorderSide(
-                      color: isDone
-                          ? Colors.green.withOpacity(0.5)
-                          : _groupColor(label).withOpacity(0.4),
-                      width: 3,
-                    ),
+                        color: isDone ? Colors.green.withOpacity(0.5)
+                            : gc.withOpacity(0.4),
+                        width: 3),
                   ),
                 ),
-                child: IntrinsicHeight(
-                  child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                    Expanded(flex: 1, child: Center(child: Text('${idx + 1}',
-                        style: TextStyle(color: Colors.white.withOpacity(0.35),
-                            fontWeight: FontWeight.bold, fontSize: 15)))),
-                    // TIME column
-                    Expanded(flex: 2, child: Center(child: m.scheduleTime != null
-                        ? Text(m.scheduleTime!,
-                            style: const TextStyle(color: Color(0xFF00CFFF),
-                                fontSize: 13, fontWeight: FontWeight.w600))
-                        : Text('—', style: TextStyle(
-                            color: Colors.white.withOpacity(0.2), fontSize: 13)))),
-                    Expanded(flex: 1, child: Center(child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: _groupColor(label).withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(5),
-                        border: Border.all(color: _groupColor(label).withOpacity(0.4), width: 1),
-                      ),
-                      child: Text('G$label',
-                          style: TextStyle(color: _groupColor(label), fontSize: 11,
-                              fontWeight: FontWeight.bold)),
-                    ))),
-                    Expanded(flex: 4, child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-                      child: Column(mainAxisAlignment: MainAxisAlignment.center,
-                          crossAxisAlignment: CrossAxisAlignment.end, children: [
-                        if (t1Wins) const Icon(Icons.emoji_events, color: Color(0xFFFFD700), size: 12),
-                        Text(m.team1.teamName, textAlign: TextAlign.right, maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                color: t1Wins ? const Color(0xFF00FF88) : Colors.white,
-                                fontSize: 14,
-                                fontWeight: t1Wins ? FontWeight.bold : FontWeight.w600)),
-                      ]),
-                    )),
-                    Expanded(flex: 2, child: Center(child: GestureDetector(
-                      onTap: () => _showGroupMatchDialog(m),
-                      child: Container(
-                        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: isDone
-                              ? const Color(0xFF1C0F4A)
-                              : const Color(0xFF00CFFF).withOpacity(0.08),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: isDone ? const Color(0xFF5B2CC0)
-                                : const Color(0xFF00CFFF).withOpacity(0.4),
-                            width: 1.5,
-                          ),
-                        ),
-                        child: isDone
-                            ? Text('${m.score1} – ${m.score2}', textAlign: TextAlign.center,
-                                style: const TextStyle(color: Colors.white,
-                                    fontSize: 13, fontWeight: FontWeight.bold))
-                            : Row(mainAxisAlignment: MainAxisAlignment.center, children: const [
-                                Icon(Icons.edit, color: Color(0xFF00CFFF), size: 11),
-                                SizedBox(width: 3),
-                                Text('SCORE', style: TextStyle(color: Color(0xFF00CFFF),
-                                    fontSize: 10, fontWeight: FontWeight.bold)),
-                              ]),
-                      ),
-                    ))),
-                    Expanded(flex: 4, child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-                      child: Column(mainAxisAlignment: MainAxisAlignment.center,
-                          crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        if (t2Wins) const Icon(Icons.emoji_events, color: Color(0xFFFFD700), size: 12),
-                        Text(m.team2.teamName, maxLines: 2, overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                color: t2Wins ? const Color(0xFF00FF88) : Colors.white,
-                                fontSize: 14,
-                                fontWeight: t2Wins ? FontWeight.bold : FontWeight.w600)),
-                      ]),
-                    )),
-                    Expanded(flex: 2, child: Center(child: isDone
-                        ? GestureDetector(
-                            onTap: () => setState(() {
-                              m.winner = null; m.score1 = null; m.score2 = null;
-                              m.team1.wins   = (m.team1.wins - 1).clamp(0, 99);
-                              m.team1.points = (m.team1.points - 1).clamp(0, 999);
-                              m.team2.losses = (m.team2.losses - 1).clamp(0, 99);
-                            }),
-                            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                              const Icon(Icons.check_circle, color: Colors.green, size: 16),
-                              const SizedBox(height: 2),
-                              const Text('Done', style: TextStyle(color: Colors.green,
-                                  fontSize: 10, fontWeight: FontWeight.bold)),
-                              Text('reset', style: TextStyle(
-                                  color: Colors.white.withOpacity(0.2), fontSize: 9)),
-                            ]),
-                          )
+                child: IntrinsicHeight(child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                  Expanded(flex: 1, child: Center(child: Text('${idx + 1}',
+                      style: TextStyle(color: Colors.white.withOpacity(0.35),
+                          fontWeight: FontWeight.bold, fontSize: 15)))),
+                  Expanded(flex: 2, child: Center(child: time.isNotEmpty
+                      ? Text(time, style: const TextStyle(
+                          color: Color(0xFF00CFFF), fontSize: 13,
+                          fontWeight: FontWeight.w600))
+                      : Text('—', style: TextStyle(
+                          color: Colors.white.withOpacity(0.2),
+                          fontSize: 13)))),
+                  Expanded(flex: 2, child: Center(child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: gc.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(color: gc.withOpacity(0.5), width: 1.5),
+                    ),
+                    child: Text('G$groupLabel',
+                        style: TextStyle(color: gc, fontSize: 11,
+                            fontWeight: FontWeight.bold)),
+                  ))),
+                  Expanded(flex: 4, child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                    child: Column(mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.end, children: [
+                      if (t1Wins) const Icon(Icons.emoji_events,
+                          color: Color(0xFFFFD700), size: 12),
+                      Text(team1.isNotEmpty ? team1 : '—',
+                          textAlign: TextAlign.right, maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: t1Wins ? const Color(0xFF00FF88) : Colors.white,
+                              fontSize: 14,
+                              fontWeight: t1Wins ? FontWeight.bold : FontWeight.w600)),
+                    ]),
+                  )),
+                  Expanded(flex: 1, child: Center(child: GestureDetector(
+                    onTap: gm != null ? () => _showGroupMatchDialog(gm!) : null,
+                    child: isDone
+                        ? Text('${gm!.score1}–${gm.score2}',
+                            style: const TextStyle(color: Colors.white,
+                                fontSize: 12, fontWeight: FontWeight.bold))
                         : Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 5),
                             decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.04),
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(color: Colors.white12, width: 1),
+                              color: const Color(0xFF00CFFF).withOpacity(0.08),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                  color: const Color(0xFF00CFFF).withOpacity(0.35)),
                             ),
-                            child: const Text('Pending', textAlign: TextAlign.center,
-                                style: TextStyle(color: Colors.white24,
-                                    fontSize: 11, fontWeight: FontWeight.bold)),
+                            child: const Text('vs',
+                                style: TextStyle(color: Color(0xFF00CFFF),
+                                    fontSize: 11, fontWeight: FontWeight.bold))),
+                  ))),
+                  Expanded(flex: 4, child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                    child: Column(mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      if (t2Wins) const Icon(Icons.emoji_events,
+                          color: Color(0xFFFFD700), size: 12),
+                      Text(team2.isNotEmpty ? team2 : '—',
+                          maxLines: 2, overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: t2Wins ? const Color(0xFF00FF88) : Colors.white,
+                              fontSize: 14,
+                              fontWeight: t2Wins ? FontWeight.bold : FontWeight.w600)),
+                    ]),
+                  )),
+                  Expanded(flex: 2, child: Center(child: isDone
+                      ? GestureDetector(
+                          onTap: () {
+                            if (gm == null) return;
+                            setState(() {
+                              gm!.winner = null; gm!.score1 = null;
+                              gm!.score2 = null;
+                              gm!.team1.wins   = (gm!.team1.wins   - 1).clamp(0, 99);
+                              gm!.team1.points = (gm!.team1.points - 1).clamp(0, 999);
+                              gm!.team2.losses = (gm!.team2.losses - 1).clamp(0, 99);
+                            });
+                          },
+                          child: Column(mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                            const Icon(Icons.check_circle,
+                                color: Colors.green, size: 16),
+                            const SizedBox(height: 2),
+                            const Text('Done',
+                                style: TextStyle(color: Colors.green,
+                                    fontSize: 10, fontWeight: FontWeight.bold)),
+                            Text('reset', style: TextStyle(
+                                color: Colors.white.withOpacity(0.2),
+                                fontSize: 9)),
+                          ]))
+                      : Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.04),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: Colors.white12),
                           ),
-                    )),
-                  ]),
-                ),
+                          child: const Text('Pending',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: Colors.white24,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold))))),
+                ])),
               ),
             );
           },
@@ -2954,9 +3874,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
   Widget _buildLiveIndicator() {
     final timeStr = _lastUpdated == null ? '--:--:--'
-        : '${_lastUpdated!.hour.toString().padLeft(2, '0')}:'
-          '${_lastUpdated!.minute.toString().padLeft(2, '0')}:'
-          '${_lastUpdated!.second.toString().padLeft(2, '0')}';
+        : '${_lastUpdated!.hour.toString().padLeft(2, "0")}:'
+          '${_lastUpdated!.minute.toString().padLeft(2, "0")}:'
+          '${_lastUpdated!.second.toString().padLeft(2, "0")}';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 6),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
