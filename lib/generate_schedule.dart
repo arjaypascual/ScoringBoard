@@ -328,25 +328,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
           groups.add(shuffled.sublist(cur, cur + sz));
           cur += sz;
         }
-        final conn = await DBHelper.getConnection();
-        await conn.execute("""CREATE TABLE IF NOT EXISTS tbl_soccer_groups (
-          id INT AUTO_INCREMENT PRIMARY KEY, category_id INT NOT NULL,
-          group_label VARCHAR(5) NOT NULL, team_id INT NOT NULL,
-          team_name VARCHAR(255) NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""");
-        await conn.execute(
-            'DELETE FROM tbl_soccer_groups WHERE category_id = ${_soccerCatId!}');
-        for (int gi = 0; gi < groups.length; gi++) {
-          for (final t in groups[gi]) {
-            final tid  = t['team_id']?.toString() ?? '0';
-            final name = (t['team_name']?.toString() ?? '').replaceAll("'", "''");
-            await conn.execute(
-                "INSERT INTO tbl_soccer_groups "
-                "(category_id, group_label, team_id, team_name) "
-                "VALUES (${_soccerCatId!}, '${gl[gi]}', $tid, '$name')");
-          }
-        }
+        // Groups are now saved inside generateFifaSchedule atomically
         await DBHelper.generateFifaSchedule(
           groups: groups, arenas: _soccerArenas, categoryId: _soccerCatId!,
           startTime: stStr, endTime: '23:59',
@@ -396,26 +378,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
         cursor += size;
       }
 
-      // Save groups to tbl_soccer_groups
-      final conn = await DBHelper.getConnection();
-      await conn.execute("""CREATE TABLE IF NOT EXISTS tbl_soccer_groups (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        category_id INT NOT NULL, group_label VARCHAR(5) NOT NULL,
-        team_id INT NOT NULL, team_name VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""");
-      await conn.execute(
-          'DELETE FROM tbl_soccer_groups WHERE category_id = \${_soccerCatId!}');
-      for (int gi = 0; gi < groups.length; gi++) {
-        for (final team in groups[gi]) {
-          final tid  = team['team_id']?.toString() ?? '0';
-          final name = (team['team_name']?.toString() ?? '').replaceAll("'", "''");
-          await conn.execute(
-              "INSERT INTO tbl_soccer_groups (category_id, group_label, team_id, team_name) "
-              "VALUES (\${_soccerCatId!}, '\${groupLabels[gi]}', \$tid, '\$name')");
-        }
-      }
-
+      // Groups are now saved inside generateFifaSchedule atomically
       await DBHelper.generateFifaSchedule(
         groups:          groups,
         arenas:          _soccerArenas,

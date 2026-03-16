@@ -259,7 +259,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             if (mounted) {
               setState(() {
                 _groups          = groups;
-                _groupsGenerated = groups.isNotEmpty;
+                _groupsGenerated = groups.isNotEmpty && _soccerScheduleRows.any((r) => (r['bracketType'] as String? ?? '') == 'group');
               });
             }
           }
@@ -391,15 +391,18 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         _lastUpdated        = DateTime.now();
       });
 
-      // Load previously saved groups from DB; auto-generate if none saved yet
+      // Load schedule first so _groupsGenerated check works correctly
+      await _loadSoccerSchedule();
+
+      // Load previously saved groups from DB
       if (!_groupsGenerated) {
         await _loadGroupsFromDB();
-        // If still no groups after DB load, auto-generate and save
-        if (!_groupsGenerated && soccerTeams.length >= 4) {
+        // If still no groups after DB load AND schedule exists, auto-generate
+        if (!_groupsGenerated && soccerTeams.length >= 4 &&
+            _soccerScheduleRows.any((r) =>
+                (r['bracketType'] as String? ?? '') == 'group')) {
           await _generateGroups(teamsOverride: soccerTeams);
         }
-      // Always load schedule directly from DB
-      await _loadSoccerSchedule();
       }
     } catch (e) {
       setState(() => _isLoading = false);
@@ -449,7 +452,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
     setState(() {
       _groups          = groups;
-      _groupsGenerated = true;
+      _groupsGenerated = groups.isNotEmpty && _soccerScheduleRows.any((r) => (r['bracketType'] as String? ?? '') == 'group');
       _playInSeeded    = false;
       _bracketSeeded   = false;
       _playInMatches   = [];
@@ -559,7 +562,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       if (mounted) {
         setState(() {
           _groups          = groups;
-          _groupsGenerated = true;
+          _groupsGenerated = groups.isNotEmpty && _soccerScheduleRows.any((r) => (r['bracketType'] as String? ?? '') == 'group');
         });
       }
     } catch (_) {
@@ -579,22 +582,25 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       final result = await conn.execute("""
         SELECT
           m.match_id,
-          COALESCE(sg.group_label, '?') AS group_label,
+          m.bracket_type,
           TIME_FORMAT(s.schedule_start, '%H:%i') AS match_time,
+          ts.arena_number,
           t.team_id,
           t.team_name,
           ts.teamschedule_id,
-          m.bracket_type,
-          ts.arena_number
+          COALESCE(sg.group_label, '?') AS group_label
         FROM tbl_match m
-        JOIN tbl_schedule     s  ON m.schedule_id  = s.schedule_id
-        JOIN tbl_teamschedule ts ON ts.match_id     = m.match_id
-        JOIN tbl_team         t  ON ts.team_id      = t.team_id
+        JOIN tbl_schedule     s  ON s.schedule_id  = m.schedule_id
+        JOIN tbl_teamschedule ts ON ts.match_id    = m.match_id
+        JOIN tbl_team         t  ON t.team_id      = ts.team_id
         LEFT JOIN tbl_soccer_groups sg
                ON sg.team_id     = ts.team_id
               AND sg.category_id = ${_soccerCategoryId}
         WHERE t.category_id = ${_soccerCategoryId}
-          AND m.bracket_type IN ('group','round-of-32','round-of-16','quarter-finals','semi-finals','third-place','final')
+          AND m.bracket_type IN (
+            'group','round-of-32','round-of-16',
+            'quarter-finals','semi-finals','third-place','final'
+          )
         ORDER BY s.schedule_start, m.match_id, ts.teamschedule_id
       """);
 
@@ -603,33 +609,53 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       if (sig == _lastScheduleSig) return;
       _lastScheduleSig = sig;
 
-      // Pivot: group rows by match_id, collect up to 2 teams per match
+      // Pivot: 2 rows per match_id → one entry with team1 + team2
       final Map<int, Map<String, dynamic>> byMatch = {};
       for (final row in rows) {
         final matchId = int.tryParse(row['match_id']?.toString() ?? '0') ?? 0;
         final teamId  = int.tryParse(row['team_id']?.toString()  ?? '0') ?? 0;
         if (matchId == 0 || teamId == 0) continue;
 
+        final groupLabel = row['group_label']?.toString() ?? '?';
+        final teamName   = row['team_name']?.toString() ?? '';
+        final arenaNum   = int.tryParse(row['arena_number']?.toString() ?? '0') ?? 0;
+        final bracketType = row['bracket_type']?.toString() ?? 'group';
+        final matchTime  = row['match_time']?.toString() ?? '';
+
         byMatch.putIfAbsent(matchId, () => {
-          'matchId':    matchId,
-          'groupLabel': row['group_label']?.toString() ?? '?',
-          'time':       row['match_time']?.toString()  ?? '',
-          'team1':      '',
-          'team2':      '',
-          'team1Id':    0,
-          'team2Id':    0,
-          'arena':      0,
-          'bracketType': '',
+          'matchId':     matchId,
+          'groupLabel':  groupLabel,
+          'time':        matchTime,
+          'team1':       '',
+          'team2':       '',
+          'team1Id':     0,
+          'team2Id':     0,
+          'arena':       arenaNum,
+          'bracketType': bracketType,
+          '_labels':     <String>[],  // collect both teams' labels
         });
 
-        final entry = byMatch[matchId]!;
+        final entry  = byMatch[matchId]!;
+        final labels = entry['_labels'] as List<String>;
+        if (groupLabel != '?') labels.add(groupLabel);
+
+        // Pick the most common label as the match's group
+        if (labels.isNotEmpty) {
+          final freq = <String, int>{};
+          for (final l in labels) freq[l] = (freq[l] ?? 0) + 1;
+          entry['groupLabel'] = freq.entries
+              .reduce((a, b) => a.value >= b.value ? a : b)
+              .key;
+        }
+
         if ((entry['team1'] as String).isEmpty) {
-          entry['team1']   = row['team_name']?.toString() ?? '';
-          entry['arena']   = int.tryParse(row['arena_number']?.toString() ?? '0') ?? 0;
-          entry['bracketType'] = row['bracket_type']?.toString() ?? 'group';
+          entry['team1']   = teamName;
           entry['team1Id'] = teamId;
+          entry['arena']   = arenaNum;
+          entry['bracketType'] = bracketType;
+          entry['time']    = matchTime;
         } else if ((entry['team2'] as String).isEmpty) {
-          entry['team2']   = row['team_name']?.toString() ?? '';
+          entry['team2']   = teamName;
           entry['team2Id'] = teamId;
         }
       }
@@ -651,7 +677,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       if (mounted) {
         setState(() {
           _soccerScheduleRows = scheduleRows;
-          if (scheduleRows.isNotEmpty) _groupsGenerated = true;
+          // Only mark groups as generated if BOTH group assignments
+          // AND actual group-stage matches exist in the schedule
+          if (scheduleRows.isNotEmpty &&
+              scheduleRows.any((r) =>
+                  (r['bracketType'] as String? ?? '') == 'group')) {
+            _groupsGenerated = true;
+          }
         });
       }
     } catch (e) {
@@ -2441,14 +2473,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             borderRadius: BorderRadius.circular(10),
             border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.25), width: 1),
           ),
-          child: const Row(children: [
-            Icon(Icons.edit_note, color: Color(0xFF00CFFF), size: 18),
-            SizedBox(width: 8),
-            Expanded(child: Text(
-              'Tap the ✏️ SCORE button on any match to enter results.',
-              style: TextStyle(color: Color(0xFF00CFFF), fontSize: 12),
-            )),
-          ]),
+        
         ),
         Expanded(child: _buildFifaScheduleList()),
       ] else ...[
@@ -2565,13 +2590,15 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     // Side-by-side arena view
     final arenas = List.generate(arenaCount, (i) => i + 1);
 
-    // Group rows by time slot
+    // Group rows by time slot, keyed by SEQUENTIAL position (1,2,3...)
+    // not by stored arena number — so matches always fill Arena 1, 2, 3...
     final Map<String, Map<int, Map<String, dynamic>>> byTime = {};
     for (final row in rows) {
-      final time  = (row['time'] as String).isNotEmpty ? row['time'] as String : '__notime__';
-      final arena = (row['arena'] as int?) ?? 1;
+      final time = (row['time'] as String).isNotEmpty ? row['time'] as String : '__notime__';
       byTime.putIfAbsent(time, () => {});
-      byTime[time]![arena] = row;
+      // Assign next sequential position for this time slot
+      final pos = byTime[time]!.length + 1;
+      byTime[time]![pos] = row;
     }
     final slots = byTime.keys.toList()
       ..sort((a, b) {
@@ -2579,6 +2606,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         if (b == '__notime__') return -1;
         return a.compareTo(b);
       });
+
+    // Find the max number of arenas used in any single slot for the header
+    final maxArenasUsed = byTime.values
+        .map((s) => s.keys.length)
+        .fold(0, (a, b) => a > b ? a : b);
+    final headerArenas = List.generate(maxArenasUsed, (i) => i + 1);
 
     return Column(children: [
       // Arena header
@@ -2591,7 +2624,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           const SizedBox(width: 54, child: Text('TIME',
               style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold,
                   fontSize: 12, letterSpacing: 0.8))),
-          ...arenas.map((a) => Expanded(child: Container(
+          ...headerArenas.map((a) => Expanded(child: Container(
             margin: const EdgeInsets.symmetric(horizontal: 4),
             padding: const EdgeInsets.symmetric(vertical: 5),
             decoration: BoxDecoration(
@@ -2614,6 +2647,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             final slotMatches = byTime[timeKey]!;
             final isEven      = idx % 2 == 0;
 
+            // Show ALL header arena columns — empty ones are invisible spacers
+            // This keeps alignment with the header row
             return Container(
               decoration: BoxDecoration(
                 color: isEven ? const Color(0xFF160C40) : const Color(0xFF100830),
@@ -2632,19 +2667,19 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                               ? Colors.white.withOpacity(0.2)
                               : const Color(0xFF00CFFF),
                           fontSize: 13, fontWeight: FontWeight.w600))),
-                  ...arenas.map((a) {
+                  ...headerArenas.map((a) {
                     final row = slotMatches[a];
+                    // Empty slot — dim placeholder, same width as a match card
                     if (row == null) {
                       return Expanded(child: Container(
                         margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                        padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
                           color: Colors.white.withOpacity(0.02),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.white.withOpacity(0.06)),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: Colors.white.withOpacity(0.05), width: 1),
                         ),
-                        child: Center(child: Text('—', style: TextStyle(
-                            color: Colors.white.withOpacity(0.15), fontSize: 12))),
+                        child: const SizedBox(height: 70),
                       ));
                     }
                     final matchId    = row['matchId']    as int;
@@ -3294,7 +3329,25 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       fontWeight: FontWeight.w600))),
             ),
           const Spacer(),
-          if (!canGenerate)
+          // Groups are fixed when schedule is generated — use Generate Schedule to change
+          if (_groupsGenerated)
+            Container(
+              height: 36,
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: Colors.green.withOpacity(0.3), width: 1),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: const [
+                Icon(Icons.lock_rounded, color: Colors.green, size: 13),
+                SizedBox(width: 7),
+                Text('Groups locked — regenerate from Schedule page',
+                    style: TextStyle(color: Colors.green, fontSize: 11,
+                        fontWeight: FontWeight.bold)),
+              ]),
+            )
+          else if (!canGenerate)
             Container(
               height: 36,
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -3305,45 +3358,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               ),
               child: const Center(child: Text('Need ≥4 teams',
                   style: TextStyle(color: Colors.white24, fontSize: 11))),
-            )
-          else if (matchStarted)
-            // Show locked button with tooltip when match has started
-            Tooltip(
-              message: 'Cannot reshuffle after matches have started',
-              child: Container(
-                height: 36,
-                padding: const EdgeInsets.symmetric(horizontal: 18),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.04),
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: Colors.white12, width: 1),
-                ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: const [
-                  Icon(Icons.lock, color: Colors.white24, size: 14),
-                  SizedBox(width: 8),
-                  Text('Refresh Groups',
-                      style: TextStyle(color: Colors.white24, fontSize: 13,
-                          fontWeight: FontWeight.bold)),
-                ]),
-              ),
-            )
-          else
-            SizedBox(
-              height: 36,
-              child: ElevatedButton.icon(
-                onPressed: canRefresh ? _generateGroups : null,
-                icon: const Icon(Icons.refresh, size: 15),
-                label: Text(_groupsGenerated ? 'Refresh Groups' : 'Generate Groups',
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _groupsGenerated
-                      ? const Color(0xFF7B2FFF) : const Color(0xFF00CFFF),
-                  foregroundColor: _groupsGenerated ? Colors.white : const Color(0xFF0E0730),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-                  padding: const EdgeInsets.symmetric(horizontal: 18),
-                  elevation: 3,
-                ),
-              ),
             ),
         ]),
       ),
@@ -3561,7 +3575,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         const SizedBox(height: 10),
         Text(
           canGenerate
-              ? '$teamCount teams · ${_groupSplitLabel(teamCount)}\nTap "Generate Groups" above.'
+              ? '$teamCount teams · ${_groupSplitLabel(teamCount)}\nGenerate from the Generate Schedule page.'
               : 'Need at least 4 teams. Currently $teamCount registered.',
           textAlign: TextAlign.center,
           style: TextStyle(color: Colors.white.withOpacity(0.35), fontSize: 14, height: 1.6),

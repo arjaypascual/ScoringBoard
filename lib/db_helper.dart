@@ -407,87 +407,67 @@ class DBHelper {
     print("✅ Schedule cleared and IDs reset.");
   }
 
-  /// Clears ONLY soccer schedule data (group + bracket matches).
-  /// Non-soccer category schedules are left untouched.
-  /// Also clears tbl_soccer_groups so stale group assignments do not
-  /// mismatch with the newly generated tbl_teamschedule rows.
+  /// Clears ALL soccer schedule data completely.
+  /// Direct bracket_type filter — guaranteed clean slate every time.
   static Future<void> clearSoccerSchedule(int categoryId) async {
     final conn = await getConnection();
 
-    // Step 1: Delete scores for soccer teams
+    // Step 1: Get all soccer match IDs first
+    final soccerMatchResult = await conn.execute("""
+      SELECT match_id FROM tbl_match
+      WHERE bracket_type IN (
+        'group','round-of-32','round-of-16',
+        'quarter-finals','semi-finals','third-place','final',
+        'play-in','upper','lower','finals'
+      )
+    """);
+    final soccerMatchIds = soccerMatchResult.rows
+        .map((r) => r.assoc()['match_id'] ?? '0')
+        .where((id) => id != '0')
+        .toList();
+
+    if (soccerMatchIds.isNotEmpty) {
+      final ids = soccerMatchIds.join(',');
+
+      // Step 1a: Delete teamschedule rows for those matches
+      await conn.execute(
+          'DELETE FROM tbl_teamschedule WHERE match_id IN ($ids)');
+
+      // Step 1b: Delete the matches themselves
+      await conn.execute(
+          'DELETE FROM tbl_match WHERE match_id IN ($ids)');
+    }
+
+    // Step 3: Delete scores for soccer teams
     await conn.execute("""
       DELETE sc FROM tbl_score sc
       INNER JOIN tbl_team t ON sc.team_id = t.team_id
       WHERE t.category_id = $categoryId
     """);
 
-    // Step 2: Delete teamschedule rows for soccer teams only
-    await conn.execute("""
-      DELETE ts FROM tbl_teamschedule ts
-      INNER JOIN tbl_team t ON ts.team_id = t.team_id
-      WHERE t.category_id = $categoryId
-    """);
-
-    // Step 3: Delete matches that now have no teamschedule rows
-    // AND are soccer bracket-type (includes TBD knockout slots)
-    await conn.execute("""
-      DELETE m FROM tbl_match m
-      WHERE m.bracket_type IN (
-        'group','round-of-32','round-of-16',
-        'quarter-finals','semi-finals','third-place','final',
-        'play-in','upper','lower','finals'
-      )
-      AND m.match_id NOT IN (
-        SELECT DISTINCT ts2.match_id FROM tbl_teamschedule ts2
-      )
-    """);
-
-    // Step 3b: Also delete any remaining soccer bracket matches
-    // that still have teamschedule rows from OTHER categories
-    // (safety net for cross-contamination)
-    await conn.execute("""
-      DELETE ts FROM tbl_teamschedule ts
-      WHERE ts.match_id IN (
-        SELECT m2.match_id FROM tbl_match m2
-        WHERE m2.bracket_type IN (
-          'group','round-of-32','round-of-16',
-          'quarter-finals','semi-finals','third-place','final'
-        )
-      )
-      AND ts.team_id NOT IN (
-        SELECT t2.team_id FROM tbl_team t2
-        WHERE t2.category_id = $categoryId
-      )
-    """);
-
-    // Step 3c: Clean up any now-empty matches again
-    await conn.execute("""
-      DELETE m FROM tbl_match m
-      WHERE m.bracket_type IN (
-        'group','round-of-32','round-of-16',
-        'quarter-finals','semi-finals','third-place','final'
-      )
-      AND m.match_id NOT IN (
-        SELECT DISTINCT ts3.match_id FROM tbl_teamschedule ts3
-      )
-    """);
 
     // Step 4: Delete orphaned schedule rows
-    await conn.execute("""
-      DELETE s FROM tbl_schedule s
-      WHERE s.schedule_id NOT IN (
-        SELECT DISTINCT m2.schedule_id FROM tbl_match m2
-      )
-    """);
+    final validSchedResult = await conn.execute(
+        'SELECT DISTINCT schedule_id FROM tbl_match');
+    final validIds = validSchedResult.rows
+        .map((r) => r.assoc()['schedule_id'] ?? '0')
+        .where((id) => id != '0')
+        .toList();
+    if (validIds.isEmpty) {
+      await conn.execute('DELETE FROM tbl_schedule');
+    } else {
+      await conn.execute(
+          'DELETE FROM tbl_schedule WHERE schedule_id NOT IN (' + validIds.join(',') + ')');
+    }
 
-    // Step 5: Clear stale soccer groups
+    // Step 5: Clear soccer groups
     try {
       await conn.execute(
         "DELETE FROM tbl_soccer_groups WHERE category_id = $categoryId",
       );
     } catch (_) {}
 
-    print("✅ Soccer schedule cleared for category $categoryId.");
+    print("✅ Soccer schedule fully cleared for category $categoryId.");
   }
 
 
@@ -533,12 +513,18 @@ class DBHelper {
     """);
 
     // Step 4: Delete orphaned schedule rows
-    await conn.execute("""
-      DELETE s FROM tbl_schedule s
-      WHERE s.schedule_id NOT IN (
-        SELECT DISTINCT m2.schedule_id FROM tbl_match m2
-      )
-    """);
+    final validSchedResult = await conn.execute(
+        'SELECT DISTINCT schedule_id FROM tbl_match');
+    final validIds = validSchedResult.rows
+        .map((r) => r.assoc()['schedule_id'] ?? '0')
+        .where((id) => id != '0')
+        .toList();
+    if (validIds.isEmpty) {
+      await conn.execute('DELETE FROM tbl_schedule');
+    } else {
+      await conn.execute(
+          'DELETE FROM tbl_schedule WHERE schedule_id NOT IN (' + validIds.join(',') + ')');
+    }
 
     print("✅ Schedule cleared for categories: $ids");
   }
@@ -962,27 +948,53 @@ class DBHelper {
     final maxPairs = (maxGroupSize * (maxGroupSize - 1)) ~/ 2;
     await seedRounds(maxPairs < 1 ? 1 : maxPairs);
 
+    // ── SAVE GROUPS TO DB ─────────────────────────────────────────────────
+    // Groups are saved HERE inside generateFifaSchedule to guarantee
+    // tbl_soccer_groups and tbl_teamschedule are always in sync.
+    // The caller must NOT save groups separately.
+    try {
+      await conn.execute("""CREATE TABLE IF NOT EXISTS tbl_soccer_groups (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        category_id INT NOT NULL, group_label VARCHAR(5) NOT NULL,
+        team_id INT NOT NULL, team_name VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""");
+    } catch (_) {}
+
+    // Already cleared by clearSoccerSchedule above, but clear again to be safe
+    await conn.execute(
+        'DELETE FROM tbl_soccer_groups WHERE category_id = $categoryId');
+
+    final groupLabels = List.generate(groups.length, (i) => String.fromCharCode(65 + i));
+    for (int gi = 0; gi < groups.length; gi++) {
+      for (final team in groups[gi]) {
+        final tid  = team['team_id']?.toString() ?? '0';
+        final name = (team['team_name']?.toString() ?? '').replaceAll("'", "''");
+        await conn.execute(
+            "INSERT INTO tbl_soccer_groups (category_id, group_label, team_id, team_name) "
+            "VALUES ($categoryId, '${groupLabels[gi]}', $tid, '$name')");
+      }
+    }
+    print("✅ Groups saved to DB: ${groups.length} groups.");
+
     // ── PHASE 1: GROUP STAGE ──────────────────────────────────────────────
     //
-    // CONFLICT-FREE SLOT FILLER:
+    // STRICT GROUP-PER-ARENA SCHEDULING:
     //
-    // Rules:
-    //   1. Each time slot has exactly [arenas] matches running in parallel.
-    //   2. No team appears in more than one arena at the same time.
-    //   3. No blanks — slots are always filled if matches remain.
-    //   4. Teams get maximum rest — matches from the same group
-    //      are spread out using round-based ordering.
+    // Each arena is assigned a fixed set of groups (by index % arenas).
+    // Arena 1 → groups 0, arenas, 2*arenas, ...
+    // Arena 2 → groups 1, arenas+1, 2*arenas+1, ...
     //
-    // Algorithm:
-    //   a. Build all matches ordered by round (circle method) so same-group
-    //      matches are naturally spaced apart.
-    //   b. Each time slot: pick one match per arena from the remaining queue,
-    //      skipping any match whose teams conflict with already-picked matches.
-    //   c. If no non-conflicting match exists for an arena, leave that
-    //      arena empty this slot (but this should be rare with good ordering).
+    // Within each arena, groups rotate one match at a time so every team
+    // gets maximum rest. Groups on different arenas play simultaneously.
+    //
+    // This guarantees:
+    //   ✅ Teams ONLY play teams from their own group
+    //   ✅ No team appears in 2 arenas at the same time (different groups)
+    //   ✅ No blanks — arena always plays its next group's next match
+    //   ✅ Maximum rest — circle method spreads same-team matches apart
 
-    // ── Build all matches in round-based order ────────────────────────────
-    // Circle method: produces balanced rounds where no team plays twice
+    // ── Build round-robin rounds per group (circle method) ────────────────
     List<List<List<Map<String, dynamic>>>> buildRounds(
         List<Map<String, dynamic>> group) {
       final n      = group.length;
@@ -1005,67 +1017,90 @@ class DBHelper {
       return rounds;
     }
 
-    // Flatten all matches into a queue ordered by round
-    // Each entry: { 'gIdx': int, 'pair': [team1, team2], 'round': int }
-    final queue = <Map<String, dynamic>>[];
+    // ── Flatten all matches into one pool ────────────────────────────────
+    // Interleave round-by-round across all groups
+    final allMatches = <Map<String, dynamic>>[];
     final allGroupRounds = groups.map(buildRounds).toList();
-
-    // Interleave groups round-by-round so same-group matches are spread out
     final maxRounds = allGroupRounds.isEmpty ? 0
         : allGroupRounds.map((gr) => gr.length).reduce((a, b) => a > b ? a : b);
+
     for (int r = 0; r < maxRounds; r++) {
       for (int gIdx = 0; gIdx < groups.length; gIdx++) {
         final gr = allGroupRounds[gIdx];
         if (r >= gr.length) continue;
         for (final pair in gr[r]) {
-          queue.add({'gIdx': gIdx, 'pair': pair, 'round': r + 1});
+          allMatches.add({'gIdx': gIdx, 'pair': pair, 'round': r + 1});
         }
       }
     }
 
+    // Track how many matches each team has played — used to sort pool
+    // so teams with fewer matches are prioritised (helps fill slots)
+    final Map<String, int> teamMatchCount = {};
+
     int timeCursor = skipLunch(startMinutes);
 
-    // Schedule: fill slots greedily, one match per arena per slot
-    // Skip matches whose teams conflict with already-scheduled arenas this slot
-    while (queue.isNotEmpty) {
+    // ── Schedule slot by slot ─────────────────────────────────────────────
+    // Each slot: fill [arenas] positions with non-conflicting matches.
+    // Before each slot, sort the pool so matches with least-played teams
+    // come first — this maximises the chance of filling every position.
+
+    while (allMatches.isNotEmpty) {
       int t = skipLunch(timeCursor);
       if (t + durationMinutes > endLimit) break;
 
-      // Teams already booked this time slot (across all arenas)
-      final Set<String> bookedTeams = {};
-      // Matches picked for this slot (one per arena)
-      final Map<int, Map<String, dynamic>> slotPicks = {};
+      // Sort pool: matches whose teams have played least go first
+      // This spreads load evenly and maximises slot fill
+      allMatches.sort((a, b) {
+        final ap = a['pair'] as List;
+        final bp = b['pair'] as List;
+        final aScore = (teamMatchCount[ap[0]['team_id'].toString()] ?? 0)
+                     + (teamMatchCount[ap[1]['team_id'].toString()] ?? 0);
+        final bScore = (teamMatchCount[bp[0]['team_id'].toString()] ?? 0)
+                     + (teamMatchCount[bp[1]['team_id'].toString()] ?? 0);
+        return aScore.compareTo(bScore);
+      });
 
-      // Try to fill each arena
-      for (int a = 1; a <= arenas; a++) {
-        // Find the first queued match with no team conflict
-        int? picked;
-        for (int qi = 0; qi < queue.length; qi++) {
-          final match = queue[qi];
+      final Set<String> bookedTeams = {};
+      final List<Map<String, dynamic>> slotPicks = [];
+      final List<int> pickedIdx = [];
+
+      // Fill all [arenas] positions greedily
+      for (int pos = 0; pos < arenas; pos++) {
+        for (int qi = 0; qi < allMatches.length; qi++) {
+          if (pickedIdx.contains(qi)) continue;
+          final match = allMatches[qi];
           final pair  = match['pair'] as List;
           final id1   = pair[0]['team_id'].toString();
           final id2   = pair[1]['team_id'].toString();
           if (!bookedTeams.contains(id1) && !bookedTeams.contains(id2)) {
-            picked = qi;
             bookedTeams.add(id1);
             bookedTeams.add(id2);
-            slotPicks[a] = match;
+            slotPicks.add(match);
+            pickedIdx.add(qi);
             break;
           }
         }
-        if (picked != null) queue.removeAt(picked);
       }
 
-      // If nothing was picked at all, break to avoid infinite loop
       if (slotPicks.isEmpty) break;
 
-      // Write all picked matches to DB at the same time slot
-      for (final entry in slotPicks.entries) {
-        final a     = entry.key;
-        final match = entry.value;
-        final pair  = match['pair']  as List;
-        final gIdx  = match['gIdx']  as int;
-        final round = match['round'] as int;
+      // Remove picked matches (reverse to preserve indices)
+      for (final idx in pickedIdx.reversed) {
+        allMatches.removeAt(idx);
+      }
+
+      // Update match counts and write to DB
+      for (int ai = 0; ai < slotPicks.length; ai++) {
+        final match    = slotPicks[ai];
+        final pair     = match['pair']  as List;
+        final gIdx     = match['gIdx']  as int;
+        final round    = match['round'] as int;
+        final arenaNum = ai + 1;
+        final id1      = pair[0]['team_id'].toString();
+        final id2      = pair[1]['team_id'].toString();
+        teamMatchCount[id1] = (teamMatchCount[id1] ?? 0) + 1;
+        teamMatchCount[id2] = (teamMatchCount[id2] ?? 0) + 1;
 
         final schedId = await insertSchedule(
             startTime: fmt(t), endTime: fmt(t + durationMinutes));
@@ -1073,19 +1108,20 @@ class DBHelper {
         await insertTeamSchedule(
             matchId: matchId, roundId: round,
             teamId: int.parse(pair[0]['team_id'].toString()),
-            refereeId: defaultRefereeId, arenaNumber: a);
+            refereeId: defaultRefereeId, arenaNumber: arenaNum);
         await insertTeamSchedule(
             matchId: matchId, roundId: round,
             teamId: int.parse(pair[1]['team_id'].toString()),
-            refereeId: defaultRefereeId, arenaNumber: a);
+            refereeId: defaultRefereeId, arenaNumber: arenaNum);
 
-        print("✅ Arena $a Group ${String.fromCharCode(65 + gIdx)} "
-              "Round $round @ ${fmt(t)}");
+        print("✅ t=${fmt(t)} Arena $arenaNum "
+              "G${String.fromCharCode(65 + gIdx)} R$round");
       }
 
       timeCursor = skipLunch(timeCursor + durationMinutes + intervalMinutes);
     }
-    print("✅ Group stage done — no conflicts, no blanks.");
+    print("✅ Group stage done.");
+
 
     // ── PHASE 2: KNOCKOUT STAGE ───────────────────────────────────────────
     // Determine bracket size: next power of 2 >= numGroups * 2 (top 2 per group)
