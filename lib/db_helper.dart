@@ -151,6 +151,20 @@ class DBHelper {
     } catch (_) {
       print("ℹ️  Migration 7: bracket_type already present.");
     }
+
+    // Migration 9: normalize legacy 'round-of-8' bracket_type → 'quarter-finals'
+    try {
+      await conn.execute("""
+        UPDATE tbl_match
+        SET bracket_type = 'quarter-finals'
+        WHERE bracket_type = 'round-of-8'
+      """);
+      print("✅ Migration 9: normalized round-of-8 → quarter-finals.");
+    } catch (e) {
+      print("ℹ️  Migration 9: $e");
+    }
+
+    print("✅ Migrations complete.");
   }
   // Generates a random 6-char uppercase alphanumeric code, e.g. "A3F9KX"
   static String _generateCode() {
@@ -429,23 +443,25 @@ class DBHelper {
     if (soccerMatchIds.isNotEmpty) {
       final ids = soccerMatchIds.join(',');
 
-      // Step 1a: Delete teamschedule rows for those matches
+      // Step 1a: Delete scores FIRST (FK → tbl_match must go before tbl_match)
+      await conn.execute(
+          'DELETE FROM tbl_score WHERE match_id IN ($ids)');
+
+      // Step 1b: Delete teamschedule rows
       await conn.execute(
           'DELETE FROM tbl_teamschedule WHERE match_id IN ($ids)');
 
-      // Step 1b: Delete the matches themselves
+      // Step 1d: Now safe to delete matches
       await conn.execute(
           'DELETE FROM tbl_match WHERE match_id IN ($ids)');
     }
 
-    // Step 3: Delete scores for soccer teams
+    // Step 3: Also delete any leftover scores for soccer teams (safety net)
     await conn.execute("""
       DELETE sc FROM tbl_score sc
       INNER JOIN tbl_team t ON sc.team_id = t.team_id
       WHERE t.category_id = $categoryId
     """);
-
-
     // Step 4: Delete orphaned schedule rows
     final validSchedResult = await conn.execute(
         'SELECT DISTINCT schedule_id FROM tbl_match');
@@ -853,6 +869,41 @@ class DBHelper {
     return result.rows.map((r) => r.assoc()).toList();
   }
 
+  // ── SOCCER SCORES (tbl_score) ─────────────────────────────────────────────
+  // Returns scores per team per match for a soccer category using tbl_score
+  static Future<List<Map<String, dynamic>>> getSoccerScoresByCategory(
+      int categoryId) async {
+    final conn   = await getConnection();
+    final result = await conn.execute("""
+      SELECT
+        sc.score_id        AS id,
+        sc.match_id,
+        sc.team_id,
+        t.team_name,
+        sc.score_totalscore   AS goals,
+        sc.score_violation    AS fouls,
+        sc.score_totalduration AS duration,
+        sc.round_id,
+        sc.score_isapproved   AS is_approved
+      FROM tbl_score sc
+      JOIN tbl_team t ON t.team_id = sc.team_id
+      WHERE t.category_id = :categoryId
+      ORDER BY sc.match_id, sc.score_id
+    """, {"categoryId": categoryId});
+    return result.rows.map((r) => r.assoc()).toList();
+  }
+
+  // Check if a soccer match already has scores
+  static Future<bool> soccerMatchIsScored(int matchId) async {
+    final conn   = await getConnection();
+    final result = await conn.execute(
+      "SELECT COUNT(*) as cnt FROM tbl_score WHERE match_id = $matchId",
+    );
+    final cnt = int.tryParse(
+        result.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
+    return cnt > 0;
+  }
+
   static Future<void> upsertScore({
     required int teamId,
     required int roundId,
@@ -994,6 +1045,10 @@ class DBHelper {
     //   ✅ No blanks — arena always plays its next group's next match
     //   ✅ Maximum rest — circle method spreads same-team matches apart
 
+    // Cap arenas to number of groups — more arenas than groups makes no sense
+    // and causes 1 match per slot with many blank columns in the display.
+    final effectiveArenas = arenas.clamp(1, groups.length);
+
     // ── Build round-robin rounds per group (circle method) ────────────────
     List<List<List<Map<String, dynamic>>>> buildRounds(
         List<Map<String, dynamic>> group) {
@@ -1034,88 +1089,100 @@ class DBHelper {
       }
     }
 
-    // Track how many matches each team has played — used to sort pool
-    // so teams with fewer matches are prioritised (helps fill slots)
+    // ── Schedule slot by slot — fill ALL arenas before advancing time ──────
+    //
+    // RULE: Every time slot must fill as many arenas as possible.
+    // Arena assignment is DYNAMIC per slot (not fixed per group).
+    // A match is eligible if neither team is already in this slot.
+    //
+    // Algorithm:
+    //   1. Sort pool so teams with fewest matches come first (even load)
+    //   2. Greedily pick matches for arenas 1..N — skip if team conflict
+    //   3. Assign sequential arena numbers 1,2,3... to picks in this slot
+    //   4. Only advance time when slot is full OR no more matches fit
+    //   5. Never leave arenas blank when a valid match exists in the pool
+
     final Map<String, int> teamMatchCount = {};
+    // Track which round each team last played — avoids consecutive same-group
+    final Map<String, int> teamLastRound  = {};
 
     int timeCursor = skipLunch(startMinutes);
-
-    // ── Schedule slot by slot ─────────────────────────────────────────────
-    // Each slot: fill [arenas] positions with non-conflicting matches.
-    // Before each slot, sort the pool so matches with least-played teams
-    // come first — this maximises the chance of filling every position.
 
     while (allMatches.isNotEmpty) {
       int t = skipLunch(timeCursor);
       if (t + durationMinutes > endLimit) break;
 
-      // Sort pool: matches whose teams have played least go first
-      // This spreads load evenly and maximises slot fill
+      // Sort: fewest-played teams first, then by group round to spread load
       allMatches.sort((a, b) {
         final ap = a['pair'] as List;
         final bp = b['pair'] as List;
-        final aScore = (teamMatchCount[ap[0]['team_id'].toString()] ?? 0)
-                     + (teamMatchCount[ap[1]['team_id'].toString()] ?? 0);
-        final bScore = (teamMatchCount[bp[0]['team_id'].toString()] ?? 0)
-                     + (teamMatchCount[bp[1]['team_id'].toString()] ?? 0);
-        return aScore.compareTo(bScore);
+        final aLoad = (teamMatchCount[ap[0]['team_id'].toString()] ?? 0)
+                    + (teamMatchCount[ap[1]['team_id'].toString()] ?? 0);
+        final bLoad = (teamMatchCount[bp[0]['team_id'].toString()] ?? 0)
+                    + (teamMatchCount[bp[1]['team_id'].toString()] ?? 0);
+        if (aLoad != bLoad) return aLoad.compareTo(bLoad);
+        // Secondary: prefer matches from groups not yet in this slot
+        return (a['round'] as int).compareTo(b['round'] as int);
       });
 
       final Set<String> bookedTeams = {};
       final List<Map<String, dynamic>> slotPicks = [];
       final List<int> pickedIdx = [];
 
-      // Fill all [arenas] positions greedily
-      for (int pos = 0; pos < arenas; pos++) {
+      // Fill arenas greedily — no team can appear twice in same slot
+      for (int pos = 0; pos < effectiveArenas; pos++) {
         for (int qi = 0; qi < allMatches.length; qi++) {
           if (pickedIdx.contains(qi)) continue;
           final match = allMatches[qi];
           final pair  = match['pair'] as List;
           final id1   = pair[0]['team_id'].toString();
           final id2   = pair[1]['team_id'].toString();
-          if (!bookedTeams.contains(id1) && !bookedTeams.contains(id2)) {
-            bookedTeams.add(id1);
-            bookedTeams.add(id2);
-            slotPicks.add(match);
-            pickedIdx.add(qi);
-            break;
-          }
+          // Skip if either team already playing in this slot
+          if (bookedTeams.contains(id1) || bookedTeams.contains(id2)) continue;
+          bookedTeams.add(id1);
+          bookedTeams.add(id2);
+          slotPicks.add(match);
+          pickedIdx.add(qi);
+          break;
         }
       }
 
       if (slotPicks.isEmpty) break;
 
-      // Remove picked matches (reverse to preserve indices)
+      // Remove picked matches from pool
       for (final idx in pickedIdx.reversed) {
         allMatches.removeAt(idx);
       }
 
-      // Update match counts and write to DB
+      // Write all picks to DB with sequential arena numbers 1,2,3...
       for (int ai = 0; ai < slotPicks.length; ai++) {
         final match    = slotPicks[ai];
         final pair     = match['pair']  as List;
         final gIdx     = match['gIdx']  as int;
         final round    = match['round'] as int;
-        final arenaNum = ai + 1;
+        final arenaNum = ai + 1;  // ← dynamic: Arena 1,2,3... per slot
         final id1      = pair[0]['team_id'].toString();
         final id2      = pair[1]['team_id'].toString();
+
         teamMatchCount[id1] = (teamMatchCount[id1] ?? 0) + 1;
         teamMatchCount[id2] = (teamMatchCount[id2] ?? 0) + 1;
+        teamLastRound[id1]  = round;
+        teamLastRound[id2]  = round;
 
         final schedId = await insertSchedule(
             startTime: fmt(t), endTime: fmt(t + durationMinutes));
         final matchId = await insertMatch(schedId, bracketType: 'group');
         await insertTeamSchedule(
             matchId: matchId, roundId: round,
-            teamId: int.parse(pair[0]['team_id'].toString()),
+            teamId: int.parse(id1),
             refereeId: defaultRefereeId, arenaNumber: arenaNum);
         await insertTeamSchedule(
             matchId: matchId, roundId: round,
-            teamId: int.parse(pair[1]['team_id'].toString()),
+            teamId: int.parse(id2),
             refereeId: defaultRefereeId, arenaNumber: arenaNum);
 
         print("✅ t=${fmt(t)} Arena $arenaNum "
-              "G${String.fromCharCode(65 + gIdx)} R$round");
+              "G${String.fromCharCode(65 + gIdx)} R$round: $id1 vs $id2");
       }
 
       timeCursor = skipLunch(timeCursor + durationMinutes + intervalMinutes);
@@ -1134,28 +1201,31 @@ class DBHelper {
     //   bracketSize=16 → R16(8)+QF(4)+SF(2)+3rd(1)+F(1) = 16 matches
     //   bracketSize=32 → R32(16)+R16(8)+QF(4)+SF(2)+3rd(1)+F(1) = 32 matches
 
-    // Build rounds list: [ {label, count} ]
+    // Build knockout rounds list with correct FIFA labels.
+    // bracketSize = total teams entering knockout (always power of 2).
+    // Each round halves until we reach 4 teams (semi-finals).
     final koRounds = <Map<String, dynamic>>[];
     int sz = bracketSize;
-    while (sz >= 2) {
+    while (sz >= 4) {
+      final int matchCount = sz ~/ 2;
       String label;
-      if (sz == bracketSize) {
-        if (sz == 8)  label = 'quarter-finals';
-        else if (sz == 4) label = 'semi-finals';
-        else label = 'round-of-${sz}';
-      } else if (sz == 4) label = 'quarter-finals';
-      else if (sz == 2) label = 'semi-finals';
-      else label = 'round-of-${sz}';
-      koRounds.add({'label': label, 'count': sz ~/ 2});
+      if      (sz == 4)  label = 'semi-finals';
+      else if (sz == 8)  label = 'quarter-finals';
+      else if (sz == 16) label = 'round-of-16';
+      else if (sz == 32) label = 'round-of-32';
+      else               label = 'round-of-$sz';
+      koRounds.add({'label': label, 'count': matchCount});
       sz ~/= 2;
     }
-    // Add 3rd place + final
+    // Always add 3rd-place (1 match) and final (1 match)
     koRounds.add({'label': 'third-place', 'count': 1});
     koRounds.add({'label': 'final',       'count': 1});
 
     // Add a gap between group stage and knockout
     timeCursor = skipLunch(timeCursor + intervalMinutes * 3);
 
+    // Knockout slots are ALWAYS created — no time limit break.
+    // If we've passed endLimit, continue scheduling sequentially after it.
     for (final round in koRounds) {
       final String bracketType = round['label'] as String;
       final int    count       = round['count'] as int;
@@ -1163,11 +1233,12 @@ class DBHelper {
 
       for (int r = 0; r < perArena; r++) {
         int t = skipLunch(timeCursor);
-        if (t + durationMinutes > endLimit) break;
+        // Do NOT break on endLimit — KO matches must always exist
         final matchesThisSlot = (r == perArena - 1 && count % arenas != 0)
             ? count % arenas : arenas;
         for (int a = 1; a <= matchesThisSlot; a++) {
-          final schedId = await insertSchedule(startTime: fmt(t), endTime: fmt(t + durationMinutes));
+          final schedId = await insertSchedule(
+              startTime: fmt(t), endTime: fmt(t + durationMinutes));
           await insertMatch(schedId, bracketType: bracketType);
         }
         timeCursor = skipLunch(timeCursor + durationMinutes + intervalMinutes);
@@ -1175,6 +1246,408 @@ class DBHelper {
       }
     }
     print("✅ FIFA schedule generated! ${groups.length} groups, bracket size $bracketSize.");
+  }
+
+  // ── ADVANCE TEAMS TO KNOCKOUT ─────────────────────────────────────────────
+  //
+  // Called after group stage is complete.
+  // 1. Reads top 2 from each group (by PTS → GD → GF)
+  // 2. Seeds them into knockout slots using FIFA cross-group pairing:
+  //    1A vs 2B, 1C vs 2D, 1B vs 2A, 1D vs 2C ...
+  // 3. Inserts tbl_teamschedule rows for each knockout match
+  //
+  static Future<void> advanceToKnockout(int categoryId) async {
+    final conn = await getConnection();
+
+    // ── 1. Get all groups and their teams ────────────────────────────────────
+    final groupResult = await conn.execute(
+      "SELECT group_label, team_id FROM tbl_soccer_groups "
+      "WHERE category_id = $categoryId ORDER BY group_label, id",
+    );
+    final Map<String, List<int>> groupTeams = {};
+    for (final row in groupResult.rows) {
+      final label  = row.assoc()['group_label'] ?? '';
+      final teamId = int.tryParse(row.assoc()['team_id']?.toString() ?? '0') ?? 0;
+      groupTeams.putIfAbsent(label, () => []);
+      groupTeams[label]!.add(teamId);
+    }
+    if (groupTeams.isEmpty) throw Exception('No groups found for category $categoryId');
+
+    // ── 2. Get scores per team from group stage using tbl_score ────────────────
+    // Uses a per-match subquery to correctly compute W/D/L/GF/GA/PTS per team
+    final scoreResult = await conn.execute("""
+      SELECT
+        ts.team_id,
+        COALESCE(SUM(sc.score_totalscore), 0) AS goals_for,
+        COALESCE(SUM(
+          (SELECT sc_opp.score_totalscore
+           FROM tbl_teamschedule ts_opp
+           LEFT JOIN tbl_score sc_opp
+             ON sc_opp.match_id = ts_opp.match_id
+            AND sc_opp.team_id  = ts_opp.team_id
+           WHERE ts_opp.match_id = ts.match_id
+             AND ts_opp.team_id != ts.team_id
+           LIMIT 1)
+        ), 0) AS goals_against,
+        COALESCE(SUM(CASE
+          WHEN sc.score_totalscore IS NULL THEN 0
+          WHEN sc.score_totalscore > COALESCE(
+            (SELECT sc2.score_totalscore
+             FROM tbl_teamschedule ts2
+             LEFT JOIN tbl_score sc2
+               ON sc2.match_id = ts2.match_id AND sc2.team_id = ts2.team_id
+             WHERE ts2.match_id = ts.match_id AND ts2.team_id != ts.team_id
+             LIMIT 1), -1) THEN 3
+          WHEN sc.score_totalscore = COALESCE(
+            (SELECT sc2.score_totalscore
+             FROM tbl_teamschedule ts2
+             LEFT JOIN tbl_score sc2
+               ON sc2.match_id = ts2.match_id AND sc2.team_id = ts2.team_id
+             WHERE ts2.match_id = ts.match_id AND ts2.team_id != ts.team_id
+             LIMIT 1), -1) THEN 1
+          ELSE 0 END), 0) AS points
+      FROM tbl_teamschedule ts
+      JOIN tbl_match m ON m.match_id = ts.match_id
+      JOIN tbl_team  t ON t.team_id  = ts.team_id
+      LEFT JOIN tbl_score sc
+        ON sc.team_id = ts.team_id AND sc.match_id = ts.match_id
+      WHERE t.category_id = $categoryId
+        AND m.bracket_type = 'group'
+      GROUP BY ts.team_id
+    """);
+
+    final Map<int, Map<String, int>> teamStats = {};
+    for (final row in scoreResult.rows) {
+      final tid = int.tryParse(row.assoc()['team_id']?.toString() ?? '0') ?? 0;
+      final pts = int.tryParse(row.assoc()['points']?.toString() ?? '0') ?? 0;
+      final gf  = int.tryParse(row.assoc()['goals_for']?.toString() ?? '0') ?? 0;
+      final ga  = int.tryParse(row.assoc()['goals_against']?.toString() ?? '0') ?? 0;
+      teamStats[tid] = {'pts': pts, 'gf': gf, 'ga': ga, 'gd': gf - ga};
+    }
+
+    // ── 3. Rank teams within each group ──────────────────────────────────────
+    // Returns [1st_teamId, 2nd_teamId, ...]
+    final Map<String, List<int>> groupRanked = {};
+    for (final entry in groupTeams.entries) {
+      final label = entry.key;
+      final teams = List<int>.from(entry.value);
+      teams.sort((a, b) {
+        final sa = teamStats[a] ?? {'pts': 0, 'gd': 0, 'gf': 0};
+        final sb = teamStats[b] ?? {'pts': 0, 'gd': 0, 'gf': 0};
+        if (sb['pts'] != sa['pts']) return sb['pts']!.compareTo(sa['pts']!);
+        if (sb['gd']  != sa['gd'])  return sb['gd']!.compareTo(sa['gd']!);
+        return sb['gf']!.compareTo(sa['gf']!);
+      });
+      groupRanked[label] = teams;
+    }
+
+    // Debug: print group rankings
+    for (final entry in groupRanked.entries) {
+      print("ℹ️  Group ${entry.key}: ranked team IDs = ${entry.value}");
+    }
+
+    // ── 4. Build seeds list — FIFA cross-group pairing ───────────────────────
+    // Groups A,B,C,D,E,F,G,H paired as:
+    //   Slot 0: 1A vs 2B   Slot 1: 1C vs 2D  ...
+    //   Slot n/2: 1B vs 2A  Slot n/2+1: 1D vs 2C  ...
+    // For odd group counts: last group's 1st vs 2nd fills the last slot.
+    final labels = groupRanked.keys.toList()..sort();
+    final n      = labels.length;
+    final seeds  = <Map<String, dynamic>>[];
+
+    if (n == 1) {
+      // Only 1 group — 1st vs 2nd
+      final g = labels[0];
+      seeds.add({
+        'home': groupRanked[g]!.isNotEmpty ? groupRanked[g]![0] : 0,
+        'away': groupRanked[g]!.length > 1  ? groupRanked[g]![1] : 0,
+      });
+    } else {
+      // Forward pairs: (A,B), (C,D), (E,F), (G,H)
+      for (int i = 0; i < n - 1; i += 2) {
+        final gA = labels[i];
+        final gB = labels[i + 1];
+        seeds.add({
+          'home': groupRanked[gA]!.isNotEmpty ? groupRanked[gA]![0] : 0,
+          'away': groupRanked[gB]!.length > 1  ? groupRanked[gB]![1] : 0,
+        });
+      }
+      // Reverse pairs: (B,A), (D,C), (F,E), (H,G)
+      for (int i = 1; i < n; i += 2) {
+        final gB = labels[i];
+        final gA = labels[i - 1];
+        seeds.add({
+          'home': groupRanked[gB]!.isNotEmpty ? groupRanked[gB]![0] : 0,
+          'away': groupRanked[gA]!.length > 1  ? groupRanked[gA]![1] : 0,
+        });
+      }
+      // Odd group left over (e.g. 3 groups → A,B done, C alone)
+      if (n % 2 == 1) {
+        final gLast = labels.last;
+        seeds.add({
+          'home': groupRanked[gLast]!.isNotEmpty ? groupRanked[gLast]![0] : 0,
+          'away': groupRanked[gLast]!.length > 1  ? groupRanked[gLast]![1] : 0,
+        });
+      }
+    }
+
+    // ── 5. Determine first KO round label ────────────────────────────────────
+    const koOrder = [
+      'round-of-32', 'round-of-16', 'round-of-8',
+      'quarter-finals', 'semi-finals', 'third-place', 'final'
+    ];
+
+    // Get ALL first-round KO slots (whether seeded or not)
+    // We use ALL slots so we can overwrite/fill any still-empty ones
+    final allKoResult = await conn.execute("""
+      SELECT m.match_id, m.bracket_type
+      FROM tbl_match m
+      JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
+      WHERE m.bracket_type IN (
+        'round-of-32','round-of-16','round-of-8',
+        'quarter-finals','semi-finals','third-place','final'
+      )
+      ORDER BY s.schedule_start ASC, m.match_id ASC
+    """);
+    final allKoMatches = allKoResult.rows.map((r) => r.assoc()).toList();
+
+    // Find which round is the first (earliest) KO round
+    String firstRound = '';
+    for (final bt in koOrder) {
+      if (allKoMatches.any((m) => m['bracket_type'] == bt)) {
+        firstRound = bt;
+        break;
+      }
+    }
+    if (firstRound.isEmpty) {
+      throw Exception('No knockout matches found. Please regenerate the schedule first.');
+    }
+
+    // All first-round match slots
+    final firstRoundMatches = allKoMatches
+        .where((m) => m['bracket_type'] == firstRound)
+        .toList();
+
+    print("ℹ️  First KO round: $firstRound — ${firstRoundMatches.length} slots, ${seeds.length} seeds");
+
+    // If DB has fewer slots than seeds, create the missing ones
+    if (firstRoundMatches.length < seeds.length) {
+      print("⚠️  Missing ${seeds.length - firstRoundMatches.length} KO slots — creating them now");
+      // Get last schedule time to append after
+      final lastSched = await conn.execute("""
+        SELECT MAX(schedule_start) AS last_t FROM tbl_schedule
+      """);
+      final lastTimeStr = lastSched.rows.isEmpty
+          ? '18:00:00'
+          : lastSched.rows.first.assoc()['last_t']?.toString() ?? '18:00:00';
+      // Parse HH:MM:SS into minutes
+      int parseMin(String t) {
+        final parts = t.split(':');
+        return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
+      }
+      String fmtTime(int m) {
+        return '${(m~/60).toString().padLeft(2,'0')}:${(m%60).toString().padLeft(2,'0')}:00';
+      }
+      int cursor = parseMin(lastTimeStr) + 15;
+      for (int i = firstRoundMatches.length; i < seeds.length; i++) {
+        final sId = await insertSchedule(
+            startTime: fmtTime(cursor),
+            endTime:   fmtTime(cursor + 10));
+        final mId = await insertMatch(sId, bracketType: firstRound);
+        firstRoundMatches.add({'match_id': mId.toString(), 'bracket_type': firstRound});
+        cursor += 25;
+        print("✅ Created missing KO slot: match $mId");
+      }
+    }
+
+    // ── 6. Get default referee ────────────────────────────────────────────────
+    final refResult = await conn.execute(
+      "SELECT referee_id FROM tbl_referee ORDER BY referee_id LIMIT 1",
+    );
+    final refereeId = refResult.rows.isEmpty ? 1
+        : int.tryParse(refResult.rows.first.assoc()['referee_id']?.toString() ?? '1') ?? 1;
+
+    // ── 7. Insert teamschedule rows — use INSERT IGNORE to avoid duplicates ───
+    for (int seedIdx = 0; seedIdx < seeds.length; seedIdx++) {
+      if (seedIdx >= firstRoundMatches.length) break;
+      final matchId = int.tryParse(
+          firstRoundMatches[seedIdx]['match_id']?.toString() ?? '0') ?? 0;
+      if (matchId == 0) continue;
+
+      final homeId = seeds[seedIdx]['home'] as int;
+      final awayId = seeds[seedIdx]['away'] as int;
+
+      if (homeId > 0) {
+        await conn.execute("""
+          INSERT IGNORE INTO tbl_teamschedule
+            (match_id, round_id, team_id, referee_id, arena_number)
+          VALUES ($matchId, 1, $homeId, $refereeId, 1)
+        """);
+      }
+      if (awayId > 0) {
+        await conn.execute("""
+          INSERT IGNORE INTO tbl_teamschedule
+            (match_id, round_id, team_id, referee_id, arena_number)
+          VALUES ($matchId, 1, $awayId, $refereeId, 1)
+        """);
+      }
+      print("✅ KO match $matchId seeded: home=$homeId away=$awayId");
+    }
+
+    print("✅ Knockout seeding complete: ${seeds.length} matches.");
+  }
+
+  // ── ADVANCE KNOCKOUT WINNER ───────────────────────────────────────────────
+  static Future<void> advanceKnockoutWinner({
+    required int matchId,
+    required int winnerTeamId,
+    required int loserTeamId,
+    required int categoryId,
+  }) async {
+    final conn = await getConnection();
+
+    const koOrder = [
+      'round-of-32', 'round-of-16', 'quarter-finals',
+      'semi-finals', 'third-place', 'final',
+    ];
+
+    // 1. Find current bracket_type
+    final curResult = await conn.execute(
+      "SELECT bracket_type FROM tbl_match WHERE match_id = $matchId LIMIT 1",
+    );
+    if (curResult.rows.isEmpty) return;
+    final currentType = curResult.rows.first.assoc()['bracket_type'] ?? '';
+
+    if (currentType == 'final' || currentType == 'third-place') return;
+
+    final curIdx = koOrder.indexOf(currentType);
+    if (curIdx == -1) return;
+
+    // 2. Determine next rounds
+    String nextWinnerType;
+    String? nextLoserType;
+
+    if (currentType == 'semi-finals') {
+      nextWinnerType = 'final';
+      nextLoserType  = 'third-place';
+    } else {
+      const winnerPath = [
+        'round-of-32','round-of-16','round-of-8',
+        'quarter-finals','semi-finals','final'
+      ];
+      final wi = winnerPath.indexOf(currentType);
+      nextWinnerType = wi >= 0 && wi + 1 < winnerPath.length
+          ? winnerPath[wi + 1] : 'final';
+    }
+
+    // 3. Get default referee
+    final refResult = await conn.execute(
+      "SELECT referee_id FROM tbl_referee ORDER BY referee_id LIMIT 1",
+    );
+    final refereeId = refResult.rows.isEmpty ? 1
+        : int.tryParse(refResult.rows.first.assoc()['referee_id']?.toString() ?? '1') ?? 1;
+
+    // 4. Seed team into first available slot of target round
+    Future<void> seedIntoRound(String targetType, int teamId) async {
+      final matchResult = await conn.execute("""
+        SELECT m.match_id, COUNT(ts.teamschedule_id) AS team_count
+        FROM tbl_match m
+        JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
+        LEFT JOIN tbl_teamschedule ts ON ts.match_id = m.match_id
+        WHERE m.bracket_type = '$targetType'
+          AND m.match_id NOT IN (
+            SELECT DISTINCT ts2.match_id FROM tbl_teamschedule ts2
+            WHERE ts2.team_id = $teamId
+          )
+        GROUP BY m.match_id
+        HAVING team_count < 2
+        ORDER BY s.schedule_start ASC, m.match_id ASC
+        LIMIT 1
+      """);
+      if (matchResult.rows.isEmpty) return;
+      final nextMatchId = int.tryParse(
+          matchResult.rows.first.assoc()['match_id']?.toString() ?? '0') ?? 0;
+      if (nextMatchId == 0) return;
+      await conn.execute("""
+        INSERT IGNORE INTO tbl_teamschedule
+          (match_id, round_id, team_id, referee_id, arena_number)
+        VALUES ($nextMatchId, 1, $teamId, $refereeId, 1)
+      """);
+      print("✅ Advance: team $teamId -> $targetType (match $nextMatchId)");
+    }
+
+    await seedIntoRound(nextWinnerType, winnerTeamId);
+    if (nextLoserType != null) {
+      await seedIntoRound(nextLoserType, loserTeamId);
+    }
+  }
+
+  // ── GET KNOCKOUT SCORES ───────────────────────────────────────────────────
+  // Reads score_totalscore from tbl_score for all knockout matches
+  static Future<Map<int, Map<int, int>>> getKnockoutScores(int categoryId) async {
+    final conn = await getConnection();
+    final result = await conn.execute("""
+      SELECT sc.match_id, sc.team_id, sc.score_totalscore AS goals
+      FROM tbl_score sc
+      JOIN tbl_match m ON m.match_id = sc.match_id
+      JOIN tbl_team  t ON t.team_id  = sc.team_id
+      WHERE t.category_id = $categoryId
+        AND m.bracket_type IN (
+          'round-of-32','round-of-16','round-of-8',
+          'quarter-finals','semi-finals','third-place','final'
+        )
+      ORDER BY sc.match_id
+    """);
+    final Map<int, Map<int, int>> out = {};
+    for (final row in result.rows) {
+      final mid   = int.tryParse(row.assoc()['match_id']?.toString() ?? '0') ?? 0;
+      final tid   = int.tryParse(row.assoc()['team_id']?.toString()  ?? '0') ?? 0;
+      final goals = int.tryParse(row.assoc()['goals']?.toString()    ?? '0') ?? 0;
+      if (mid == 0 || tid == 0) continue;
+      out.putIfAbsent(mid, () => {});
+      out[mid]![tid] = goals;
+    }
+    return out;
+  }
+
+  // ── SAVE KNOCKOUT SCORE ───────────────────────────────────────────────────
+  // Upserts into tbl_score using the actual column names visible in the schema:
+  //   score_totalscore, score_independentscore, score_violation,
+  //   score_totalduration, score_isapproved, match_id, team_id, round_id
+  static Future<void> saveKnockoutScore({
+    required int matchId,
+    required int teamId,
+    required int goals,
+    required int refereeId,
+  }) async {
+    final conn = await getConnection();
+
+    // Check if a score row already exists for this match+team
+    final existing = await conn.execute(
+      "SELECT score_id FROM tbl_score WHERE match_id = $matchId AND team_id = $teamId LIMIT 1",
+    );
+
+    if (existing.rows.isNotEmpty) {
+      final scoreId = existing.rows.first.assoc()['score_id'] ?? '0';
+      await conn.execute("""
+        UPDATE tbl_score
+        SET score_totalscore  = $goals,
+            score_isapproved  = 1
+        WHERE score_id = $scoreId
+      """);
+    } else {
+      await conn.execute("""
+        INSERT INTO tbl_score
+          (match_id, team_id, round_id, score_totalscore,
+           score_independentscore, score_violation,
+           score_totalduration, score_isapproved)
+        VALUES
+          ($matchId, $teamId, 1, $goals,
+           $goals, 0,
+           '00:00:00', 1)
+      """);
+    }
+    print("✅ KO score saved: match=$matchId team=$teamId goals=$goals");
   }
 
 }

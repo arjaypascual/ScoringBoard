@@ -526,7 +526,9 @@ class _StandingsState extends State<Standings>
       // Load all match scores for soccer teams
       // Two rows per match (one per team) — we pair them by match_id
       final matchResult = await conn.execute(
-        "SELECT ts.match_id, ts.team_id, COALESCE(sc.score_totalscore, -1) AS score"
+        "SELECT ts.match_id, ts.team_id,"
+        " COALESCE(sc.score_totalscore, -1) AS score,"
+        " COALESCE(sc.score_violation, 0)   AS fouls"
         " FROM tbl_teamschedule ts"
         " JOIN tbl_team t ON ts.team_id = t.team_id"
         " LEFT JOIN tbl_score sc ON sc.team_id = ts.team_id AND sc.match_id = ts.match_id"
@@ -556,15 +558,27 @@ class _StandingsState extends State<Standings>
         final stat1 = teamStatMap[t1];
         if (stat0 == null || stat1 == null) continue;
 
+        // Track goals, fouls, matches played
+        final f0 = int.tryParse(entries[0]['fouls']?.toString() ?? '0') ?? 0;
+        final f1 = int.tryParse(entries[1]['fouls']?.toString() ?? '0') ?? 0;
+        stat0.goalsFor     += s0;
+        stat0.goalsAgainst += s1;
+        stat0.fouls        += f0;
+        stat0.matchesPlayed++;
+        stat1.goalsFor     += s1;
+        stat1.goalsAgainst += s0;
+        stat1.fouls        += f1;
+        stat1.matchesPlayed++;
+
         if (s0 > s1) {
-          stat0.wins++;   stat0.points++;
+          stat0.wins++;   stat0.points += 3;
           stat1.losses++;
         } else if (s1 > s0) {
-          stat1.wins++;   stat1.points++;
+          stat1.wins++;   stat1.points += 3;
           stat0.losses++;
         } else {
-          stat0.draws++;
-          stat1.draws++;
+          stat0.draws++; stat0.points++;
+          stat1.draws++; stat1.points++;
         }
       }
 
@@ -651,109 +665,264 @@ class _StandingsState extends State<Standings>
     ]);
   }
 
-  // ── Overall standing — all teams ranked by W/L/PTS ───────────────────────────
+  // ── Overall standing — FIFA table format ───────────────────────────────────
   Widget _buildOverallStanding() {
     if (_soccerGroups.isEmpty) {
       return const Center(child: Text('No groups generated yet.',
           style: TextStyle(color: Colors.white54, fontSize: 14)));
     }
 
-    // Flatten all teams from all groups and sort by PTS > W > teamName
     final allTeams = <Map<String, dynamic>>[];
     for (final g in _soccerGroups) {
       for (final t in g.teams) {
         allTeams.add({
-          'teamName':  t.teamName,
-          'group':     g.label,
-          'wins':      t.wins,
-          'losses':    t.losses,
-          'points':    t.points,
-          'groupColor': _groupColor(g.label),
+          'teamName':     t.teamName,
+          'group':        g.label,
+          'wins':         t.wins,
+          'losses':       t.losses,
+          'draws':        t.draws,
+          'points':       t.points,
+          'goalsFor':     t.goalsFor,
+          'goalsAgainst': t.goalsAgainst,
+          'goalDiff':     t.goalDiff,
+          'fouls':        t.fouls,
+          'matchesPlayed':t.matchesPlayed,
+          'winPct':       t.winPct,
+          'groupColor':   _groupColor(g.label),
         });
       }
     }
     allTeams.sort((a, b) {
-      if (b['points'] != a['points']) return (b['points'] as int).compareTo(a['points'] as int);
-      if (b['wins']   != a['wins'])   return (b['wins']   as int).compareTo(a['wins']   as int);
+      if (b['points']   != a['points'])   return (b['points']   as int).compareTo(a['points']   as int);
+      if (b['goalDiff'] != a['goalDiff']) return (b['goalDiff'] as int).compareTo(a['goalDiff'] as int);
+      if (b['goalsFor'] != a['goalsFor']) return (b['goalsFor'] as int).compareTo(a['goalsFor'] as int);
+      if (b['wins']     != a['wins'])     return (b['wins']     as int).compareTo(a['wins']     as int);
       return (a['teamName'] as String).compareTo(b['teamName'] as String);
     });
 
+    // ── Header ─────────────────────────────────────────────────────────────
+    Widget hdr(String t, {int flex = 1, bool right = false, Color? color}) =>
+        Expanded(flex: flex, child: Text(t,
+            textAlign: right ? TextAlign.right : TextAlign.center,
+            style: TextStyle(
+                color: color ?? Colors.white54,
+                fontSize: 11, fontWeight: FontWeight.w900,
+                letterSpacing: 0.5)));
+
     return Column(children: [
-      // Header
+      // ── Column header row ─────────────────────────────────────────────
       Container(
-        color: const Color(0xFF5C2ECC),
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
+        color: const Color(0xFF1A0A4A),
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
         child: Row(children: [
-          _headerCell('RANK',  flex: 1),
-          _headerCell('GRP',   flex: 1),
-          _headerCell('TEAM NAME', flex: 5),
-          _headerCell('W',  flex: 1, center: true),
-          _headerCell('L',  flex: 1, center: true),
-          _headerCell('PTS', flex: 1, center: true),
+          // #
+          const SizedBox(width: 28,
+              child: Text('#', style: TextStyle(color: Colors.white54,
+                  fontSize: 11, fontWeight: FontWeight.w900))),
+          // Team
+          const Expanded(flex: 5, child: Text('TEAM',
+              style: TextStyle(color: Colors.white54, fontSize: 11,
+                  fontWeight: FontWeight.w900, letterSpacing: 0.5))),
+          hdr('M.',  flex: 1),
+          hdr('W',   flex: 1, color: const Color(0xFF00FF88)),
+          hdr('D',   flex: 1, color: Colors.orange),
+          hdr('L',   flex: 1, color: Colors.redAccent),
+          hdr('GOALS', flex: 2),
+          hdr('DIF', flex: 1),
+          hdr('PT.', flex: 1, color: const Color(0xFFFFD700)),
         ]),
       ),
-      // Rows
-      Expanded(
-        child: ListView.builder(
-          itemCount: allTeams.length,
-          itemBuilder: (context, index) {
-            final team     = allTeams[index];
-            final rank     = index + 1;
-            final isEven   = index % 2 == 0;
-            final gc       = team['groupColor'] as Color;
-            final wins     = team['wins']   as int;
-            final losses   = team['losses'] as int;
-            final points   = team['points'] as int;
-            return Container(
-              color: isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42),
-              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
-              child: Row(children: [
-                // Rank
-                Expanded(flex: 1, child: Text('$rank',
-                    style: TextStyle(color: _rankColor(rank),
-                        fontWeight: FontWeight.bold, fontSize: 16))),
-                // Group badge
-                Expanded(flex: 1, child: Container(
-                  width: 26, height: 26,
+      const Divider(height: 1, color: Color(0xFF2A1A6A)),
+
+      // ── Rows ─────────────────────────────────────────────────────────
+      Expanded(child: ListView.builder(
+        itemCount: allTeams.length,
+        itemBuilder: (_, i) {
+          final team   = allTeams[i];
+          final rank   = i + 1;
+          final isEven = i % 2 == 0;
+          final gc     = team['groupColor']   as Color;
+          final name   = team['teamName']     as String;
+          final group  = team['group']        as String;
+          final mp     = team['matchesPlayed']as int;
+          final w      = team['wins']         as int;
+          final d      = team['draws']        as int;
+          final l      = team['losses']       as int;
+          final pts    = team['points']       as int;
+          final gf     = team['goalsFor']     as int;
+          final ga     = team['goalsAgainst'] as int;
+          final gd     = team['goalDiff']     as int;
+
+          final rankColor = _rankColor(rank);
+          final gdStr = gd > 0 ? '+$gd' : '$gd';
+          final gdColor = gd > 0
+              ? const Color(0xFF00FF88)
+              : gd < 0 ? Colors.redAccent : Colors.white38;
+
+          // Row cell helper
+          Widget cell(String v, {int flex=1, Color? color, bool bold=false}) =>
+              Expanded(flex: flex, child: Text(v,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: color ?? Colors.white70,
+                      fontSize: 13,
+                      fontWeight: bold ? FontWeight.w900 : FontWeight.w500)));
+
+          return Container(
+            color: isEven
+                ? const Color(0xFF100838)
+                : const Color(0xFF0C0628),
+            padding: const EdgeInsets.symmetric(
+                horizontal: 24, vertical: 11),
+            child: Row(children: [
+              // Rank
+              SizedBox(width: 28, child: Text('$rank',
+                  style: TextStyle(color: rankColor,
+                      fontSize: 14, fontWeight: FontWeight.w900))),
+
+              // Group badge + Team name
+              Expanded(flex: 5, child: Row(children: [
+                Container(
+                  width: 20, height: 20,
+                  margin: const EdgeInsets.only(right: 8),
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: gc.withOpacity(0.15),
-                    border: Border.all(color: gc, width: 1.5),
+                    border: Border.all(color: gc.withOpacity(0.6), width: 1),
                   ),
-                  child: Center(child: Text(team['group'] as String,
-                      style: TextStyle(color: gc, fontSize: 11,
-                          fontWeight: FontWeight.bold))),
-                )),
-                // Team name
-                Expanded(flex: 5, child: Text(
-                    (team['teamName'] as String).toUpperCase(),
+                  child: Center(child: Text(group,
+                      style: TextStyle(color: gc,
+                          fontSize: 8, fontWeight: FontWeight.w900))),
+                ),
+                Expanded(child: Text(name,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(color: Colors.white,
-                        fontWeight: FontWeight.bold, fontSize: 14))),
-                // W
-                Expanded(flex: 1, child: Text('$wins',
-                    textAlign: TextAlign.center,
+                        fontSize: 13, fontWeight: FontWeight.w700))),
+              ])),
+
+              // M. (matches played)
+              cell('$mp', flex: 1, color: Colors.white54),
+
+              // W
+              cell('$w', flex: 1,
+                  color: w > 0 ? const Color(0xFF00FF88) : Colors.white24,
+                  bold: w > 0),
+
+              // D
+              cell('$d', flex: 1,
+                  color: d > 0 ? Colors.orange : Colors.white24),
+
+              // L
+              cell('$l', flex: 1,
+                  color: l > 0 ? Colors.redAccent : Colors.white24),
+
+              // Goals GF:GA
+              Expanded(flex: 2, child: Text('$gf:$ga',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white70,
+                      fontSize: 12, fontWeight: FontWeight.w600,
+                      letterSpacing: 0.5))),
+
+              // Dif
+              cell(gdStr, flex: 1, color: gdColor, bold: gd != 0),
+
+              // Pt.
+              Expanded(flex: 1, child: Container(
+                height: 26,
+                decoration: BoxDecoration(
+                  color: pts > 0
+                      ? const Color(0xFFFFD700).withOpacity(0.12)
+                      : Colors.transparent,
+                  borderRadius: BorderRadius.circular(5),
+                  border: pts > 0
+                      ? Border.all(color: const Color(0xFFFFD700).withOpacity(0.3))
+                      : null,
+                ),
+                child: Center(child: Text('$pts',
                     style: TextStyle(
-                        color: wins > 0 ? const Color(0xFF00FF88) : Colors.white24,
-                        fontWeight: FontWeight.bold, fontSize: 16))),
-                // L
-                Expanded(flex: 1, child: Text('$losses',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                        color: losses > 0 ? Colors.redAccent : Colors.white24,
-                        fontWeight: FontWeight.bold, fontSize: 16))),
-                // PTS
-                Expanded(flex: 1, child: Text('$points',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                        color: points > 0 ? const Color(0xFFFFD700) : Colors.white24,
-                        fontWeight: FontWeight.bold, fontSize: 16))),
-              ]),
-            );
-          },
-        ),
-      ),
+                        color: pts > 0
+                            ? const Color(0xFFFFD700)
+                            : Colors.white24,
+                        fontSize: 13, fontWeight: FontWeight.w900))),
+              )),
+            ]),
+          );
+        },
+      )),
     ]);
   }
+
+
+  // ── Stat pill (W/D/L/MP) ──────────────────────────────────────────────────
+  Widget _statPill(String label, String value, Color color) =>
+      Expanded(child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withOpacity(0.25)),
+        ),
+        child: Column(children: [
+          Text(value, style: TextStyle(color: color,
+              fontSize: 18, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 2),
+          Text(label, style: TextStyle(color: color.withOpacity(0.6),
+              fontSize: 9, fontWeight: FontWeight.bold, letterSpacing: 0.8)),
+        ]),
+      ));
+
+  // ── Stat bar with percentage ──────────────────────────────────────────────
+  Widget _statBar({
+    required String label,
+    required String value,
+    required double pct,
+    required Color  color,
+    bool invertColor = false,
+  }) {
+    final barColor = invertColor
+        ? Color.lerp(const Color(0xFF00FF88), Colors.redAccent, pct)!
+        : color;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Text(label, style: TextStyle(
+            color: Colors.white.withOpacity(0.4),
+            fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 0.8)),
+        const Spacer(),
+        Text(value, style: TextStyle(
+            color: barColor,
+            fontSize: 12, fontWeight: FontWeight.w900)),
+      ]),
+      const SizedBox(height: 5),
+      Stack(children: [
+        // Background track
+        Container(
+          height: 6,
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.06),
+            borderRadius: BorderRadius.circular(3),
+          ),
+        ),
+        // Filled bar
+        FractionallySizedBox(
+          widthFactor: pct.clamp(0.0, 1.0),
+          child: Container(
+            height: 6,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(colors: [
+                barColor.withOpacity(0.9),
+                barColor.withOpacity(0.4),
+              ]),
+              borderRadius: BorderRadius.circular(3),
+              boxShadow: [BoxShadow(
+                  color: barColor.withOpacity(0.4),
+                  blurRadius: 4)],
+            ),
+          ),
+        ),
+      ]),
+    ]);
+  }
+
 
   Widget _buildGroupGrid() {
     const int cols = 4;
@@ -779,10 +948,20 @@ class _StandingsState extends State<Standings>
     final groupCol = _groupColor(group.label);
     final sorted   = List<_SoccerTeamStat>.from(group.teams)
       ..sort((a, b) {
-        if (b.points != a.points) return b.points.compareTo(a.points);
-        if (b.wins   != a.wins)   return b.wins.compareTo(a.wins);
+        if (b.points   != a.points)   return b.points.compareTo(a.points);
+        if (b.goalDiff != a.goalDiff) return b.goalDiff.compareTo(a.goalDiff);
+        if (b.goalsFor != a.goalsFor) return b.goalsFor.compareTo(a.goalsFor);
+        if (b.wins     != a.wins)     return b.wins.compareTo(a.wins);
         return a.teamName.compareTo(b.teamName);
       });
+
+    // FIFA-style column header helper
+    Widget col(String t, {Color color = Colors.white38}) =>
+        SizedBox(width: 26, child: Text(t,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: color, fontSize: 9,
+                fontWeight: FontWeight.bold, letterSpacing: 0.5)));
+
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF0F0A2A),
@@ -791,35 +970,35 @@ class _StandingsState extends State<Standings>
         boxShadow: [BoxShadow(color: groupCol.withOpacity(0.08), blurRadius: 12)],
       ),
       child: Column(children: [
-        // Header
+        // ── Group header ────────────────────────────────────────────
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
             gradient: LinearGradient(
-                colors: [groupCol.withOpacity(0.3), groupCol.withOpacity(0.1)]),
+                colors: [groupCol.withOpacity(0.35), groupCol.withOpacity(0.08)]),
             borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
           ),
           child: Row(children: [
             Container(
-              width: 30, height: 30,
+              width: 28, height: 28,
               decoration: BoxDecoration(shape: BoxShape.circle,
                   color: groupCol.withOpacity(0.2),
                   border: Border.all(color: groupCol, width: 1.5)),
               child: Center(child: Text(group.label,
-                  style: TextStyle(color: groupCol, fontWeight: FontWeight.w900,
-                      fontSize: 14))),
+                  style: TextStyle(color: groupCol,
+                      fontWeight: FontWeight.w900, fontSize: 13))),
             ),
             const SizedBox(width: 8),
             Text('GROUP ${group.label}',
-                style: const TextStyle(color: Colors.white, fontSize: 13,
+                style: const TextStyle(color: Colors.white, fontSize: 12,
                     fontWeight: FontWeight.w900, letterSpacing: 1.5)),
           ]),
         ),
-        // Column headers
+        // ── Column headers: P W D L GD PTS ─────────────────────────
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.03),
+            color: Colors.white.withOpacity(0.04),
             border: Border(bottom: BorderSide(color: groupCol.withOpacity(0.2))),
           ),
           child: Row(children: [
@@ -828,18 +1007,15 @@ class _StandingsState extends State<Standings>
             const Expanded(child: Text('TEAM',
                 style: TextStyle(color: Colors.white38, fontSize: 9,
                     fontWeight: FontWeight.bold, letterSpacing: 0.8))),
-            SizedBox(width: 24, child: Text('W', textAlign: TextAlign.center,
-                style: const TextStyle(color: Color(0xFF00FF88),
-                    fontSize: 9, fontWeight: FontWeight.bold))),
-            SizedBox(width: 24, child: Text('L', textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.redAccent,
-                    fontSize: 9, fontWeight: FontWeight.bold))),
-            SizedBox(width: 28, child: Text('PTS', textAlign: TextAlign.center,
-                style: const TextStyle(color: Color(0xFFFFD700),
-                    fontSize: 9, fontWeight: FontWeight.bold))),
+            col('P'),
+            col('W',  color: const Color(0xFF00FF88)),
+            col('D',  color: Colors.orange),
+            col('L',  color: Colors.redAccent),
+            col('GD', color: Colors.white38),
+            col('PTS',color: const Color(0xFFFFD700)),
           ]),
         ),
-        // Team rows
+        // ── Team rows ───────────────────────────────────────────────
         ...sorted.asMap().entries.map((e) {
           final rank     = e.key + 1;
           final team     = e.value;
@@ -847,10 +1023,20 @@ class _StandingsState extends State<Standings>
           final isFirst  = rank == 1;
           final badgeCol = isFirst
               ? const Color(0xFFFFD700)
-              : advances ? const Color(0xFF00FF88) : Colors.white12;
-          final textCol  = advances ? badgeCol : Colors.white38;
+              : advances
+                  ? const Color(0xFF00FF88)
+                  : Colors.white12;
+          final textCol  = advances ? Colors.white : Colors.white54;
+          final gd       = team.goalDiff;
+          final gdStr    = gd > 0 ? '+$gd' : '$gd';
+          final gdColor  = gd > 0
+              ? const Color(0xFF00FF88)
+              : gd < 0
+                  ? Colors.redAccent
+                  : Colors.white38;
+
           return Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
             decoration: BoxDecoration(
               color: advances
                   ? (isFirst
@@ -861,38 +1047,76 @@ class _StandingsState extends State<Standings>
                   color: Colors.white.withOpacity(0.04), width: 1)),
             ),
             child: Row(children: [
+              // Rank circle
               Container(
                 width: 22, height: 22,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: advances ? badgeCol.withOpacity(0.12) : Colors.white.withOpacity(0.03),
+                  color: advances
+                      ? badgeCol.withOpacity(0.12)
+                      : Colors.white.withOpacity(0.03),
                   border: Border.all(color: badgeCol, width: 1),
                 ),
                 child: Center(child: Text('$rank',
-                    style: TextStyle(color: textCol,
+                    style: TextStyle(color: advances ? badgeCol : Colors.white38,
                         fontSize: 9, fontWeight: FontWeight.bold))),
               ),
               const SizedBox(width: 6),
-              Expanded(child: Text(team.teamName, overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      color: advances ? Colors.white : Colors.white54,
-                      fontSize: 12,
+              // Team name
+              Expanded(child: Text(team.teamName,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: textCol, fontSize: 11,
                       fontWeight: advances ? FontWeight.bold : FontWeight.w400))),
-              SizedBox(width: 24, child: Text('${team.wins}',
+              // P (played)
+              SizedBox(width: 26, child: Text('${team.matchesPlayed}',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white54,
+                      fontSize: 11, fontWeight: FontWeight.bold))),
+              // W
+              SizedBox(width: 26, child: Text('${team.wins}',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                      color: team.wins > 0 ? const Color(0xFF00FF88) : Colors.white24,
-                      fontSize: 12, fontWeight: FontWeight.bold))),
-              SizedBox(width: 24, child: Text('${team.losses}',
+                      color: team.wins > 0
+                          ? const Color(0xFF00FF88)
+                          : Colors.white24,
+                      fontSize: 11, fontWeight: FontWeight.bold))),
+              // D
+              SizedBox(width: 26, child: Text('${team.draws}',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                      color: team.losses > 0 ? Colors.redAccent : Colors.white24,
-                      fontSize: 12, fontWeight: FontWeight.bold))),
-              SizedBox(width: 28, child: Text('${team.points}',
+                      color: team.draws > 0
+                          ? Colors.orange
+                          : Colors.white24,
+                      fontSize: 11, fontWeight: FontWeight.bold))),
+              // L
+              SizedBox(width: 26, child: Text('${team.losses}',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                      color: team.points > 0 ? const Color(0xFFFFD700) : Colors.white24,
-                      fontSize: 12, fontWeight: FontWeight.bold))),
+                      color: team.losses > 0
+                          ? Colors.redAccent
+                          : Colors.white24,
+                      fontSize: 11, fontWeight: FontWeight.bold))),
+              // GD
+              SizedBox(width: 26, child: Text(gdStr,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: gdColor,
+                      fontSize: 11, fontWeight: FontWeight.bold))),
+              // PTS
+              SizedBox(width: 26, child: Container(
+                height: 22,
+                decoration: BoxDecoration(
+                  color: team.points > 0
+                      ? const Color(0xFFFFD700).withOpacity(0.12)
+                      : Colors.transparent,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Center(child: Text('${team.points}',
+                    style: TextStyle(
+                        color: team.points > 0
+                            ? const Color(0xFFFFD700)
+                            : Colors.white24,
+                        fontSize: 11, fontWeight: FontWeight.w900))),
+              )),
             ]),
           );
         }),
@@ -1075,10 +1299,16 @@ class _StandingsState extends State<Standings>
 class _SoccerTeamStat {
   final int    teamId;
   final String teamName;
-  int wins   = 0;
-  int losses = 0;
-  int draws  = 0;
-  int points = 0;
+  int wins          = 0;
+  int losses        = 0;
+  int draws         = 0;
+  int points        = 0;
+  int goalsFor      = 0;
+  int goalsAgainst  = 0;
+  int fouls         = 0;
+  int matchesPlayed = 0;
+  int get goalDiff  => goalsFor - goalsAgainst;
+  double get winPct => matchesPlayed == 0 ? 0 : wins / matchesPlayed;
   _SoccerTeamStat({required this.teamId, required this.teamName});
 }
 

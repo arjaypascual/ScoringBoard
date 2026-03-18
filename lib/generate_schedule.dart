@@ -114,7 +114,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   // ── Load ───────────────────────────────────────────────────────────────────
   Future<void> _loadCategories() async {
     try {
-      final cats = await DBHelper.getCategories();
+      final cats = await DBHelper.getActiveCategories();
       final seen = <int>{};
       final unique = cats.where((c) {
         final id = int.tryParse(c['category_id'].toString()) ?? 0;
@@ -161,6 +161,10 @@ class _GenerateScheduleState extends State<GenerateSchedule>
         _categories  = nonSoccer;
         _soccerCatId = soccerCatId;
         _soccerTeams = soccerTeams;
+        // Clamp arenas to number of groups
+        final maxA = soccerTeams.isEmpty ? 1
+            : (soccerTeams.length / 4).ceil().clamp(1, 8);
+        if (_soccerArenas > maxA) _soccerArenas = maxA;
         for (final c in nonSoccer) {
           final id    = int.tryParse(c['category_id'].toString()) ?? 0;
           final count = teamCounts[id] ?? 0;
@@ -1067,6 +1071,14 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   // ══════════════════════════════════════════════════════════════════════════
   // SOCCER CARD  (full width, has own timing — no runs spinner)
   // ══════════════════════════════════════════════════════════════════════════
+  // Max arenas = number of groups (one group per arena minimum)
+  int _numGroups() {
+    final tc = _soccerTeams.length;
+    if (tc < 4) return 1;
+    const teamsPerGroup = 4;
+    return (tc / teamsPerGroup).ceil().clamp(1, 8);
+  }
+
   Widget _buildSoccerCard() {
     final tc          = _soccerTeams.length;
     final canGenerate = tc >= 4;
@@ -1180,14 +1192,19 @@ class _GenerateScheduleState extends State<GenerateSchedule>
             Expanded(flex: 3, child: _tile(
               label: 'ARENAS', icon: Icons.place_rounded,
               color: const Color(0xFFFFD700),
-              sublabel: _soccerArenas == 1 ? 'single' : 'parallel',
+              sublabel: () {
+                final maxA = _numGroups();
+                if (_soccerArenas >= maxA) return 'max ($maxA groups)';
+                if (_soccerArenas == 1) return 'single';
+                return '$_soccerArenas / $maxA groups';
+              }(),
               child: _spinnerWidget(
                 value: _soccerArenas,
                 color: const Color(0xFFFFD700),
                 onDec: _soccerArenas > 1
                     ? () => setState(() => _soccerArenas--)
                     : null,
-                onInc: _soccerArenas < 8
+                onInc: _soccerArenas < _numGroups()
                     ? () => setState(() => _soccerArenas++)
                     : null,
               ),

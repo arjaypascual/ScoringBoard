@@ -10,6 +10,7 @@ import 'schedule_viewer.dart';
 import 'standings.dart';
 import 'excel_import.dart';
 import 'referee_registration.dart';
+import 'category_manager.dart';
 
 
 void main() async {
@@ -68,10 +69,11 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
       // ── Step 0: Choose registration mode ─────────────────────────────
       case 0:
         return _RegistrationChooser(
-          onManual:  () => _goToStep(1),
-          onExcel:   () => _goToStep(-1),
-          onReferee: () => _goToStep(-2),
-          onBack:    () => Navigator.of(context).pop(),
+          onManual:     () => _goToStep(1),
+          onExcel:      () => _goToStep(-1),
+          onReferee:    () => _goToStep(-2),
+          onCategories: () => _goToStep(-3),
+          onBack:       () => Navigator.of(context).pop(),
         );
 
       // ── Step -1: Excel Bulk Import ────────────────────────────────────
@@ -85,6 +87,12 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
         return RefereeRegistrationPage(
           onBack: () => _goToStep(0),
           onDone: () => _goToStep(0),
+        );
+
+      // ── Step -3: Category Manager ──────────────────────────────────────
+      case -3:
+        return CategoryManager(
+          onBack: () => _goToStep(0),
         );
 
       // ── Step 1: School ────────────────────────────────────────────────
@@ -158,12 +166,14 @@ class _RegistrationChooser extends StatelessWidget {
   final VoidCallback onManual;
   final VoidCallback onExcel;
   final VoidCallback onReferee;
+  final VoidCallback onCategories;
   final VoidCallback onBack;
 
   const _RegistrationChooser({
     required this.onManual,
     required this.onExcel,
     required this.onReferee,
+    required this.onCategories,
     required this.onBack,
   });
 
@@ -243,6 +253,14 @@ class _RegistrationChooser extends StatelessWidget {
                         subtitle: 'Register referees &\nassign categories',
                         color:    const Color(0xFF00FF9C),
                         onTap:    onReferee,
+                      ),
+                      const SizedBox(width: 32),
+                      _ModeCard(
+                        icon:     Icons.category_rounded,
+                        title:    'CATEGORIES',
+                        subtitle: 'Set categories\nactive or inactive',
+                        color:    const Color(0xFFFF9F43),
+                        onTap:    onCategories,
                       ),
                     ],
                   ),
