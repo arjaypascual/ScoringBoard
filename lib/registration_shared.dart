@@ -52,7 +52,7 @@ class _RegistrationHeaderState extends State<RegistrationHeader> {
             height: 44,
             width: 160,
             child: Image.asset(
-              'assets/images/MakeblockLogo.png',
+              'assets/images/RoboventureLogo.png',
               fit: BoxFit.contain,
               alignment: Alignment.centerLeft,
             ),

@@ -668,7 +668,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               AND sg.category_id = ${_soccerCategoryId}
         WHERE t.category_id = ${_soccerCategoryId}
           AND m.bracket_type IN (
-            'group','round-of-32','round-of-16','round-of-8',
+            'group','elimination','round-of-32','round-of-16','round-of-8',
             'quarter-finals','semi-finals','third-place','final'
           )
         ORDER BY s.schedule_start, m.match_id, ts.teamschedule_id
@@ -681,7 +681,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         FROM tbl_match m
         JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
         WHERE m.bracket_type IN (
-          'round-of-32','round-of-16','round-of-8',
+          'elimination','round-of-32','round-of-16','round-of-8',
           'quarter-finals','semi-finals','third-place','final'
         )
         AND m.match_id NOT IN (
@@ -751,11 +751,18 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       }
 
       // Add empty knockout slots so bracket tree renders before seeding
+      // Track position within each time slot to assign correct arena number
+      final Map<String, int> timeSlotCounter = {};
       for (final row in emptyKoResult.rows) {
         final matchId = int.tryParse(row.assoc()['match_id']?.toString() ?? '0') ?? 0;
-        final bt      = row.assoc()['bracket_type']?.toString() ?? '';
+        final rawBt   = row.assoc()['bracket_type']?.toString() ?? '';
+        final bt      = _ScheduleViewerState._normalizeBracketType(rawBt, 0);
         final time    = row.assoc()['match_time']?.toString() ?? '';
         if (matchId == 0 || byMatch.containsKey(matchId)) continue;
+        // Assign sequential arena number within same time slot
+        final slotKey = '${bt}_${time}';
+        timeSlotCounter[slotKey] = (timeSlotCounter[slotKey] ?? 0) + 1;
+        final arenaNum = timeSlotCounter[slotKey]!;
         byMatch[matchId] = {
           'matchId':     matchId,
           'groupLabel':  '',
@@ -764,7 +771,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           'team2':       '',
           'team1Id':     0,
           'team2Id':     0,
-          'arena':       1,
+          'arena':       arenaNum,
           'bracketType': bt,
           '_labels':     <String>[],
         };
@@ -869,10 +876,14 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   static String _normalizeBracketType(String raw, int totalKoMatches) {
     // Always trust these exact labels
     const canonical = {
-      'round-of-32', 'round-of-16', 'quarter-finals',
+      'elimination', 'quarter-finals',
       'semi-finals', 'third-place', 'final',
     };
     if (canonical.contains(raw)) return raw;
+
+    // round-of-16 from DB → 'elimination'
+    if (raw == 'round-of-16') return 'elimination';
+    if (raw == 'round-of-32') return 'elimination';
 
     // Normalize legacy labels by team count implied by name
     if (raw == 'round-of-8') return 'quarter-finals';
@@ -882,44 +893,85 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     final m = RegExp(r'round-of-(\d+)').firstMatch(raw);
     if (m != null) {
       final n = int.tryParse(m.group(1) ?? '') ?? 0;
-      if (n == 32) return 'round-of-32';
-      if (n == 16) return 'round-of-16';
+      if (n >= 16) return 'elimination';
       if (n == 8)  return 'quarter-finals';
       if (n == 4)  return 'semi-finals';
     }
     return raw;
   }
 
-  // Derive correct FIFA round order from number of groups
-  // groups=8 → [R16, QF, SF, 3RD, FINAL]
-  // groups=4 → [QF, SF, 3RD, FINAL]
-  // groups=2 → [SF, 3RD, FINAL]
-  static List<String> _fifaRoundOrder(int numGroups) {
-    // Build correct FIFA knockout rounds for any group count.
-    // Rules:
-    //   16 teams (8 groups)  → R16 → QF → SF → 3RD → FINAL
-    //   8  teams (4 groups)  → QF  → SF → 3RD → FINAL
-    //   4  teams (2 groups)  → SF  → 3RD → FINAL
-    //   32 teams (16 groups) → R32 → R16 → QF → SF → 3RD → FINAL
+  // Derive correct round order from advancing teams count.
+  //
+  // advancing = numGroups * 2  (top 2 per group)
+  //
+  //   advancing  2-4  -> SF -> 3RD -> FINAL
+  //   advancing  5-8  -> QF -> SF -> 3RD -> FINAL
+  //   advancing   >8  -> ELIMINATION -> QF -> SF -> 3RD -> FINAL
+  //                      (bracketSize = nextPow2(advancing), byeSlots = bracketSize - advancing)
+  //
+  // Examples:
+  //   4  groups ->  8 advancing -> QF(4) -> SF -> 3RD -> FINAL          (0 BYEs)
+  //   5  groups -> 10 advancing -> ELIM(8 slots, 6 BYEs, 2 real) -> QF -> SF -> FINAL
+  //   6  groups -> 12 advancing -> ELIM(8 slots, 4 BYEs, 4 real) -> QF -> SF -> FINAL
+  //   7  groups -> 14 advancing -> ELIM(8 slots, 2 BYEs, 6 real) -> QF -> SF -> FINAL
+  //   8  groups -> 16 advancing -> ELIM(8 slots, 0 BYEs, 8 real) -> QF -> SF -> FINAL
+  //   9  groups -> 18 advancing -> ELIM(16 slots,14 BYEs, 2 real)-> QF -> SF -> FINAL
+  static List<String> _fifaRoundOrder(int numGroups, {int totalRegisteredTeams = 0}) {
+    final rounds    = <String>[];
     final advancing = numGroups * 2;
-    final rounds = <String>[];
-    int sz = _nextPow2(advancing);
 
-    // Add preliminary rounds (above QF)
-    while (sz > 8) {
-      if      (sz == 32) rounds.add('round-of-32');
-      else if (sz == 16) rounds.add('round-of-16');
-      else               rounds.add('round-of-${sz}');
-      sz ~/= 2;
+    if (advancing > 8) {
+      // Any count above 8 needs an Elimination round.
+      // Odd counts (e.g. 18) are handled with play-in matches + byes.
+      rounds.add('elimination');
+      rounds.add('quarter-finals');
+    } else if (advancing > 4) {
+      rounds.add('quarter-finals');
     }
-    // sz is now 8 or less
-    // Add QF only if there are enough teams (more than 4)
-    if (advancing > 4) rounds.add('quarter-finals');
-    // Always add SF, 3RD, FINAL
+
     rounds.add('semi-finals');
     rounds.add('third-place');
     rounds.add('final');
     return rounds;
+  }
+
+  // How many play-in (Elimination) match SLOTS are needed for N advancing teams.
+  //
+  // Formula: find the next power-of-2 bracket size (≥ advancing), then
+  // the ELIM round has (bracketSize / 2) slots total.
+  // Of those, (bracketSize - advancing) slots are BYEs (free wins).
+  // The remaining slots are real matches: advancing - (bracketSize / 2).
+  //
+  // Examples (targeting next power-of-2 bracket):
+  //   advancing=4  -> bracketSize=4,  elimSlots=2,  byeSlots=0,  realMatches=2  -> no ELIM round needed (≤8)
+  //   advancing=8  -> bracketSize=8,  elimSlots=4,  byeSlots=0,  realMatches=4  -> QF directly
+  //   advancing=10 -> bracketSize=16, elimSlots=8,  byeSlots=6,  realMatches=2  -> 2 real play-ins, 6 BYEs
+  //   advancing=12 -> bracketSize=16, elimSlots=8,  byeSlots=4,  realMatches=4  -> 4 real play-ins, 4 BYEs
+  //   advancing=14 -> bracketSize=16, elimSlots=8,  byeSlots=2,  realMatches=6  -> 6 real play-ins, 2 BYEs
+  //   advancing=16 -> bracketSize=16, elimSlots=8,  byeSlots=0,  realMatches=8  -> 8 ELIM matches, 0 BYEs
+  //   advancing=18 -> bracketSize=32, elimSlots=16, byeSlots=14, realMatches=2  -> 2 real play-ins, 14 BYEs
+  //
+  // Returns the total ELIM slot count (= bracketSize / 2).
+  // Use byeCount(advancing) for number of BYE slots.
+  static int eliminationMatchCount(int advancing) {
+    if (advancing <= 8) return 0;          // QF or SF directly — no ELIM round
+    final bracketSize = _nextPow2(advancing);
+    return bracketSize ~/ 2;              // total ELIM slots (includes BYE slots)
+  }
+
+  // Number of BYE slots in the ELIM round.
+  static int byeCount(int advancing) {
+    if (advancing <= 8) return 0;
+    final bracketSize = _nextPow2(advancing);
+    return bracketSize - advancing;       // empty slots that auto-advance
+  }
+
+  // Number of REAL (non-BYE) play-in matches.
+  static int realElimMatches(int advancing) {
+    if (advancing <= 8) return 0;
+    final bracketSize = _nextPow2(advancing);
+    final elimSlots   = bracketSize ~/ 2;
+    return advancing - elimSlots;         // teams that must play in
   }
 
   static int _nextPow2(int n) {
@@ -1653,11 +1705,16 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
 
     // Dynamic round order based on actual group count
-    final roundOrder = _fifaRoundOrder(_groups.isNotEmpty ? _groups.length : 8);
-    const roundShort = {
-      'round-of-32':    'R32',
-      'round-of-16':    'R16',
-      'round-of-8':     'R8',
+    final numGroupsNow   = _groups.isNotEmpty ? _groups.length : 8;
+    final advancingNow   = numGroupsNow * 2;
+    final roundOrder     = _fifaRoundOrder(numGroupsNow, totalRegisteredTeams: _soccerTeams.length);
+    final byes           = byeCount(advancingNow);
+    final realMatches    = realElimMatches(advancingNow);
+    final elimLabel      = advancingNow > 8
+        ? 'ELIM\n($realMatches real, $byes BYE)'
+        : 'ELIM';
+    final roundShort = {
+      'elimination':    elimLabel,
       'quarter-finals': 'QF',
       'semi-finals':    'SF',
       'third-place':    '3RD',
@@ -1778,18 +1835,23 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     // ── Round config ──────────────────────────────────────────────────────────
     // Derive round order dynamically from number of groups
     final numGroups = _groups.length > 0 ? _groups.length : 8;
-    final roundOrder = _fifaRoundOrder(numGroups)
+    final roundOrder = _fifaRoundOrder(numGroups, totalRegisteredTeams: _soccerTeams.length)
         .where((r) => r != 'third-place').toList(); // 3rd shown separately
 
-    const roundLabels = {
-      'round-of-32':    'R32',  'round-of-16': 'R16',
-      'round-of-8':     'R8',   'quarter-finals': 'QF',
-      'semi-finals':    'SF',   'final': 'FINAL',
+    final advancingForCanvas = (_groups.isNotEmpty ? _groups.length : 8) * 2;
+    final canvasByes         = byeCount(advancingForCanvas);
+    final canvasReal         = realElimMatches(advancingForCanvas);
+    final elimCanvasLabel    = advancingForCanvas > 8
+        ? 'PLAY-IN\n($canvasReal real, $canvasByes BYE)'
+        : 'ELIM';
+    final roundLabels = {
+      'elimination':    elimCanvasLabel,
+      'quarter-finals': 'QF',
+      'semi-finals':    'SF',
+      'final':          'FINAL',
     };
     const roundColors = {
-      'round-of-32':    Color(0xFF7B6AFF),
-      'round-of-16':    Color(0xFF00CFFF),
-      'round-of-8':     Color(0xFF00CFFF),
+      'elimination':    Color(0xFF00CFFF),
       'quarter-finals': Color(0xFF00FF88),
       'semi-finals':    Color(0xFFFF9F43),
       'final':          Color(0xFFFFD700),
@@ -2405,21 +2467,19 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     return _buildFifaFullView(groupRows, koRows, useSingleColumn: false);
   }
 
-  // ── Single arena fallback (original list layout) ─────────────────────────
-  // ── FIFA Full View: Group Stage (parallel arenas) + Knockout Bracket ───────
+  // ── FIFA Full View: Group Stage tab + Knockout tab ──────────────────────────
   Widget _buildFifaFullView(
     List<Map<String, dynamic>> groupRows,
     List<Map<String, dynamic>> koRows, {
     required bool useSingleColumn,
   }) {
-    // Detect arenas
     final arenaSet   = groupRows.map((r) => (r['arena'] as int?) ?? 1).toSet();
-    final arenaCount = arenaSet.isEmpty ? 1 : arenaSet.reduce((a, b) => a > b ? a : b);
+    final arenaCount = arenaSet.isEmpty ? 1
+        : arenaSet.reduce((a, b) => a > b ? a : b);
 
     return DefaultTabController(
       length: koRows.isEmpty ? 1 : 2,
       child: Column(children: [
-        // Tab bar: Group Stage | Knockout
         if (koRows.isNotEmpty)
           Container(
             color: const Color(0xFF0F0A2A),
@@ -2428,7 +2488,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               indicatorWeight: 3,
               labelColor: const Color(0xFF00FF88),
               unselectedLabelColor: Colors.white38,
-              labelStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+              labelStyle: const TextStyle(
+                  fontWeight: FontWeight.bold, fontSize: 12),
               tabs: const [
                 Tab(text: '⚽  GROUP STAGE'),
                 Tab(text: '🏆  KNOCKOUT'),
@@ -2437,9 +2498,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           ),
         Expanded(child: TabBarView(
           children: [
-            // ── GROUP STAGE TAB ───────────────────────────────────────────
             _buildGroupScheduleView(groupRows, arenaCount, useSingleColumn),
-            // ── KNOCKOUT TAB ──────────────────────────────────────────────
             if (koRows.isNotEmpty)
               _buildKnockoutView(koRows),
           ],
@@ -2448,7 +2507,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  // ── Group schedule: side-by-side arenas ────────────────────────────────────
+  // ── Group schedule: side-by-side arenas ──────────────────────────────────
   Widget _buildGroupScheduleView(
       List<Map<String, dynamic>> rows, int arenaCount, bool singleColumn) {
 
@@ -2461,11 +2520,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       return _buildSingleArenaList(rows);
     }
 
-    // Side-by-side arena view
-    final arenas = List.generate(arenaCount, (i) => i + 1);
-
-    // Group rows by time slot — re-number arenas 1,2,3... per slot
-    // so there are NEVER gaps regardless of raw arena_number in DB.
+    // Re-number arenas sequentially per slot (no gaps)
     final Map<String, List<Map<String, dynamic>>> byTimeList = {};
     for (final row in rows) {
       final time = (row['time'] as String).isNotEmpty
@@ -2473,12 +2528,10 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       byTimeList.putIfAbsent(time, () => []);
       byTimeList[time]!.add(row);
     }
-    // Sort each slot's matches by their original arena_number so order is stable
     for (final list in byTimeList.values) {
-      list.sort((a, b) => ((a['arena'] as int?) ?? 1)
-          .compareTo((b['arena'] as int?) ?? 1));
+      list.sort((a, b) =>
+          ((a['arena'] as int?) ?? 1).compareTo((b['arena'] as int?) ?? 1));
     }
-    // Re-key by sequential arena number 1,2,3...
     final Map<String, Map<int, Map<String, dynamic>>> byTime = {};
     for (final entry in byTimeList.entries) {
       byTime[entry.key] = {};
@@ -2493,24 +2546,23 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         return a.compareTo(b);
       });
 
-    // After sequential re-numbering, arenas are 1..maxMatchesInAnySlot
-    // so headerArenas is always a clean 1,2,3...N with no gaps
     final maxMatchesInSlot = byTime.values
         .map((s) => s.length).fold(0, (a, b) => a > b ? a : b);
-    final usedArenas    = List.generate(maxMatchesInSlot, (i) => i + 1);
-    final headerArenas  = usedArenas;
-    final maxArenasUsed = maxMatchesInSlot;
+    final usedArenas   = List.generate(maxMatchesInSlot, (i) => i + 1);
+    final headerArenas = usedArenas;
 
     return Column(children: [
-      // Arena header
+      // Arena header row
       Container(
         decoration: const BoxDecoration(
-            gradient: LinearGradient(colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
+            gradient: LinearGradient(
+                colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
         padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
         child: Row(children: [
           const SizedBox(width: 28),
           const SizedBox(width: 54, child: Text('TIME',
-              style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold,
+              style: TextStyle(color: Colors.white70,
+                  fontWeight: FontWeight.bold,
                   fontSize: 12, letterSpacing: 0.8))),
           ...headerArenas.map((a) => Expanded(child: Container(
             margin: const EdgeInsets.symmetric(horizontal: 4),
@@ -2518,11 +2570,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             decoration: BoxDecoration(
               color: const Color(0xFFFFD700).withOpacity(0.12),
               borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.4)),
+              border: Border.all(
+                  color: const Color(0xFFFFD700).withOpacity(0.4)),
             ),
-            child: Center(child: Text('ARENA $a',
+            child: Center(child: Text('ARENA ${a + 1}',
                 style: const TextStyle(color: Color(0xFFFFD700),
-                    fontSize: 11, fontWeight: FontWeight.w900, letterSpacing: 1))),
+                    fontSize: 11, fontWeight: FontWeight.w900,
+                    letterSpacing: 1))),
           ))),
         ]),
       ),
@@ -2535,38 +2589,45 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             final slotMatches = byTime[timeKey]!;
             final isEven      = idx % 2 == 0;
 
-            // Show ALL header arena columns — empty ones are invisible spacers
-            // This keeps alignment with the header row
             return Container(
               decoration: BoxDecoration(
-                color: isEven ? const Color(0xFF160C40) : const Color(0xFF100830),
-                border: const Border(bottom: BorderSide(color: Color(0xFF1A1050), width: 1)),
+                color: isEven
+                    ? const Color(0xFF160C40)
+                    : const Color(0xFF100830),
+                border: const Border(
+                    bottom: BorderSide(
+                        color: Color(0xFF1A1050), width: 1)),
               ),
-              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
+              padding: const EdgeInsets.symmetric(
+                  vertical: 6, horizontal: 16),
               child: IntrinsicHeight(child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  SizedBox(width: 28, child: Center(child: Text('${idx + 1}',
-                      style: TextStyle(color: Colors.white.withOpacity(0.3),
-                          fontSize: 13, fontWeight: FontWeight.bold)))),
+                  SizedBox(width: 28, child: Center(child: Text(
+                      '${idx + 1}',
+                      style: TextStyle(
+                          color: Colors.white.withOpacity(0.3),
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold)))),
                   SizedBox(width: 54, child: Text(displayTime,
                       style: TextStyle(
                           color: displayTime == '—'
                               ? Colors.white.withOpacity(0.2)
                               : const Color(0xFF00CFFF),
-                          fontSize: 13, fontWeight: FontWeight.w600))),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600))),
                   ...headerArenas.map((a) {
                     final row = slotMatches[a];
-                    // Empty slot for this time — should not happen with
-                    // usedArenas approach, but keep as safety net
                     if (row == null) {
                       return Expanded(child: Container(
-                        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                        margin: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 4),
                         decoration: BoxDecoration(
                           color: Colors.white.withOpacity(0.01),
                           borderRadius: BorderRadius.circular(10),
                           border: Border.all(
-                              color: Colors.white.withOpacity(0.03), width: 1),
+                              color: Colors.white.withOpacity(0.03),
+                              width: 1),
                         ),
                         child: Center(child: Text('—',
                             style: TextStyle(
@@ -2591,30 +2652,41 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     final t2Wins = isDone && gm?.winner == gm?.team2;
 
                     return Expanded(child: GestureDetector(
-                      onTap: gm != null ? () => _showGroupMatchDialog(gm!) : null,
+                      onTap: gm != null
+                          ? () => _showGroupMatchDialog(gm!) : null,
                       child: Container(
-                        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                        margin: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 4),
                         decoration: BoxDecoration(
-                          color: isDone ? const Color(0xFF0A1A0E) : gc.withOpacity(0.07),
+                          color: isDone
+                              ? const Color(0xFF0A1A0E)
+                              : gc.withOpacity(0.07),
                           borderRadius: BorderRadius.circular(10),
                           border: Border.all(
-                              color: isDone ? Colors.green.withOpacity(0.4) : gc.withOpacity(0.35),
+                              color: isDone
+                                  ? Colors.green.withOpacity(0.4)
+                                  : gc.withOpacity(0.35),
                               width: 1.5),
                         ),
-                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        child: Column(mainAxisSize: MainAxisSize.min,
+                            children: [
                           Container(
                             width: double.infinity,
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(
                               color: gc.withOpacity(0.18),
-                              borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+                              borderRadius: const BorderRadius.vertical(
+                                  top: Radius.circular(8)),
                             ),
                             child: Center(child: Text('G$groupLabel',
-                                style: TextStyle(color: gc, fontSize: 11,
+                                style: TextStyle(color: gc,
+                                    fontSize: 11,
                                     fontWeight: FontWeight.w900))),
                           ),
                           Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 8),
                             child: isDone
                                 ? const Center(child: Row(
                                     mainAxisSize: MainAxisSize.min,
@@ -2622,12 +2694,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                       Icon(Icons.check_circle,
                                           color: Colors.green, size: 14),
                                       SizedBox(width: 6),
-                                      Text('DONE',
-                                          style: TextStyle(
-                                              color: Colors.green,
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.w900,
-                                              letterSpacing: 1)),
+                                      Text('DONE', style: TextStyle(
+                                          color: Colors.green,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w900,
+                                          letterSpacing: 1)),
                                     ]))
                                 : Row(children: [
                                     Expanded(child: Text(
@@ -2638,7 +2709,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                         style: const TextStyle(
                                             color: Colors.white,
                                             fontSize: 12,
-                                            fontWeight: FontWeight.w600))),
+                                            fontWeight:
+                                                FontWeight.w600))),
                                     Padding(
                                       padding: const EdgeInsets.symmetric(
                                           horizontal: 6),
@@ -2651,8 +2723,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                           borderRadius:
                                               BorderRadius.circular(4),
                                           border: Border.all(
-                                              color: const Color(0xFF00CFFF)
-                                                  .withOpacity(0.3)),
+                                              color:
+                                                  const Color(0xFF00CFFF)
+                                                      .withOpacity(0.3)),
                                         ),
                                         child: const Text('vs',
                                             style: TextStyle(
@@ -2668,12 +2741,14 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                         style: const TextStyle(
                                             color: Colors.white,
                                             fontSize: 12,
-                                            fontWeight: FontWeight.w600))),
+                                            fontWeight:
+                                                FontWeight.w600))),
                                   ]),
                           ),
                           Container(
                             width: double.infinity,
-                            padding: const EdgeInsets.symmetric(vertical: 3),
+                            padding:
+                                const EdgeInsets.symmetric(vertical: 3),
                             decoration: BoxDecoration(
                               color: Colors.white.withOpacity(0.03),
                               borderRadius: const BorderRadius.vertical(
@@ -2681,9 +2756,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                             ),
                             child: Center(child: Text('Pending',
                                 style: TextStyle(
-                                    color: Colors.white.withOpacity(0.2),
+                                    color:
+                                        Colors.white.withOpacity(0.2),
                                     fontSize: 9,
-                                    fontWeight: FontWeight.bold))),
+                                    fontWeight:
+                                        FontWeight.bold))),
                           ),
                         ]),
                       ),
@@ -2698,20 +2775,27 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     ]);
   }
 
+
+
   // ── FIFA Knockout Bracket View ───────────────────────────────────────────────
   Widget _buildKnockoutView(List<Map<String, dynamic>> koRows) {
     // Dynamic round order based on actual group count
-    final roundOrder = _fifaRoundOrder(_groups.isNotEmpty ? _groups.length : 8);
-    const roundLabels = {
-      'round-of-32':'ROUND OF 32','round-of-16':'ROUND OF 16',
-      'round-of-8':'ROUND OF 8','quarter-finals':'QUARTER FINALS',
-      'semi-finals':'SEMI FINALS','third-place':'3RD PLACE','final':'FINAL',
+    final roundOrder = _fifaRoundOrder(_groups.isNotEmpty ? _groups.length : 8, totalRegisteredTeams: _soccerTeams.length);
+    final advancingKo     = (_groups.isNotEmpty ? _groups.length : 8) * 2;
+    final elimKoLabel     = advancingKo > 16 ? 'ELIMINATION (PLAY-IN)' : 'ELIMINATION';
+    final roundLabels = {
+      'elimination':    elimKoLabel,
+      'quarter-finals': 'QUARTER FINALS',
+      'semi-finals':    'SEMI FINALS',
+      'third-place':    '3RD PLACE',
+      'final':          'FINAL',
     };
     const roundColors = {
-      'round-of-32':Color(0xFF7B6AFF),'round-of-16':Color(0xFF00CFFF),
-      'round-of-8':Color(0xFF00CFFF),'quarter-finals':Color(0xFF00FF88),
-      'semi-finals':Color(0xFFFF9F43),'third-place':Color(0xFFCD7F32),
-      'final':Color(0xFFFFD700),
+      'elimination':    Color(0xFF00CFFF),
+      'quarter-finals': Color(0xFF00FF88),
+      'semi-finals':    Color(0xFFFF9F43),
+      'third-place':    Color(0xFFCD7F32),
+      'final':          Color(0xFFFFD700),
     };
 
     final Map<String, List<Map<String, dynamic>>> byRound = {};
@@ -2734,7 +2818,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         final roundLabel  = roundLabels[roundKey] ?? roundKey.toUpperCase();
         final accentColor = roundColors[roundKey] ?? const Color(0xFF00CFFF);
         final matches     = byRound[roundKey]!;
-        // Sort by time then matchId so order is stable
+        // Sort by time then matchId
         matches.sort((a, b) {
           final ta = a['time'] as String? ?? '';
           final tb = b['time'] as String? ?? '';
@@ -2743,13 +2827,22 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               .compareTo((b['matchId'] as int?) ?? 0);
         });
 
-        // Each match = 1 arena slot. Show up to 8 per row, then wrap.
-        const int perRow = 8;
-        final rows = <List<Map<String, dynamic>>>[];
-        for (int i = 0; i < matches.length; i += perRow) {
-          rows.add(matches.sublist(
-              i, (i + perRow).clamp(0, matches.length)));
+        // Group by time slot — all matches at same time = one row
+        // If times differ (overflow slots), each time = new row
+        final Map<String, List<Map<String, dynamic>>> byTimeMap = {};
+        for (final m in matches) {
+          final t = (m['time'] as String? ?? '').isNotEmpty
+              ? m['time'] as String : '__notime__';
+          byTimeMap.putIfAbsent(t, () => []);
+          byTimeMap[t]!.add(m);
         }
+        final timeKeys = byTimeMap.keys.toList()
+          ..sort((a, b) {
+            if (a == '__notime__') return 1;
+            if (b == '__notime__') return -1;
+            return a.compareTo(b);
+          });
+        final rows = timeKeys.map((t) => byTimeMap[t]!).toList();
 
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           // ── Round header ──────────────────────────────────────────────
@@ -2791,13 +2884,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             ]),
           ),
 
-          // ── Arena headers (up to perRow columns) ─────────────────────
+          // ── Arena headers (based on max matches per row) ──────────────
           Container(
             color: const Color(0xFF080618),
             padding: const EdgeInsets.fromLTRB(86, 6, 16, 6),
             child: Row(
               children: List.generate(
-                  rows.isEmpty ? 0 : rows[0].length, (a) =>
+                  rows.isEmpty ? 0 : rows.map((r) => r.length).reduce((a,b) => a>b?a:b), (a) =>
                 Expanded(child: Container(
                   margin: const EdgeInsets.symmetric(horizontal: 3),
                   padding: const EdgeInsets.symmetric(vertical: 4),
@@ -2821,8 +2914,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             final rowMatches = rowEntry.value;
             final isEven     = rowIdx % 2 == 0;
 
-            // Get the time for this row (first match's time)
-            final rowTime = (rowMatches.first['time'] as String? ?? '');
+            // Time = the time key for this slot
+            final rowTime = timeKeys[rowIdx] == '__notime__'
+                ? '' : timeKeys[rowIdx];
 
             return Container(
               decoration: BoxDecoration(
@@ -2838,7 +2932,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 SizedBox(width: 28,
                   child: Center(child: Padding(
                     padding: const EdgeInsets.only(top: 8),
-                    child: Text('${rowIdx * perRow + 1}',
+                    child: Text('${rowIdx + 1}',
                         style: TextStyle(
                             color: Colors.white.withOpacity(0.3),
                             fontSize: 12, fontWeight: FontWeight.bold)),
@@ -2987,9 +3081,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     ),
                   ));
                 }),
-                // Pad remaining columns if this row has fewer than perRow
+                // Pad remaining columns if this row has fewer than max
                 ...List.generate(
-                    perRow - rowMatches.length,
+                    rows.map((r) => r.length).reduce((a,b) => a>b?a:b) - rowMatches.length,
                     (_) => Expanded(child: Container(
                       margin: const EdgeInsets.symmetric(
                           horizontal: 3, vertical: 2),
@@ -3743,9 +3837,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         Text(title, style: const TextStyle(color: Colors.white, fontSize: 26,
             fontWeight: FontWeight.w900, letterSpacing: 3)),
         const Spacer(),
-        IconButton(tooltip: 'Export PDF',
-            icon: const Icon(Icons.picture_as_pdf, color: Color(0xFF00CFFF), size: 22),
-            onPressed: () => _exportPdf(category, matches)),
         _buildLiveIndicator(),
         IconButton(tooltip: 'View Standings',
             icon: const Icon(Icons.emoji_events, color: Color(0xFFFFD700), size: 22),
@@ -3899,7 +3990,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           SizedBox(height: 44, width: 160,
-              child: Image.asset('assets/images/MakeblockLogo.png',
+              child: Image.asset('assets/images/RoboventureLogo.png',
                   fit: BoxFit.contain, alignment: Alignment.centerLeft)),
           Container(
             decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [

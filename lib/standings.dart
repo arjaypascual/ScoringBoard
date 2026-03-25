@@ -102,7 +102,7 @@ class _StandingsState extends State<Standings>
     }
 
     try {
-      final categories = await DBHelper.getCategories();
+      final categories = await DBHelper.getActiveCategories();
       final Map<int, List<Map<String, dynamic>>> standingsByCategory = {};
 
       for (final cat in categories) {
@@ -178,19 +178,19 @@ class _StandingsState extends State<Standings>
       }
 
       final previousTabIndex = _tabController?.index ?? 0;
-      final prevSoccerIdx = _soccerTabCtrl?.index ?? 0;
       _tabController?.dispose();
+    _soccerTabCtrl?.dispose();
       _tabController = TabController(
         length: categories.length,
         vsync: this,
         initialIndex: previousTabIndex.clamp(0, (categories.length - 1).clamp(0, 9999)),
       );
+      final prevSoccerIdx = _soccerTabCtrl?.index ?? 0;
       _soccerTabCtrl?.dispose();
       _soccerTabCtrl = TabController(
         length: 2, vsync: this,
         initialIndex: prevSoccerIdx.clamp(0, 1),
       );
-
 
       // Find soccer category
       int? soccerCatId;
@@ -297,6 +297,18 @@ class _StandingsState extends State<Standings>
     final maxRounds =
         rows.isNotEmpty ? (rows.first['maxRounds'] as int? ?? 2) : 2;
 
+    // ── Pre-compute per-round max scores for progress bars ────────────
+    final Map<int, int> roundMaxScore = {};
+    for (int r = 1; r <= maxRounds; r++) {
+      int mx = 0;
+      for (final row in rows) {
+        final rds = row['rounds'] as Map<int, Map<String, dynamic>>;
+        final s   = rds[r]?['score'] as int? ?? 0;
+        if (s > mx) mx = s;
+      }
+      roundMaxScore[r] = mx;
+    }
+
     return Column(
       children: [
         // ── Category title bar ───────────────────────────────────────
@@ -371,6 +383,7 @@ class _StandingsState extends State<Standings>
                   center: true,
                 ),
               ),
+              _headerCell('TREND', flex: 1, center: true),
               _headerCell('FINAL SCORE', flex: 2, center: true),
             ],
           ),
@@ -385,87 +398,315 @@ class _StandingsState extends State<Standings>
                           TextStyle(color: Colors.white54, fontSize: 14)),
                 )
               : ListView.builder(
-                  itemCount: rows.length,
+                  itemCount: rows.length + 1, // +1 for podium divider
                   itemBuilder: (context, index) {
-                    final row      = rows[index];
+                    // ── Podium divider after rank 3 ──────────────────
+                    if (index == 3 && rows.length > 3) {
+                      return Container(
+                        margin: const EdgeInsets.symmetric(vertical: 2),
+                        child: Row(
+                          children: [
+                            const SizedBox(width: 24),
+                            Expanded(
+                              child: Container(
+                                height: 1,
+                                decoration: const BoxDecoration(
+                                  gradient: LinearGradient(colors: [
+                                    Colors.transparent,
+                                    Color(0xFFFFD700),
+                                    Color(0xFFC0C0C0),
+                                    Color(0xFFCD7F32),
+                                    Colors.transparent,
+                                  ]),
+                                ),
+                              ),
+                            ),
+                            Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 10),
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.4)),
+                                color: const Color(0xFFFFD700).withOpacity(0.06),
+                              ),
+                              child: const Text(
+                                '── PODIUM ──',
+                                style: TextStyle(
+                                  color: Color(0xFFFFD700),
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 2,
+                                ),
+                              ),
+                            ),
+                            Expanded(
+                              child: Container(
+                                height: 1,
+                                decoration: const BoxDecoration(
+                                  gradient: LinearGradient(colors: [
+                                    Colors.transparent,
+                                    Color(0xFFCD7F32),
+                                    Color(0xFFC0C0C0),
+                                    Color(0xFFFFD700),
+                                    Colors.transparent,
+                                  ]),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 24),
+                          ],
+                        ),
+                      );
+                    }
+
+                    // Adjust index for rows after the divider
+                    final rowIndex = index > 3 ? index - 1 : index;
+                    if (rowIndex >= rows.length) return const SizedBox.shrink();
+
+                    final row      = rows[rowIndex];
                     final rank     = row['rank'] as int;
                     final teamId   = row['team_id'];
                     final teamName = row['team_name'] as String;
                     final rounds   = row['rounds']
                         as Map<int, Map<String, dynamic>>;
                     final total    = row['totalScore'] as int;
-                    final isEven   = index % 2 == 0;
+                    final isEven   = rowIndex % 2 == 0;
+
+                    final rankCol = _rankColor(rank);
+                    final isTop3  = rank <= 3;
+                    final rowGlow = rank == 1
+                        ? const Color(0xFFFFD700)
+                        : rank == 2
+                            ? const Color(0xFFC0C0C0)
+                            : rank == 3
+                                ? const Color(0xFFCD7F32)
+                                : null;
+
+                    // ── Trend: compare last two rounds ───────────────
+                    int? trendScore1 = rounds[maxRounds - 1]?['score'] as int?;
+                    int? trendScore2 = rounds[maxRounds]?['score'] as int?;
+                    Widget trendWidget;
+                    if (trendScore1 != null && trendScore2 != null) {
+                      if (trendScore2 > trendScore1) {
+                        trendWidget = const Icon(Icons.arrow_upward_rounded,
+                            color: Color(0xFF00FF88), size: 18);
+                      } else if (trendScore2 < trendScore1) {
+                        trendWidget = const Icon(Icons.arrow_downward_rounded,
+                            color: Colors.redAccent, size: 18);
+                      } else {
+                        trendWidget = const Icon(Icons.remove_rounded,
+                            color: Colors.white38, size: 18);
+                      }
+                    } else {
+                      trendWidget = const Text('—',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white24, fontSize: 13));
+                    }
+
+                    // ── Champion banner for rank 1 ───────────────────
+                    if (rank == 1) {
+                      return _ChampionBanner(
+                        teamId: teamId,
+                        teamName: teamName,
+                        rounds: rounds,
+                        total: total,
+                        maxRounds: maxRounds,
+                        roundMaxScore: roundMaxScore,
+                        trendWidget: trendWidget,
+                        categoryName: categoryName,
+                      );
+                    }
 
                     return Container(
-                      color: isEven
-                          ? const Color(0xFF1E0E5A)
-                          : const Color(0xFF160A42),
+                      decoration: BoxDecoration(
+                        gradient: isTop3
+                            ? LinearGradient(
+                                begin: Alignment.centerLeft,
+                                end: Alignment.centerRight,
+                                colors: [
+                                  rowGlow!.withOpacity(rank == 2 ? 0.08 : 0.06),
+                                  (isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42)),
+                                ],
+                              )
+                            : null,
+                        color: isTop3
+                            ? null
+                            : isEven
+                                ? const Color(0xFF1E0E5A)
+                                : const Color(0xFF160A42),
+                        border: isTop3
+                            ? Border(
+                                left: BorderSide(
+                                    color: rowGlow!.withOpacity(0.7), width: 3))
+                            : null,
+                      ),
                       padding: const EdgeInsets.symmetric(
-                          vertical: 16, horizontal: 24),
+                          vertical: 14, horizontal: 24),
                       child: Row(
                         children: [
+                          // Rank badge
                           Expanded(
                             flex: 1,
-                            child: Text(
-                              '$rank',
-                              style: TextStyle(
-                                color: _rankColor(rank),
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16,
-                              ),
-                            ),
+                            child: isTop3
+                                ? Container(
+                                    width: 32,
+                                    height: 32,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      gradient: RadialGradient(colors: [
+                                        rankCol.withOpacity(0.35),
+                                        rankCol.withOpacity(0.08),
+                                      ]),
+                                      border: Border.all(
+                                          color: rankCol.withOpacity(0.8),
+                                          width: 1.5),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: rankCol.withOpacity(0.4),
+                                          blurRadius: 8,
+                                          spreadRadius: 1,
+                                        ),
+                                      ],
+                                    ),
+                                    child: Center(
+                                      child: Text(
+                                        rank == 2 ? '🥈' : '🥉',
+                                        style: const TextStyle(fontSize: 15),
+                                      ),
+                                    ),
+                                  )
+                                : Text(
+                                    '$rank',
+                                    style: TextStyle(
+                                      color: rankCol,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16,
+                                    ),
+                                  ),
                           ),
+                          // Team ID
                           Expanded(
                             flex: 2,
                             child: Text(
                               'C${teamId.toString().padLeft(3, '0')}R',
-                              style: const TextStyle(
-                                color: Colors.white,
+                              style: TextStyle(
+                                color: isTop3 ? Colors.white : Colors.white70,
                                 fontWeight: FontWeight.bold,
                                 fontSize: 14,
                               ),
                             ),
                           ),
+                          // Team Name
                           Expanded(
                             flex: 3,
                             child: Text(
                               teamName.toUpperCase(),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
+                              style: TextStyle(
+                                color: isTop3 ? Colors.white : Colors.white70,
+                                fontWeight: isTop3 ? FontWeight.w900 : FontWeight.bold,
+                                fontSize: isTop3 ? 15 : 14,
+                                shadows: isTop3
+                                    ? [Shadow(color: rowGlow!.withOpacity(0.4), blurRadius: 6)]
+                                    : null,
                               ),
                             ),
                           ),
+                          // Round scores with progress bars
                           ...List.generate(maxRounds, (i) {
-                            final roundData = rounds[i + 1];
-                            final score = roundData?['score'] ?? 0;
+                            final roundNum  = i + 1;
+                            final roundData = rounds[roundNum];
+                            final score     = roundData?['score'] as int? ?? 0;
+                            final maxScore  = roundMaxScore[roundNum] ?? 1;
+                            final pct       = maxScore > 0 ? score / maxScore : 0.0;
+                            final barColor  = isTop3 ? rowGlow! : const Color(0xFF00CFFF);
                             return Expanded(
                               flex: 2,
-                              child: Text(
-                                '$score',
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 18,
-                                ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    '$score',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: isTop3 ? rowGlow! : Colors.white,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                                    child: Stack(children: [
+                                      Container(
+                                        height: 4,
+                                        decoration: BoxDecoration(
+                                          color: Colors.white.withOpacity(0.07),
+                                          borderRadius: BorderRadius.circular(2),
+                                        ),
+                                      ),
+                                      FractionallySizedBox(
+                                        widthFactor: pct.clamp(0.0, 1.0),
+                                        child: Container(
+                                          height: 4,
+                                          decoration: BoxDecoration(
+                                            gradient: LinearGradient(colors: [
+                                              barColor,
+                                              barColor.withOpacity(0.4),
+                                            ]),
+                                            borderRadius: BorderRadius.circular(2),
+                                            boxShadow: [BoxShadow(
+                                              color: barColor.withOpacity(0.5),
+                                              blurRadius: 4,
+                                            )],
+                                          ),
+                                        ),
+                                      ),
+                                    ]),
+                                  ),
+                                ],
                               ),
                             );
                           }),
+                          // Trend
+                          Expanded(
+                            flex: 1,
+                            child: Center(child: trendWidget),
+                          ),
+                          // Final score
                           Expanded(
                             flex: 2,
                             child: Column(
                               children: [
-                                Text(
-                                  '$total',
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 18,
+                                Container(
+                                  padding: isTop3
+                                      ? const EdgeInsets.symmetric(horizontal: 10, vertical: 3)
+                                      : EdgeInsets.zero,
+                                  decoration: isTop3
+                                      ? BoxDecoration(
+                                          borderRadius: BorderRadius.circular(6),
+                                          color: rowGlow!.withOpacity(0.15),
+                                          border: Border.all(
+                                              color: rowGlow.withOpacity(0.4),
+                                              width: 1),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: rowGlow.withOpacity(0.25),
+                                              blurRadius: 6,
+                                            ),
+                                          ],
+                                        )
+                                      : null,
+                                  child: Text(
+                                    '$total',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: isTop3 ? rowGlow! : Colors.white,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: isTop3 ? 20 : 18,
+                                    ),
                                   ),
                                 ),
+                                const SizedBox(height: 2),
                                 Text(
                                   _bestDuration(rounds),
                                   textAlign: TextAlign.center,
@@ -754,12 +995,12 @@ class _StandingsState extends State<Standings>
           final gd     = team['goalDiff']     as int;
 
           final rankColor = _rankColor(rank);
+          final isTop3    = rank <= 3;
           final gdStr = gd > 0 ? '+$gd' : '$gd';
           final gdColor = gd > 0
               ? const Color(0xFF00FF88)
               : gd < 0 ? Colors.redAccent : Colors.white38;
 
-          // Row cell helper
           Widget cell(String v, {int flex=1, Color? color, bool bold=false}) =>
               Expanded(flex: flex, child: Text(v,
                   textAlign: TextAlign.center,
@@ -769,16 +1010,47 @@ class _StandingsState extends State<Standings>
                       fontWeight: bold ? FontWeight.w900 : FontWeight.w500)));
 
           return Container(
-            color: isEven
-                ? const Color(0xFF100838)
-                : const Color(0xFF0C0628),
+            decoration: BoxDecoration(
+              gradient: isTop3
+                  ? LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      colors: [
+                        rankColor.withOpacity(rank == 1 ? 0.12 : rank == 2 ? 0.07 : 0.05),
+                        (isEven ? const Color(0xFF100838) : const Color(0xFF0C0628)),
+                      ],
+                    )
+                  : null,
+              color: isTop3 ? null : isEven
+                  ? const Color(0xFF100838)
+                  : const Color(0xFF0C0628),
+              border: isTop3
+                  ? Border(left: BorderSide(color: rankColor.withOpacity(0.7), width: 3))
+                  : null,
+            ),
             padding: const EdgeInsets.symmetric(
                 horizontal: 24, vertical: 11),
             child: Row(children: [
               // Rank
-              SizedBox(width: 28, child: Text('$rank',
-                  style: TextStyle(color: rankColor,
-                      fontSize: 14, fontWeight: FontWeight.w900))),
+              SizedBox(width: 28, child: isTop3
+                  ? Container(
+                      width: 26, height: 26,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: RadialGradient(colors: [
+                          rankColor.withOpacity(0.3),
+                          rankColor.withOpacity(0.06),
+                        ]),
+                        border: Border.all(color: rankColor.withOpacity(0.7), width: 1.5),
+                        boxShadow: [BoxShadow(color: rankColor.withOpacity(0.35), blurRadius: 7)],
+                      ),
+                      child: Center(child: Text(
+                          rank == 1 ? '🥇' : rank == 2 ? '🥈' : '🥉',
+                          style: const TextStyle(fontSize: 13))),
+                    )
+                  : Text('$rank',
+                      style: TextStyle(color: rankColor,
+                          fontSize: 14, fontWeight: FontWeight.w900))),
 
               // Group badge + Team name
               Expanded(flex: 5, child: Row(children: [
@@ -1038,35 +1310,67 @@ class _StandingsState extends State<Standings>
           return Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
             decoration: BoxDecoration(
-              color: advances
-                  ? (isFirst
-                      ? const Color(0xFFFFD700).withOpacity(0.05)
-                      : const Color(0xFF00FF88).withOpacity(0.04))
-                  : Colors.transparent,
-              border: Border(bottom: BorderSide(
-                  color: Colors.white.withOpacity(0.04), width: 1)),
+              gradient: advances
+                  ? LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      colors: [
+                        badgeCol.withOpacity(isFirst ? 0.12 : 0.06),
+                        Colors.transparent,
+                      ],
+                    )
+                  : null,
+              border: Border(
+                bottom: BorderSide(
+                    color: Colors.white.withOpacity(0.04), width: 1),
+                left: advances
+                    ? BorderSide(color: badgeCol.withOpacity(0.7), width: 2.5)
+                    : BorderSide.none,
+              ),
             ),
             child: Row(children: [
-              // Rank circle
+              // Rank badge
               Container(
                 width: 22, height: 22,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: advances
-                      ? badgeCol.withOpacity(0.12)
-                      : Colors.white.withOpacity(0.03),
-                  border: Border.all(color: badgeCol, width: 1),
+                  gradient: advances
+                      ? RadialGradient(colors: [
+                          badgeCol.withOpacity(0.3),
+                          badgeCol.withOpacity(0.06),
+                        ])
+                      : null,
+                  color: advances ? null : Colors.white.withOpacity(0.03),
+                  border: Border.all(
+                      color: advances ? badgeCol : Colors.white12, width: 1),
+                  boxShadow: advances
+                      ? [BoxShadow(
+                          color: badgeCol.withOpacity(0.35),
+                          blurRadius: 6)]
+                      : null,
                 ),
-                child: Center(child: Text('$rank',
-                    style: TextStyle(color: advances ? badgeCol : Colors.white38,
-                        fontSize: 9, fontWeight: FontWeight.bold))),
+                child: Center(
+                  child: advances && isFirst
+                      ? const Text('★', style: TextStyle(color: Color(0xFFFFD700), fontSize: 9))
+                      : advances
+                          ? const Icon(Icons.arrow_upward_rounded, size: 10, color: Color(0xFF00FF88))
+                          : Text('$rank',
+                              style: TextStyle(color: Colors.white38,
+                                  fontSize: 9, fontWeight: FontWeight.bold)),
+                ),
               ),
               const SizedBox(width: 6),
               // Team name
               Expanded(child: Text(team.teamName,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: textCol, fontSize: 11,
-                      fontWeight: advances ? FontWeight.bold : FontWeight.w400))),
+                  style: TextStyle(
+                    color: textCol,
+                    fontSize: advances ? 12 : 11,
+                    fontWeight: advances ? FontWeight.w900 : FontWeight.w400,
+                    shadows: advances && isFirst
+                        ? [const Shadow(color: Color(0x66FFD700), blurRadius: 8)]
+                        : null,
+                  ))),
               // P (played)
               SizedBox(width: 26, child: Text('${team.matchesPlayed}',
                   textAlign: TextAlign.center,
@@ -1122,19 +1426,38 @@ class _StandingsState extends State<Standings>
         }),
         // Footer
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.02),
+            gradient: LinearGradient(
+              colors: [
+                const Color(0xFF00FF88).withOpacity(0.08),
+                Colors.transparent,
+              ],
+            ),
             borderRadius: const BorderRadius.vertical(bottom: Radius.circular(11)),
-            border: Border(top: BorderSide(color: groupCol.withOpacity(0.12))),
+            border: Border(top: BorderSide(color: groupCol.withOpacity(0.2))),
           ),
           child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Icon(Icons.arrow_upward,
-                color: const Color(0xFF00FF88).withOpacity(0.6), size: 10),
-            const SizedBox(width: 4),
-            Text('Top 2 advance',
-                style: TextStyle(color: const Color(0xFF00FF88).withOpacity(0.55),
-                    fontSize: 9, fontWeight: FontWeight.bold)),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                color: const Color(0xFF00FF88).withOpacity(0.10),
+                border: Border.all(
+                    color: const Color(0xFF00FF88).withOpacity(0.3), width: 1),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.arrow_upward_rounded,
+                    color: Color(0xFF00FF88), size: 10),
+                const SizedBox(width: 4),
+                Text('TOP 2 ADVANCE',
+                    style: TextStyle(
+                        color: const Color(0xFF00FF88).withOpacity(0.85),
+                        fontSize: 9,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.8)),
+              ]),
+            ),
           ]),
         ),
       ]),
@@ -1212,50 +1535,50 @@ class _StandingsState extends State<Standings>
   Widget _buildHeader() {
     return Container(
       width: double.infinity,
-      color: const Color(0xFF2D0E7A),
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft, end: Alignment.bottomRight,
+          colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF1A0A4A)],
+        ),
+        border: const Border(
+            bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5)),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF00CFFF).withOpacity(0.12),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              RichText(
-                text: const TextSpan(
-                  children: [
-                    TextSpan(
-                        text: 'Make',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold)),
-                    TextSpan(
-                        text: 'bl',
-                        style: TextStyle(
-                            color: Color(0xFF00CFFF),
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold)),
-                    TextSpan(
-                        text: 'ock',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-              const Text('Construct Your Dreams',
-                  style: TextStyle(color: Colors.white54, fontSize: 10)),
-            ],
+          SizedBox(
+            height: 44, width: 160,
+            child: Image.asset('assets/images/RoboventureLogo.png',
+                fit: BoxFit.contain, alignment: Alignment.centerLeft),
           ),
-          Image.asset('assets/images/CenterLogo.png',
-              height: 80, fit: BoxFit.contain),
-          const Text('CREOTEC',
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 3)),
+          Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF7B2FFF).withOpacity(0.35),
+                  blurRadius: 24,
+                  spreadRadius: 4,
+                ),
+              ],
+            ),
+            child: Image.asset('assets/images/CenterLogo.png',
+                height: 70, fit: BoxFit.contain),
+          ),
+          SizedBox(
+            height: 44, width: 160,
+            child: Image.asset('assets/images/CreotecLogo.png',
+                fit: BoxFit.contain, alignment: Alignment.centerRight),
+          ),
         ],
       ),
     );
@@ -1357,6 +1680,314 @@ class _PulsingDotState extends State<_PulsingDot>
           color: Color(0xFF00FF88),
           shape: BoxShape.circle,
         ),
+      ),
+    );
+  }
+}
+
+// ── Animated crown widget ─────────────────────────────────────────────────────
+class _AnimatedCrown extends StatefulWidget {
+  const _AnimatedCrown();
+  @override
+  State<_AnimatedCrown> createState() => _AnimatedCrownState();
+}
+
+class _AnimatedCrownState extends State<_AnimatedCrown>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _scale;
+  late Animation<double> _glow;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
+    _scale = Tween<double>(begin: 0.92, end: 1.08).animate(
+        CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
+    _glow = Tween<double>(begin: 0.4, end: 1.0).animate(
+        CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, __) => Transform.scale(
+        scale: _scale.value,
+        child: Container(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFFFFD700).withOpacity(_glow.value * 0.6),
+                blurRadius: 18,
+                spreadRadius: 2,
+              ),
+            ],
+          ),
+          child: const Text('👑', style: TextStyle(fontSize: 28)),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Champion banner for rank #1 ───────────────────────────────────────────────
+class _ChampionBanner extends StatelessWidget {
+  final dynamic teamId;
+  final String teamName;
+  final Map<int, Map<String, dynamic>> rounds;
+  final int total;
+  final int maxRounds;
+  final Map<int, int> roundMaxScore;
+  final Widget trendWidget;
+  final String categoryName;
+
+  const _ChampionBanner({
+    required this.teamId,
+    required this.teamName,
+    required this.rounds,
+    required this.total,
+    required this.maxRounds,
+    required this.roundMaxScore,
+    required this.trendWidget,
+    required this.categoryName,
+  });
+
+  String _bestDuration() {
+    if (rounds.isEmpty) return '00:00';
+    int bestScore = -1;
+    String bestDur = '00:00';
+    for (final r in rounds.values) {
+      final s = r['score'] as int? ?? 0;
+      if (s > bestScore) {
+        bestScore = s;
+        bestDur   = r['duration'] as String? ?? '00:00';
+      }
+    }
+    return bestDur;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFF2A1A00),
+            Color(0xFF1E0E5A),
+            Color(0xFF1A0A30),
+          ],
+        ),
+        border: Border.all(
+          color: const Color(0xFFFFD700).withOpacity(0.55),
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFFFD700).withOpacity(0.18),
+            blurRadius: 20,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // ── Champion label bar ───────────────────────────────────
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  const Color(0xFFFFD700).withOpacity(0.25),
+                  const Color(0xFFFFD700).withOpacity(0.05),
+                  const Color(0xFFFFD700).withOpacity(0.25),
+                ],
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text('✦', style: TextStyle(color: Color(0xFFFFD700), fontSize: 10)),
+                const SizedBox(width: 8),
+                Text(
+                  'CURRENT LEADER',
+                  style: TextStyle(
+                    color: const Color(0xFFFFD700).withOpacity(0.9),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 3,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Text('✦', style: TextStyle(color: Color(0xFFFFD700), fontSize: 10)),
+              ],
+            ),
+          ),
+          // ── Main row ─────────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
+            child: Row(
+              children: [
+                // Animated crown
+                const SizedBox(
+                  width: 44,
+                  child: Center(child: _AnimatedCrown()),
+                ),
+                const SizedBox(width: 8),
+                // Team ID + Name
+                Expanded(
+                  flex: 5,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'C${teamId.toString().padLeft(3, '0')}R',
+                        style: TextStyle(
+                          color: const Color(0xFFFFD700).withOpacity(0.6),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11,
+                          letterSpacing: 1,
+                        ),
+                      ),
+                      Text(
+                        teamName.toUpperCase(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 18,
+                          letterSpacing: 1,
+                          shadows: [
+                            Shadow(color: Color(0x88FFD700), blurRadius: 10),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                // Round scores with progress bars
+                ...List.generate(maxRounds, (i) {
+                  final roundNum  = i + 1;
+                  final roundData = rounds[roundNum];
+                  final score     = roundData?['score'] as int? ?? 0;
+                  final maxScore  = roundMaxScore[roundNum] ?? 1;
+                  final pct       = maxScore > 0 ? score / maxScore : 0.0;
+                  return Expanded(
+                    flex: 2,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '$score',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Color(0xFFFFD700),
+                            fontWeight: FontWeight.w900,
+                            fontSize: 18,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          child: Stack(children: [
+                            Container(
+                              height: 4,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.07),
+                                borderRadius: BorderRadius.circular(2),
+                              ),
+                            ),
+                            FractionallySizedBox(
+                              widthFactor: pct.clamp(0.0, 1.0),
+                              child: Container(
+                                height: 4,
+                                decoration: BoxDecoration(
+                                  gradient: const LinearGradient(colors: [
+                                    Color(0xFFFFD700),
+                                    Color(0xFFFF9F43),
+                                  ]),
+                                  borderRadius: BorderRadius.circular(2),
+                                  boxShadow: [BoxShadow(
+                                    color: const Color(0xFFFFD700).withOpacity(0.6),
+                                    blurRadius: 5,
+                                  )],
+                                ),
+                              ),
+                            ),
+                          ]),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+                // Trend
+                Expanded(
+                  flex: 1,
+                  child: Center(child: trendWidget),
+                ),
+                // Final score
+                Expanded(
+                  flex: 2,
+                  child: Column(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(8),
+                          gradient: LinearGradient(colors: [
+                            const Color(0xFFFFD700).withOpacity(0.25),
+                            const Color(0xFFFFD700).withOpacity(0.08),
+                          ]),
+                          border: Border.all(
+                              color: const Color(0xFFFFD700).withOpacity(0.5),
+                              width: 1.5),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFFFFD700).withOpacity(0.3),
+                              blurRadius: 10,
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          '$total',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Color(0xFFFFD700),
+                            fontWeight: FontWeight.w900,
+                            fontSize: 22,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        _bestDuration(),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white60,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

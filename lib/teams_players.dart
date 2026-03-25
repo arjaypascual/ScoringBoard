@@ -16,6 +16,13 @@ const _kCatColors = [
 
 Color _catColor(int index) => _kCatColors[index % _kCatColors.length];
 
+String _fmtTeamId(String rawId) {
+  if (rawId.isEmpty) return '';
+  final n = int.tryParse(rawId);
+  if (n == null) return rawId;
+  return 'C${n.toString().padLeft(3, '0')}R';
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 class TeamsPlayers extends StatefulWidget {
   final VoidCallback? onBack;
@@ -112,6 +119,66 @@ class _TeamsPlayersState extends State<TeamsPlayers>
     }
   }
 
+  // ── Mark all teams present or absent ────────────────────────────────────────
+  Future<void> _markAllTeams(int catId, bool present) async {
+    final val = present ? 1 : 0;
+    try {
+      final conn = await DBHelper.getConnection();
+      await conn.execute(
+        "UPDATE tbl_team SET team_ispresent = $val WHERE category_id = $catId",
+      );
+      await _loadData(silent: true);
+      if (mounted) {
+        final label = present ? 'All teams marked Present ✅' : 'All teams marked Absent ❌';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(label),
+          backgroundColor:
+              present ? const Color(0xFF1A5C2A) : const Color(0xFF5C1A1A),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('❌ Failed to update: $e'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    }
+  }
+
+  // ── Toggle team presence in DB ────────────────────────────────────────────
+  Future<void> _toggleTeamPresence(int teamId, bool currentlyPresent) async {
+    final newValue = currentlyPresent ? 0 : 1;
+    try {
+      final conn = await DBHelper.getConnection();
+      await conn.execute(
+        "UPDATE tbl_team SET team_ispresent = $newValue WHERE team_id = $teamId",
+      );
+      await _loadData(silent: true);
+      if (mounted) {
+        final label = !currentlyPresent ? 'Present ✅' : 'Absent ❌';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Team marked as $label'),
+          backgroundColor:
+              !currentlyPresent ? const Color(0xFF1A5C2A) : const Color(0xFF5C1A1A),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('❌ Failed to update attendance: $e'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    }
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
@@ -142,13 +209,16 @@ class _TeamsPlayersState extends State<TeamsPlayers>
                   final catId = int.tryParse(
                           e.value['category_id'].toString()) ?? 0;
                   return _CategoryView(
-                    category:      e.value,
-                    catIndex:      e.key,
-                    teams:         _teamsByCategory[catId] ?? [],
-                    playersByTeam: _playersByTeam,
-                    lastUpdated:   _lastUpdated,
-                    onBack:        widget.onBack,
-                    onRefresh:     () => _loadData(),
+                    category:           e.value,
+                    catIndex:           e.key,
+                    catId:              catId,
+                    teams:              _teamsByCategory[catId] ?? [],
+                    playersByTeam:      _playersByTeam,
+                    lastUpdated:        _lastUpdated,
+                    onBack:             widget.onBack,
+                    onRefresh:          () => _loadData(),
+                    onTogglePresence:   _toggleTeamPresence,
+                    onMarkAll:          (present) => _markAllTeams(catId, present),
                   );
                 }).toList(),
               ),
@@ -241,35 +311,51 @@ class _TeamsPlayersState extends State<TeamsPlayers>
   // ── App header ────────────────────────────────────────────────────────────
   Widget _buildHeader() {
     return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft, end: Alignment.bottomRight,
           colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF1A0A4A)],
         ),
-        border: Border(
+        border: const Border(
             bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5)),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF00CFFF).withOpacity(0.12),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          RichText(
-            text: const TextSpan(children: [
-              TextSpan(text: 'Make',
-                  style: TextStyle(color: Colors.white, fontSize: 22,
-                      fontWeight: FontWeight.bold)),
-              TextSpan(text: 'bl',
-                  style: TextStyle(color: Color(0xFF00CFFF), fontSize: 22,
-                      fontWeight: FontWeight.bold)),
-              TextSpan(text: 'ock',
-                  style: TextStyle(color: Colors.white, fontSize: 22,
-                      fontWeight: FontWeight.bold)),
-            ]),
+          SizedBox(
+            height: 44, width: 160,
+            child: Image.asset('assets/images/RoboventureLogo.png',
+                fit: BoxFit.contain, alignment: Alignment.centerLeft),
           ),
-          Image.asset('assets/images/CenterLogo.png',
-              height: 70, fit: BoxFit.contain),
-          const Text('CREOTEC',
-              style: TextStyle(color: Colors.white, fontSize: 18,
-                  fontWeight: FontWeight.bold, letterSpacing: 3)),
+          Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF7B2FFF).withOpacity(0.35),
+                  blurRadius: 24,
+                  spreadRadius: 4,
+                ),
+              ],
+            ),
+            child: Image.asset('assets/images/CenterLogo.png',
+                height: 70, fit: BoxFit.contain),
+          ),
+          SizedBox(
+            height: 44, width: 160,
+            child: Image.asset('assets/images/CreotecLogo.png',
+                fit: BoxFit.contain, alignment: Alignment.centerRight),
+          ),
         ],
       ),
     );
@@ -279,31 +365,66 @@ class _TeamsPlayersState extends State<TeamsPlayers>
 // ─────────────────────────────────────────────────────────────────────────────
 // Category view — split into PRESENT / ABSENT columns
 // ─────────────────────────────────────────────────────────────────────────────
-class _CategoryView extends StatelessWidget {
+class _CategoryView extends StatefulWidget {
   final Map<String, dynamic>            category;
   final int                             catIndex;
+  final int                             catId;
   final List<Map<String, dynamic>>      teams;
   final Map<int, List<Map<String, dynamic>>> playersByTeam;
   final DateTime?                       lastUpdated;
   final VoidCallback?                   onBack;
   final VoidCallback                    onRefresh;
+  final Future<void> Function(int teamId, bool currentlyPresent) onTogglePresence;
+  final Future<void> Function(bool present) onMarkAll;
 
   const _CategoryView({
     required this.category,
     required this.catIndex,
+    required this.catId,
     required this.teams,
     required this.playersByTeam,
     required this.lastUpdated,
     required this.onRefresh,
+    required this.onTogglePresence,
+    required this.onMarkAll,
     this.onBack,
   });
 
   @override
+  State<_CategoryView> createState() => _CategoryViewState();
+}
+
+class _CategoryViewState extends State<_CategoryView> {
+  final TextEditingController _searchCtrl = TextEditingController();
+  String _searchQuery = '';
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final accent       = _catColor(catIndex);
-    final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
-    final present      = teams.where((t) => t['team_ispresent'].toString() == '1').toList();
-    final absent       = teams.where((t) => t['team_ispresent'].toString() != '1').toList();
+    final accent       = _catColor(widget.catIndex);
+    final categoryName = (widget.category['category_type'] ?? '').toString().toUpperCase();
+    final allTeams     = widget.teams;
+    final present      = allTeams.where((t) => t['team_ispresent'].toString() == '1').toList();
+    final absent       = allTeams.where((t) => t['team_ispresent'].toString() != '1').toList();
+    final total        = allTeams.length;
+    final presentCount = present.length;
+    final pct          = total == 0 ? 0.0 : presentCount / total;
+
+    // Filter by search query
+    final q = _searchQuery.toLowerCase();
+    final filteredPresent = q.isEmpty
+        ? present
+        : present.where((t) =>
+            (t['team_name'] ?? '').toString().toLowerCase().contains(q)).toList();
+    final filteredAbsent = q.isEmpty
+        ? absent
+        : absent.where((t) =>
+            (t['team_name'] ?? '').toString().toLowerCase().contains(q)).toList();
 
     return Column(
       children: [
@@ -317,7 +438,7 @@ class _CategoryView extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
           child: Row(
             children: [
-              // Category name + stats
+              // Category name badge
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 decoration: BoxDecoration(
@@ -343,32 +464,187 @@ class _CategoryView extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 16),
-              // Stats row
-              _statChip(Icons.groups_rounded, '${teams.length}', 'TOTAL',
+              // Stats chips
+              _statChip(Icons.groups_rounded, '$total', 'TOTAL',
                   Colors.white54, Colors.white12),
               const SizedBox(width: 8),
-              _statChip(Icons.check_circle_rounded, '${present.length}', 'PRESENT',
+              _statChip(Icons.check_circle_rounded, '$presentCount', 'PRESENT',
                   Colors.green, Colors.green.withOpacity(0.12)),
               const SizedBox(width: 8),
               _statChip(Icons.cancel_rounded, '${absent.length}', 'ABSENT',
                   Colors.redAccent, Colors.red.withOpacity(0.10)),
               const Spacer(),
-              // Live + refresh
-              _LiveIndicator(lastUpdated: lastUpdated),
+              _LiveIndicator(lastUpdated: widget.lastUpdated),
               const SizedBox(width: 8),
               IconButton(
                 tooltip: 'Refresh',
                 icon: const Icon(Icons.refresh_rounded,
                     color: Color(0xFF00CFFF), size: 20),
-                onPressed: onRefresh,
+                onPressed: widget.onRefresh,
               ),
-              if (onBack != null)
+              if (widget.onBack != null)
                 IconButton(
                   tooltip: 'Back',
                   icon: const Icon(Icons.arrow_back_ios_new,
                       color: Color(0xFF00CFFF), size: 18),
-                  onPressed: onBack,
+                  onPressed: widget.onBack,
                 ),
+            ],
+          ),
+        ),
+
+        // ── Attendance summary + progress bar ──────────────────────────
+        Container(
+          color: const Color(0xFF0C0720),
+          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    'ATTENDANCE',
+                    style: TextStyle(
+                        color: Colors.white38,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.5),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    '$presentCount / $total teams',
+                    style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold),
+                  ),
+                  const Spacer(),
+                  // Percentage badge
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: pct >= 1.0
+                          ? Colors.green.withOpacity(0.18)
+                          : pct >= 0.5
+                              ? Colors.orange.withOpacity(0.15)
+                              : Colors.red.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: pct >= 1.0
+                            ? Colors.green.withOpacity(0.5)
+                            : pct >= 0.5
+                                ? Colors.orange.withOpacity(0.4)
+                                : Colors.red.withOpacity(0.4),
+                      ),
+                    ),
+                    child: Text(
+                      '${(pct * 100).toStringAsFixed(0)}%',
+                      style: TextStyle(
+                        color: pct >= 1.0
+                            ? Colors.green
+                            : pct >= 0.5
+                                ? Colors.orange
+                                : Colors.redAccent,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  // Mark All Present button
+                  _markAllBtn(
+                    icon: Icons.check_circle_rounded,
+                    label: 'All Present',
+                    color: Colors.green,
+                    onTap: () => widget.onMarkAll(true),
+                  ),
+                  const SizedBox(width: 8),
+                  // Mark All Absent button
+                  _markAllBtn(
+                    icon: Icons.cancel_rounded,
+                    label: 'All Absent',
+                    color: Colors.redAccent,
+                    onTap: () => widget.onMarkAll(false),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              // Progress bar
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: Stack(
+                  children: [
+                    Container(
+                      height: 8,
+                      width: double.infinity,
+                      color: Colors.white.withOpacity(0.06),
+                    ),
+                    AnimatedFractionallySizedBox(
+                      duration: const Duration(milliseconds: 400),
+                      curve: Curves.easeOut,
+                      widthFactor: pct.clamp(0.0, 1.0),
+                      child: Container(
+                        height: 8,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: pct >= 1.0
+                                ? [Colors.green, const Color(0xFF00FF88)]
+                                : pct >= 0.5
+                                    ? [Colors.orange, Colors.amber]
+                                    : [Colors.redAccent, Colors.red],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // ── Search bar ─────────────────────────────────────────────────
+        Container(
+          color: const Color(0xFF0F0828),
+          padding: const EdgeInsets.fromLTRB(28, 8, 28, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: Container(
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.05),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: accent.withOpacity(0.25)),
+                  ),
+                  child: TextField(
+                    controller: _searchCtrl,
+                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: 'Search teams…',
+                      hintStyle: TextStyle(
+                          color: Colors.white24, fontSize: 13),
+                      prefixIcon: Icon(Icons.search_rounded,
+                          color: accent.withOpacity(0.6), size: 18),
+                      suffixIcon: _searchQuery.isNotEmpty
+                          ? GestureDetector(
+                              onTap: () {
+                                _searchCtrl.clear();
+                                setState(() => _searchQuery = '');
+                              },
+                              child: Icon(Icons.close_rounded,
+                                  color: Colors.white38, size: 16),
+                            )
+                          : null,
+                      border: InputBorder.none,
+                      contentPadding:
+                          const EdgeInsets.symmetric(vertical: 9),
+                    ),
+                    onChanged: (v) => setState(() => _searchQuery = v),
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -376,14 +652,14 @@ class _CategoryView extends StatelessWidget {
         // ── Column headers ─────────────────────────────────────────────
         Container(
           color: const Color(0xFF0F0828),
-          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 8),
+          padding: const EdgeInsets.fromLTRB(28, 4, 28, 8),
           child: Row(
             children: [
               Expanded(
                 child: _sectionHeader(
                     Icons.check_circle_outline_rounded,
                     'PRESENT',
-                    '${present.length} team${present.length != 1 ? 's' : ''}',
+                    '${filteredPresent.length} team${filteredPresent.length != 1 ? "s" : ""}',
                     Colors.green),
               ),
               Container(width: 1, height: 36,
@@ -394,7 +670,7 @@ class _CategoryView extends StatelessWidget {
                   child: _sectionHeader(
                       Icons.cancel_outlined,
                       'ABSENT',
-                      '${absent.length} team${absent.length != 1 ? 's' : ''}',
+                      '${filteredAbsent.length} team${filteredAbsent.length != 1 ? "s" : ""}',
                       Colors.redAccent),
                 ),
               ),
@@ -404,7 +680,7 @@ class _CategoryView extends StatelessWidget {
 
         // ── Two-column team list ───────────────────────────────────────
         Expanded(
-          child: teams.isEmpty
+          child: allTeams.isEmpty
               ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -424,13 +700,16 @@ class _CategoryView extends StatelessWidget {
                     // PRESENT column
                     Expanded(
                       child: _TeamColumn(
-                        teams:         present,
-                        playersByTeam: playersByTeam,
-                        accent:        Colors.green,
-                        isEmpty:       present.isEmpty,
-                        emptyLabel:    'No teams present',
-                        catIndex:      catIndex,
-                        isPresent:     true,
+                        teams:              filteredPresent,
+                        playersByTeam:      widget.playersByTeam,
+                        accent:             Colors.green,
+                        isEmpty:            filteredPresent.isEmpty,
+                        emptyLabel:         _searchQuery.isNotEmpty
+                            ? 'No results'
+                            : 'No teams present',
+                        catIndex:           widget.catIndex,
+                        isPresent:          true,
+                        onTogglePresence:   widget.onTogglePresence,
                       ),
                     ),
                     // Divider
@@ -441,19 +720,53 @@ class _CategoryView extends StatelessWidget {
                     // ABSENT column
                     Expanded(
                       child: _TeamColumn(
-                        teams:         absent,
-                        playersByTeam: playersByTeam,
-                        accent:        Colors.redAccent,
-                        isEmpty:       absent.isEmpty,
-                        emptyLabel:    'All teams present!',
-                        catIndex:      catIndex,
-                        isPresent:     false,
+                        teams:              filteredAbsent,
+                        playersByTeam:      widget.playersByTeam,
+                        accent:             Colors.redAccent,
+                        isEmpty:            filteredAbsent.isEmpty,
+                        emptyLabel:         _searchQuery.isNotEmpty
+                            ? 'No results'
+                            : 'All teams present!',
+                        catIndex:           widget.catIndex,
+                        isPresent:          false,
+                        onTogglePresence:   widget.onTogglePresence,
                       ),
                     ),
                   ],
                 ),
         ),
       ],
+    );
+  }
+
+  Widget _markAllBtn({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.10),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withOpacity(0.35)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: color, size: 13),
+            const SizedBox(width: 5),
+            Text(label,
+                style: TextStyle(
+                    color: color,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold)),
+          ],
+        ),
+      ),
     );
   }
 
@@ -516,6 +829,7 @@ class _TeamColumn extends StatelessWidget {
   final String  emptyLabel;
   final int     catIndex;
   final bool    isPresent;
+  final Future<void> Function(int teamId, bool currentlyPresent) onTogglePresence;
 
   const _TeamColumn({
     required this.teams,
@@ -525,6 +839,7 @@ class _TeamColumn extends StatelessWidget {
     required this.emptyLabel,
     required this.catIndex,
     required this.isPresent,
+    required this.onTogglePresence,
   });
 
   @override
@@ -558,12 +873,13 @@ class _TeamColumn extends StatelessWidget {
         return Padding(
           padding: const EdgeInsets.only(bottom: 12),
           child: _TeamCard(
-            team:      team,
-            players:   players,
-            accent:    accent,
-            catIndex:  catIndex,
-            cardIndex: index,
-            isPresent: isPresent,
+            team:             team,
+            players:          players,
+            accent:           accent,
+            catIndex:         catIndex,
+            cardIndex:        index,
+            isPresent:        isPresent,
+            onTogglePresence: onTogglePresence,
           ),
         );
       },
@@ -581,6 +897,7 @@ class _TeamCard extends StatefulWidget {
   final int    catIndex;
   final int    cardIndex;
   final bool   isPresent;
+  final Future<void> Function(int teamId, bool currentlyPresent) onTogglePresence;
 
   const _TeamCard({
     required this.team,
@@ -589,6 +906,7 @@ class _TeamCard extends StatefulWidget {
     required this.catIndex,
     required this.cardIndex,
     required this.isPresent,
+    required this.onTogglePresence,
   });
 
   @override
@@ -669,21 +987,19 @@ class _TeamCardState extends State<_TeamCard>
                   children: [
                     // Team ID badge
                     Container(
-                      width: 40, height: 40,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
                       decoration: BoxDecoration(
                         color: accent.withOpacity(0.15),
                         borderRadius: BorderRadius.circular(10),
                         border: Border.all(
                             color: accent.withOpacity(0.3), width: 1),
                       ),
-                      child: Center(
-                        child: Text(
-                          '#$teamId',
-                          style: TextStyle(
-                              color: accent,
-                              fontWeight: FontWeight.w900,
-                              fontSize: 11),
-                        ),
+                      child: Text(
+                        _fmtTeamId(teamId),
+                        style: TextStyle(
+                            color: accent,
+                            fontWeight: FontWeight.w900,
+                            fontSize: 11),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -751,6 +1067,77 @@ class _TeamCardState extends State<_TeamCard>
                           ],
                         ),
                       ),
+
+                    const SizedBox(width: 8),
+
+                    // ── Tappable attendance badge ─────────────────────
+                    GestureDetector(
+                      onTap: () {
+                        final teamId = int.tryParse(
+                            widget.team['team_id']?.toString() ?? '0') ?? 0;
+                        if (teamId > 0) {
+                          widget.onTogglePresence(teamId, widget.isPresent);
+                        }
+                      },
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: widget.isPresent
+                              ? Colors.green.withOpacity(0.15)
+                              : Colors.red.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: widget.isPresent
+                                ? Colors.green.withOpacity(0.5)
+                                : Colors.red.withOpacity(0.4),
+                            width: 1.5,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 6, height: 6,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: widget.isPresent
+                                    ? Colors.green
+                                    : Colors.redAccent,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: widget.isPresent
+                                        ? Colors.green.withOpacity(0.5)
+                                        : Colors.red.withOpacity(0.4),
+                                    blurRadius: 4,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              widget.isPresent ? 'Present' : 'Absent',
+                              style: TextStyle(
+                                color: widget.isPresent
+                                    ? Colors.green
+                                    : Colors.redAccent,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Icon(
+                              Icons.swap_horiz_rounded,
+                              color: widget.isPresent
+                                  ? Colors.green.withOpacity(0.6)
+                                  : Colors.redAccent.withOpacity(0.6),
+                              size: 12,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
 
                     const SizedBox(width: 8),
 

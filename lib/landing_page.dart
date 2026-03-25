@@ -188,7 +188,7 @@ class _LandingPageState extends State<LandingPage>
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       Image.asset(
-                        'assets/images/MakeblockLogo.png',
+                        'assets/images/RoboventureLogo.png',
                         height: 44,
                         fit: BoxFit.contain,
                       ),
@@ -380,7 +380,7 @@ class _LandingPageState extends State<LandingPage>
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
       child: Text(
-        '© 2025 RoboVenture • Powered by Creotec',
+        '© 2026 RoboVenture • Powered by Creotec',
         style: TextStyle(
           color: Colors.white.withOpacity(0.25),
           fontSize: 11,

@@ -1221,28 +1221,40 @@ class DBHelper {
     koRounds.add({'label': 'third-place', 'count': 1});
     koRounds.add({'label': 'final',       'count': 1});
 
-    // Add a gap between group stage and knockout
-    timeCursor = skipLunch(timeCursor + intervalMinutes * 3);
+    // No gap — knockout starts immediately after the last group match
+    // timeCursor already points to the next available slot
 
-    // Knockout slots are ALWAYS created — no time limit break.
-    // If we've passed endLimit, continue scheduling sequentially after it.
+    // ── KNOCKOUT SCHEDULING RULES ──────────────────────────────────────────
+    // 1. All matches of the SAME round share the SAME time slot (one row).
+    // 2. If a round has more matches than arenas, overflow to next time slot.
+    //    e.g. R16=8 matches, arenas=8 → 1 time slot with 8 arenas
+    //         QF=4 matches, arenas=8  → 1 time slot with 4 arenas (no overflow)
+    // 3. Skip lunch break (12:00-13:00) — push to 13:00 if overlapping.
+    // 4. Always create ALL match slots regardless of endLimit.
     for (final round in koRounds) {
       final String bracketType = round['label'] as String;
       final int    count       = round['count'] as int;
-      final int    perArena    = (count / arenas).ceil();
 
-      for (int r = 0; r < perArena; r++) {
+      // How many time slots needed for this round
+      // Each slot fits up to [arenas] matches
+      // Knockout uses the actual arenas parameter set by the user
+      final int slotsNeeded = (count / arenas).ceil();
+
+      int matchesRemaining = count;
+      for (int s = 0; s < slotsNeeded; s++) {
         int t = skipLunch(timeCursor);
-        // Do NOT break on endLimit — KO matches must always exist
-        final matchesThisSlot = (r == perArena - 1 && count % arenas != 0)
-            ? count % arenas : arenas;
-        for (int a = 1; a <= matchesThisSlot; a++) {
+        // Matches in this slot = min(arenas, remaining)
+        final matchesInSlot = matchesRemaining < arenas
+            ? matchesRemaining : arenas;
+        matchesRemaining -= matchesInSlot;
+
+        for (int a = 0; a < matchesInSlot; a++) {
           final schedId = await insertSchedule(
               startTime: fmt(t), endTime: fmt(t + durationMinutes));
           await insertMatch(schedId, bracketType: bracketType);
         }
         timeCursor = skipLunch(timeCursor + durationMinutes + intervalMinutes);
-        print("✅ $bracketType slot @ ${fmt(t)}");
+        print("✅ $bracketType slot ${s+1}/$slotsNeeded @ ${fmt(t)} ($matchesInSlot matches)");
       }
     }
     print("✅ FIFA schedule generated! ${groups.length} groups, bracket size $bracketSize.");

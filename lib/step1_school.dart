@@ -435,7 +435,7 @@ class _Step1SchoolState extends State<Step1School> {
             height: 44,
             width: 160,
             child: Image.asset(
-              'assets/images/MakeblockLogo.png',
+              'assets/images/RoboventureLogo.png',
               fit: BoxFit.contain,
               alignment: Alignment.centerLeft,
             ),
