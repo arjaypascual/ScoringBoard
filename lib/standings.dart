@@ -32,6 +32,9 @@ class _StandingsState extends State<Standings>
   String _lastDataSignature  = '';
   String _lastGroupSignature = '';
 
+  // category_id → { team_id → previous rank } for delta arrows
+  Map<int, Map<int, int>> _previousRanks = {};
+
   // Soccer group stage data
   int?   _soccerCategoryId;
   List<_SoccerGroup> _soccerGroups = [];
@@ -64,7 +67,7 @@ class _StandingsState extends State<Standings>
     try {
       final conn   = await DBHelper.getConnection();
       final result = await conn.execute(
-          "SELECT score_id, team_id, round_id, score_totalscore FROM tbl_score ORDER BY score_id");
+          "SELECT score_id, team_id, round_id, score_totalscore, score_totalduration FROM tbl_score ORDER BY score_id");
       final rows = result.rows.map((r) => r.assoc()).toList();
       final signature = _buildSignature(rows);
 
@@ -158,17 +161,39 @@ class _StandingsState extends State<Standings>
           for (final r in rounds.values) {
             totalScore += (r['score'] as int);
           }
+          // Compute best (fastest) time in seconds for timer-based categories
+          int bestTimeSecs = 999999;
+          String bestTimeStr = '—';
+          for (final r in rounds.values) {
+            final dur  = r['duration'] as String? ?? '';
+            final secs = _parseDurationSeconds(dur);
+            if (secs < bestTimeSecs) {
+              bestTimeSecs = secs;
+              bestTimeStr  = _formatDuration(dur);
+            }
+          }
           return {
             'team_id':    t['team_id'],
             'team_name':  t['team_name'],
             'rounds':     rounds,
             'totalScore': totalScore,
             'maxRounds':  maxRounds,
+            'bestTimeSecs': bestTimeSecs,
+            'bestTimeStr':  bestTimeStr,
           };
         }).toList();
 
-        standings.sort((a, b) =>
-            (b['totalScore'] as int).compareTo(a['totalScore'] as int));
+        final categoryName = (cat['category_type'] ?? '').toString();
+        final isTimer = _isTimerCategory(categoryName);
+
+        if (isTimer) {
+          // Fastest time first; teams with no time go to the bottom
+          standings.sort((a, b) =>
+              (a['bestTimeSecs'] as int).compareTo(b['bestTimeSecs'] as int));
+        } else {
+          standings.sort((a, b) =>
+              (b['totalScore'] as int).compareTo(a['totalScore'] as int));
+        }
 
         for (int i = 0; i < standings.length; i++) {
           standings[i]['rank'] = i + 1;
@@ -178,14 +203,13 @@ class _StandingsState extends State<Standings>
       }
 
       final previousTabIndex = _tabController?.index ?? 0;
+      final prevSoccerIdx = _soccerTabCtrl?.index ?? 0;
       _tabController?.dispose();
-    _soccerTabCtrl?.dispose();
       _tabController = TabController(
         length: categories.length,
         vsync: this,
         initialIndex: previousTabIndex.clamp(0, (categories.length - 1).clamp(0, 9999)),
       );
-      final prevSoccerIdx = _soccerTabCtrl?.index ?? 0;
       _soccerTabCtrl?.dispose();
       _soccerTabCtrl = TabController(
         length: 2, vsync: this,
@@ -201,7 +225,17 @@ class _StandingsState extends State<Standings>
         }
       }
 
+      // ── Snapshot previous ranks before overwriting ──────────────────
+      final Map<int, Map<int, int>> newPrevRanks = {};
+      for (final entry in _standingsByCategory.entries) {
+        newPrevRanks[entry.key] = {
+          for (final r in entry.value)
+            (r['team_id'] as int): (r['rank'] as int),
+        };
+      }
+
       setState(() {
+        _previousRanks       = newPrevRanks;
         _categories          = categories;
         _standingsByCategory = standingsByCategory;
         _soccerCategoryId    = soccerCatId;
@@ -294,20 +328,12 @@ class _StandingsState extends State<Standings>
     final isSoccer = categoryName.toLowerCase().contains('soccer');
     if (isSoccer) return _buildSoccerStandingsView(category);
 
+    final isTimer  = _isTimerCategory(categoryName);
+
+    final catId    = int.tryParse(category['category_id'].toString()) ?? 0;
+    final prevRank = _previousRanks[catId] ?? {};
     final maxRounds =
         rows.isNotEmpty ? (rows.first['maxRounds'] as int? ?? 2) : 2;
-
-    // ── Pre-compute per-round max scores for progress bars ────────────
-    final Map<int, int> roundMaxScore = {};
-    for (int r = 1; r <= maxRounds; r++) {
-      int mx = 0;
-      for (final row in rows) {
-        final rds = row['rounds'] as Map<int, Map<String, dynamic>>;
-        final s   = rds[r]?['score'] as int? ?? 0;
-        if (s > mx) mx = s;
-      }
-      roundMaxScore[r] = mx;
-    }
 
     return Column(
       children: [
@@ -341,6 +367,12 @@ class _StandingsState extends State<Standings>
                 children: [
                   _buildLiveIndicator(),
                   IconButton(
+                    tooltip: 'Accomplishment Report',
+                    icon: const Icon(Icons.emoji_events_rounded,
+                        color: Color(0xFFFFD700)),
+                    onPressed: _showAccomplishmentReport,
+                  ),
+                  IconButton(
                     tooltip: 'Teams & Players',
                     icon: const Icon(Icons.groups_rounded,
                         color: Color(0xFF00E5A0)),
@@ -369,22 +401,47 @@ class _StandingsState extends State<Standings>
         // ── Table header ─────────────────────────────────────────────
         Container(
           color: const Color(0xFF5C2ECC),
-          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 24),
           child: Row(
             children: [
-              _headerCell('RANK',       flex: 1),
-              _headerCell('TEAM ID',    flex: 2),
-              _headerCell('TEAM NAME:', flex: 3),
+              SizedBox(
+                width: 48,
+                child: const Text(
+                  'RANK',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    letterSpacing: 0.5,
+                    height: 1.3,
+                  ),
+                ),
+              ),
+              // Delta column header — narrow fixed width
+              const SizedBox(
+                width: 32,
+                child: Text(
+                  '±',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+              _headerCell('TEAM ID',   flex: 2),
+              _headerCell('TEAM NAME', flex: 3),
               ...List.generate(
                 maxRounds,
                 (i) => _headerCell(
                   _roundLabel(i + 1, categoryName),
-                  flex: 2,
+                  flex: 3,
                   center: true,
                 ),
               ),
-              _headerCell('TREND', flex: 1, center: true),
-              _headerCell('FINAL SCORE', flex: 2, center: true),
+              _headerCell(isTimer ? 'BEST\nTIME' : 'TOTAL\nSCORE', flex: 2, center: true),
             ],
           ),
         ),
@@ -398,79 +455,16 @@ class _StandingsState extends State<Standings>
                           TextStyle(color: Colors.white54, fontSize: 14)),
                 )
               : ListView.builder(
-                  itemCount: rows.length + 1, // +1 for podium divider
+                  itemCount: rows.length,
                   itemBuilder: (context, index) {
-                    // ── Podium divider after rank 3 ──────────────────
-                    if (index == 3 && rows.length > 3) {
-                      return Container(
-                        margin: const EdgeInsets.symmetric(vertical: 2),
-                        child: Row(
-                          children: [
-                            const SizedBox(width: 24),
-                            Expanded(
-                              child: Container(
-                                height: 1,
-                                decoration: const BoxDecoration(
-                                  gradient: LinearGradient(colors: [
-                                    Colors.transparent,
-                                    Color(0xFFFFD700),
-                                    Color(0xFFC0C0C0),
-                                    Color(0xFFCD7F32),
-                                    Colors.transparent,
-                                  ]),
-                                ),
-                              ),
-                            ),
-                            Container(
-                              margin: const EdgeInsets.symmetric(horizontal: 10),
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.4)),
-                                color: const Color(0xFFFFD700).withOpacity(0.06),
-                              ),
-                              child: const Text(
-                                '── PODIUM ──',
-                                style: TextStyle(
-                                  color: Color(0xFFFFD700),
-                                  fontSize: 9,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 2,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: Container(
-                                height: 1,
-                                decoration: const BoxDecoration(
-                                  gradient: LinearGradient(colors: [
-                                    Colors.transparent,
-                                    Color(0xFFCD7F32),
-                                    Color(0xFFC0C0C0),
-                                    Color(0xFFFFD700),
-                                    Colors.transparent,
-                                  ]),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 24),
-                          ],
-                        ),
-                      );
-                    }
-
-                    // Adjust index for rows after the divider
-                    final rowIndex = index > 3 ? index - 1 : index;
-                    if (rowIndex >= rows.length) return const SizedBox.shrink();
-
-                    final row      = rows[rowIndex];
+                    final row      = rows[index];
                     final rank     = row['rank'] as int;
-                    final teamId   = row['team_id'];
+                    final teamId   = row['team_id'] as int;
                     final teamName = row['team_name'] as String;
                     final rounds   = row['rounds']
                         as Map<int, Map<String, dynamic>>;
                     final total    = row['totalScore'] as int;
-                    final isEven   = rowIndex % 2 == 0;
+                    final isEven   = index % 2 == 0;
 
                     final rankCol = _rankColor(rank);
                     final isTop3  = rank <= 3;
@@ -482,38 +476,60 @@ class _StandingsState extends State<Standings>
                                 ? const Color(0xFFCD7F32)
                                 : null;
 
-                    // ── Trend: compare last two rounds ───────────────
-                    int? trendScore1 = rounds[maxRounds - 1]?['score'] as int?;
-                    int? trendScore2 = rounds[maxRounds]?['score'] as int?;
-                    Widget trendWidget;
-                    if (trendScore1 != null && trendScore2 != null) {
-                      if (trendScore2 > trendScore1) {
-                        trendWidget = const Icon(Icons.arrow_upward_rounded,
-                            color: Color(0xFF00FF88), size: 18);
-                      } else if (trendScore2 < trendScore1) {
-                        trendWidget = const Icon(Icons.arrow_downward_rounded,
-                            color: Colors.redAccent, size: 18);
-                      } else {
-                        trendWidget = const Icon(Icons.remove_rounded,
-                            color: Colors.white38, size: 18);
-                      }
+                    // ── Delta calculation ──────────────────────────
+                    final oldRank = prevRank[teamId];
+                    Widget deltaWidget;
+                    if (oldRank == null || oldRank == rank) {
+                      deltaWidget = const Text(
+                        '—',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white38,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      );
+                    } else if (rank < oldRank) {
+                      // Moved up (lower rank number = better position)
+                      deltaWidget = Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.arrow_drop_up_rounded,
+                            color: Color(0xFF00FF88),
+                            size: 24,
+                          ),
+                          Text(
+                            '+${oldRank - rank}',
+                            style: const TextStyle(
+                              color: Color(0xFF00FF88),
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              height: 0.8,
+                            ),
+                          ),
+                        ],
+                      );
                     } else {
-                      trendWidget = const Text('—',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white24, fontSize: 13));
-                    }
-
-                    // ── Champion banner for rank 1 ───────────────────
-                    if (rank == 1) {
-                      return _ChampionBanner(
-                        teamId: teamId,
-                        teamName: teamName,
-                        rounds: rounds,
-                        total: total,
-                        maxRounds: maxRounds,
-                        roundMaxScore: roundMaxScore,
-                        trendWidget: trendWidget,
-                        categoryName: categoryName,
+                      // Moved down
+                      deltaWidget = Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.arrow_drop_down_rounded,
+                            color: Color(0xFFFF6B6B),
+                            size: 24,
+                          ),
+                          Text(
+                            '-${rank - oldRank}',
+                            style: const TextStyle(
+                              color: Color(0xFFFF6B6B),
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              height: 0.8,
+                            ),
+                          ),
+                        ],
                       );
                     }
 
@@ -524,8 +540,14 @@ class _StandingsState extends State<Standings>
                                 begin: Alignment.centerLeft,
                                 end: Alignment.centerRight,
                                 colors: [
-                                  rowGlow!.withOpacity(rank == 2 ? 0.08 : 0.06),
-                                  (isEven ? const Color(0xFF1E0E5A) : const Color(0xFF160A42)),
+                                  rowGlow!.withOpacity(rank == 1
+                                      ? 0.13
+                                      : rank == 2
+                                          ? 0.08
+                                          : 0.06),
+                                  (isEven
+                                      ? const Color(0xFF1E0E5A)
+                                      : const Color(0xFF160A42)),
                                 ],
                               )
                             : null,
@@ -537,54 +559,81 @@ class _StandingsState extends State<Standings>
                         border: isTop3
                             ? Border(
                                 left: BorderSide(
-                                    color: rowGlow!.withOpacity(0.7), width: 3))
+                                    color: rowGlow!.withOpacity(0.7),
+                                    width: 3))
                             : null,
                       ),
                       padding: const EdgeInsets.symmetric(
-                          vertical: 14, horizontal: 24),
+                          vertical: 12, horizontal: 20),
                       child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
-                          // Rank badge
-                          Expanded(
-                            flex: 1,
-                            child: isTop3
-                                ? Container(
-                                    width: 32,
-                                    height: 32,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      gradient: RadialGradient(colors: [
-                                        rankCol.withOpacity(0.35),
-                                        rankCol.withOpacity(0.08),
-                                      ]),
-                                      border: Border.all(
-                                          color: rankCol.withOpacity(0.8),
-                                          width: 1.5),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: rankCol.withOpacity(0.4),
-                                          blurRadius: 8,
-                                          spreadRadius: 1,
+                          // ── Rank ──────────────────────────────────
+                          SizedBox(
+                            width: 48,
+                            child: Center(
+                              child: isTop3
+                                  ? Container(
+                                      width: 38,
+                                      height: 38,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        gradient: RadialGradient(colors: [
+                                          rankCol.withOpacity(0.35),
+                                          rankCol.withOpacity(0.08),
+                                        ]),
+                                        border: Border.all(
+                                            color: rankCol.withOpacity(0.8),
+                                            width: 1.5),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: rankCol.withOpacity(0.4),
+                                            blurRadius: 8,
+                                            spreadRadius: 1,
+                                          ),
+                                        ],
+                                      ),
+                                      child: Center(
+                                        child: Text(
+                                          rank == 1
+                                              ? '🥇'
+                                              : rank == 2
+                                                  ? '🥈'
+                                                  : '🥉',
+                                          style: const TextStyle(fontSize: 16),
                                         ),
-                                      ],
-                                    ),
-                                    child: Center(
-                                      child: Text(
-                                        rank == 2 ? '🥈' : '🥉',
-                                        style: const TextStyle(fontSize: 15),
+                                      ),
+                                    )
+                                  : Container(
+                                      width: 38,
+                                      height: 38,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: Colors.white.withOpacity(0.06),
+                                        border: Border.all(
+                                            color: Colors.white30, width: 1.5),
+                                      ),
+                                      child: Center(
+                                        child: Text(
+                                          '$rank',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w900,
+                                            fontSize: 16,
+                                          ),
+                                        ),
                                       ),
                                     ),
-                                  )
-                                : Text(
-                                    '$rank',
-                                    style: TextStyle(
-                                      color: rankCol,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 16,
-                                    ),
-                                  ),
+                            ),
                           ),
-                          // Team ID
+
+                          // ── Delta arrow ───────────────────────────
+                          SizedBox(
+                            width: 32,
+                            child: Center(child: deltaWidget),
+                          ),
+
+                          // ── Team ID ───────────────────────────────
                           Expanded(
                             flex: 2,
                             child: Text(
@@ -596,127 +645,205 @@ class _StandingsState extends State<Standings>
                               ),
                             ),
                           ),
-                          // Team Name
+
+                          // ── Team Name ─────────────────────────────
                           Expanded(
                             flex: 3,
                             child: Text(
                               teamName.toUpperCase(),
                               style: TextStyle(
                                 color: isTop3 ? Colors.white : Colors.white70,
-                                fontWeight: isTop3 ? FontWeight.w900 : FontWeight.bold,
+                                fontWeight: isTop3
+                                    ? FontWeight.w900
+                                    : FontWeight.bold,
                                 fontSize: isTop3 ? 15 : 14,
                                 shadows: isTop3
-                                    ? [Shadow(color: rowGlow!.withOpacity(0.4), blurRadius: 6)]
+                                    ? [
+                                        Shadow(
+                                          color: rowGlow!.withOpacity(0.4),
+                                          blurRadius: 6,
+                                        )
+                                      ]
                                     : null,
                               ),
                             ),
                           ),
-                          // Round scores with progress bars
+
+                          // ── Per-run columns ───────────────────────
                           ...List.generate(maxRounds, (i) {
-                            final roundNum  = i + 1;
-                            final roundData = rounds[roundNum];
-                            final score     = roundData?['score'] as int? ?? 0;
-                            final maxScore  = roundMaxScore[roundNum] ?? 1;
-                            final pct       = maxScore > 0 ? score / maxScore : 0.0;
-                            final barColor  = isTop3 ? rowGlow! : const Color(0xFF00CFFF);
+                            final roundData = rounds[i + 1];
+                            final score    = roundData?['score'] as int?;
+                            final duration = roundData?['duration'] as String?;
+                            final hasData  = roundData != null;
+                            final fmtDur   = _formatDuration(duration ?? '');
+
+                            if (isTimer) {
+                              // Timer categories: show only the lap time in MM:SS
+                              return Expanded(
+                                flex: 3,
+                                child: Text(
+                                  hasData && fmtDur != '—' ? fmtDur : '—',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: hasData && fmtDur != '—'
+                                        ? const Color(0xFF00CFFF)
+                                        : Colors.white30,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16,
+                                    letterSpacing: 0.5,
+                                  ),
+                                ),
+                              );
+                            }
+
+                            // Score-based categories: score on top + time below
                             return Expanded(
-                              flex: 2,
+                              flex: 3,
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.center,
                                 children: [
                                   Text(
-                                    '$score',
+                                    hasData && score != null ? '$score' : '—',
                                     textAlign: TextAlign.center,
                                     style: TextStyle(
-                                      color: isTop3 ? rowGlow! : Colors.white,
+                                      color: hasData && score != null
+                                          ? Colors.white
+                                          : Colors.white30,
                                       fontWeight: FontWeight.bold,
-                                      fontSize: 16,
+                                      fontSize: 18,
                                     ),
                                   ),
-                                  const SizedBox(height: 4),
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 6),
-                                    child: Stack(children: [
-                                      Container(
-                                        height: 4,
-                                        decoration: BoxDecoration(
-                                          color: Colors.white.withOpacity(0.07),
-                                          borderRadius: BorderRadius.circular(2),
-                                        ),
-                                      ),
-                                      FractionallySizedBox(
-                                        widthFactor: pct.clamp(0.0, 1.0),
-                                        child: Container(
-                                          height: 4,
-                                          decoration: BoxDecoration(
-                                            gradient: LinearGradient(colors: [
-                                              barColor,
-                                              barColor.withOpacity(0.4),
-                                            ]),
-                                            borderRadius: BorderRadius.circular(2),
-                                            boxShadow: [BoxShadow(
-                                              color: barColor.withOpacity(0.5),
-                                              blurRadius: 4,
-                                            )],
-                                          ),
-                                        ),
-                                      ),
-                                    ]),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    hasData && fmtDur != '—' ? fmtDur : '',
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: Color(0xFF00CFFF),
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w500,
+                                      letterSpacing: 0.5,
+                                    ),
                                   ),
                                 ],
                               ),
                             );
                           }),
-                          // Trend
-                          Expanded(
-                            flex: 1,
-                            child: Center(child: trendWidget),
-                          ),
-                          // Final score
+
+                          // ── Last column: best time (timer) OR total score + best time ──
                           Expanded(
                             flex: 2,
-                            child: Column(
-                              children: [
-                                Container(
-                                  padding: isTop3
-                                      ? const EdgeInsets.symmetric(horizontal: 10, vertical: 3)
-                                      : EdgeInsets.zero,
-                                  decoration: isTop3
-                                      ? BoxDecoration(
-                                          borderRadius: BorderRadius.circular(6),
-                                          color: rowGlow!.withOpacity(0.15),
-                                          border: Border.all(
-                                              color: rowGlow.withOpacity(0.4),
-                                              width: 1),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: rowGlow.withOpacity(0.25),
-                                              blurRadius: 6,
+                            child: isTimer
+                                // Timer category: show best time prominently
+                                ? Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment: CrossAxisAlignment.center,
+                                    children: [
+                                      Container(
+                                        padding: isTop3
+                                            ? const EdgeInsets.symmetric(
+                                                horizontal: 10, vertical: 3)
+                                            : EdgeInsets.zero,
+                                        decoration: isTop3
+                                            ? BoxDecoration(
+                                                borderRadius: BorderRadius.circular(6),
+                                                color: rowGlow!.withOpacity(0.15),
+                                                border: Border.all(
+                                                    color: rowGlow.withOpacity(0.4),
+                                                    width: 1),
+                                                boxShadow: [
+                                                  BoxShadow(
+                                                    color: rowGlow.withOpacity(0.25),
+                                                    blurRadius: 6,
+                                                  ),
+                                                ],
+                                              )
+                                            : null,
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          mainAxisAlignment: MainAxisAlignment.center,
+                                          children: [
+                                            Icon(
+                                              Icons.timer_rounded,
+                                              color: isTop3 ? rowGlow! : const Color(0xFF00FF88),
+                                              size: 13,
+                                            ),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              row['bestTimeStr'] as String? ?? '—',
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(
+                                                color: isTop3 ? rowGlow! : const Color(0xFF00FF88),
+                                                fontWeight: FontWeight.w900,
+                                                fontSize: isTop3 ? 18 : 16,
+                                                letterSpacing: 0.5,
+                                              ),
                                             ),
                                           ],
-                                        )
-                                      : null,
-                                  child: Text(
-                                    '$total',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      color: isTop3 ? rowGlow! : Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: isTop3 ? 20 : 18,
-                                    ),
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                // Score-based category: total score + best time below
+                                : Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment: CrossAxisAlignment.center,
+                                    children: [
+                                      Container(
+                                        padding: isTop3
+                                            ? const EdgeInsets.symmetric(
+                                                horizontal: 10, vertical: 3)
+                                            : EdgeInsets.zero,
+                                        decoration: isTop3
+                                            ? BoxDecoration(
+                                                borderRadius: BorderRadius.circular(6),
+                                                color: rowGlow!.withOpacity(0.15),
+                                                border: Border.all(
+                                                    color: rowGlow.withOpacity(0.4),
+                                                    width: 1),
+                                                boxShadow: [
+                                                  BoxShadow(
+                                                    color: rowGlow.withOpacity(0.25),
+                                                    blurRadius: 6,
+                                                  ),
+                                                ],
+                                              )
+                                            : null,
+                                        child: Text(
+                                          '$total',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            color: isTop3 ? rowGlow! : Colors.white,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: isTop3 ? 20 : 18,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 5),
+                                      Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        children: [
+                                          const Icon(
+                                            Icons.timer_outlined,
+                                            color: Color(0xFF00FF88),
+                                            size: 11,
+                                          ),
+                                          const SizedBox(width: 3),
+                                          Text(
+                                            _bestDuration(rounds),
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(
+                                              color: Color(0xFF00FF88),
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w600,
+                                              letterSpacing: 0.4,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
                                   ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  _bestDuration(rounds),
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    color: Colors.white60,
-                                    fontSize: 11,
-                                  ),
-                                ),
-                              ],
-                            ),
                           ),
                         ],
                       ),
@@ -855,6 +982,11 @@ class _StandingsState extends State<Standings>
           Row(children: [
             _buildLiveIndicator(),
             IconButton(
+              tooltip: 'Accomplishment Report',
+              icon: const Icon(Icons.emoji_events_rounded, color: Color(0xFFFFD700)),
+              onPressed: _showAccomplishmentReport,
+            ),
+            IconButton(
               tooltip: 'Back to Homepage',
               icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF00CFFF)),
               onPressed: widget.onBack,
@@ -947,7 +1079,7 @@ class _StandingsState extends State<Standings>
             textAlign: right ? TextAlign.right : TextAlign.center,
             style: TextStyle(
                 color: color ?? Colors.white54,
-                fontSize: 11, fontWeight: FontWeight.w900,
+                fontSize: 14, fontWeight: FontWeight.w900,
                 letterSpacing: 0.5)));
 
     return Column(children: [
@@ -957,12 +1089,12 @@ class _StandingsState extends State<Standings>
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
         child: Row(children: [
           // #
-          const SizedBox(width: 28,
+          const SizedBox(width: 36,
               child: Text('#', style: TextStyle(color: Colors.white54,
-                  fontSize: 11, fontWeight: FontWeight.w900))),
+                  fontSize: 14, fontWeight: FontWeight.w900))),
           // Team
           const Expanded(flex: 5, child: Text('TEAM',
-              style: TextStyle(color: Colors.white54, fontSize: 11,
+              style: TextStyle(color: Colors.white54, fontSize: 14,
                   fontWeight: FontWeight.w900, letterSpacing: 0.5))),
           hdr('M.',  flex: 1),
           hdr('W',   flex: 1, color: const Color(0xFF00FF88)),
@@ -1006,8 +1138,8 @@ class _StandingsState extends State<Standings>
                   textAlign: TextAlign.center,
                   style: TextStyle(
                       color: color ?? Colors.white70,
-                      fontSize: 13,
-                      fontWeight: bold ? FontWeight.w900 : FontWeight.w500)));
+                      fontSize: 16,
+                      fontWeight: bold ? FontWeight.w900 : FontWeight.w600)));
 
           return Container(
             decoration: BoxDecoration(
@@ -1029,12 +1161,12 @@ class _StandingsState extends State<Standings>
                   : null,
             ),
             padding: const EdgeInsets.symmetric(
-                horizontal: 24, vertical: 11),
+                horizontal: 24, vertical: 14),
             child: Row(children: [
               // Rank
-              SizedBox(width: 28, child: isTop3
+              SizedBox(width: 36, child: isTop3
                   ? Container(
-                      width: 26, height: 26,
+                      width: 32, height: 32,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         gradient: RadialGradient(colors: [
@@ -1046,16 +1178,23 @@ class _StandingsState extends State<Standings>
                       ),
                       child: Center(child: Text(
                           rank == 1 ? '🥇' : rank == 2 ? '🥈' : '🥉',
-                          style: const TextStyle(fontSize: 13))),
+                          style: const TextStyle(fontSize: 16))),
                     )
-                  : Text('$rank',
-                      style: TextStyle(color: rankColor,
-                          fontSize: 14, fontWeight: FontWeight.w900))),
+                  : Container(
+                      width: 36, height: 36,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white.withOpacity(0.05),
+                        border: Border.all(color: Colors.white24, width: 1),
+                      ),
+                      child: Center(child: Text('$rank',
+                          style: const TextStyle(color: Colors.white70,
+                              fontSize: 18, fontWeight: FontWeight.w900))))),
 
               // Group badge + Team name
               Expanded(flex: 5, child: Row(children: [
                 Container(
-                  width: 20, height: 20,
+                  width: 24, height: 24,
                   margin: const EdgeInsets.only(right: 8),
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
@@ -1064,12 +1203,14 @@ class _StandingsState extends State<Standings>
                   ),
                   child: Center(child: Text(group,
                       style: TextStyle(color: gc,
-                          fontSize: 8, fontWeight: FontWeight.w900))),
+                          fontSize: 10, fontWeight: FontWeight.w900))),
                 ),
                 Expanded(child: Text(name,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Colors.white,
-                        fontSize: 13, fontWeight: FontWeight.w700))),
+                    style: TextStyle(
+                        color: isTop3 ? Colors.white : Colors.white70,
+                        fontSize: isTop3 ? 15 : 14,
+                        fontWeight: isTop3 ? FontWeight.w900 : FontWeight.w700))),
               ])),
 
               // M. (matches played)
@@ -1092,7 +1233,7 @@ class _StandingsState extends State<Standings>
               Expanded(flex: 2, child: Text('$gf:$ga',
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white70,
-                      fontSize: 12, fontWeight: FontWeight.w600,
+                      fontSize: 16, fontWeight: FontWeight.w600,
                       letterSpacing: 0.5))),
 
               // Dif
@@ -1100,7 +1241,7 @@ class _StandingsState extends State<Standings>
 
               // Pt.
               Expanded(flex: 1, child: Container(
-                height: 26,
+                height: 30,
                 decoration: BoxDecoration(
                   color: pts > 0
                       ? const Color(0xFFFFD700).withOpacity(0.12)
@@ -1115,7 +1256,7 @@ class _StandingsState extends State<Standings>
                         color: pts > 0
                             ? const Color(0xFFFFD700)
                             : Colors.white24,
-                        fontSize: 13, fontWeight: FontWeight.w900))),
+                        fontSize: 16, fontWeight: FontWeight.w900))),
               )),
             ]),
           );
@@ -1229,9 +1370,9 @@ class _StandingsState extends State<Standings>
 
     // FIFA-style column header helper
     Widget col(String t, {Color color = Colors.white38}) =>
-        SizedBox(width: 26, child: Text(t,
+        SizedBox(width: 32, child: Text(t,
             textAlign: TextAlign.center,
-            style: TextStyle(color: color, fontSize: 9,
+            style: TextStyle(color: color, fontSize: 11,
                 fontWeight: FontWeight.bold, letterSpacing: 0.5)));
 
     return Container(
@@ -1252,32 +1393,32 @@ class _StandingsState extends State<Standings>
           ),
           child: Row(children: [
             Container(
-              width: 28, height: 28,
+              width: 32, height: 32,
               decoration: BoxDecoration(shape: BoxShape.circle,
                   color: groupCol.withOpacity(0.2),
                   border: Border.all(color: groupCol, width: 1.5)),
               child: Center(child: Text(group.label,
                   style: TextStyle(color: groupCol,
-                      fontWeight: FontWeight.w900, fontSize: 13))),
+                      fontWeight: FontWeight.w900, fontSize: 15))),
             ),
             const SizedBox(width: 8),
             Text('GROUP ${group.label}',
-                style: const TextStyle(color: Colors.white, fontSize: 12,
+                style: const TextStyle(color: Colors.white, fontSize: 14,
                     fontWeight: FontWeight.w900, letterSpacing: 1.5)),
           ]),
         ),
         // ── Column headers: P W D L GD PTS ─────────────────────────
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
             color: Colors.white.withOpacity(0.04),
             border: Border(bottom: BorderSide(color: groupCol.withOpacity(0.2))),
           ),
           child: Row(children: [
-            const SizedBox(width: 22),
+            const SizedBox(width: 28),
             const SizedBox(width: 6),
             const Expanded(child: Text('TEAM',
-                style: TextStyle(color: Colors.white38, fontSize: 9,
+                style: TextStyle(color: Colors.white38, fontSize: 11,
                     fontWeight: FontWeight.bold, letterSpacing: 0.8))),
             col('P'),
             col('W',  color: const Color(0xFF00FF88)),
@@ -1308,7 +1449,7 @@ class _StandingsState extends State<Standings>
                   : Colors.white38;
 
           return Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
             decoration: BoxDecoration(
               gradient: advances
                   ? LinearGradient(
@@ -1331,7 +1472,7 @@ class _StandingsState extends State<Standings>
             child: Row(children: [
               // Rank badge
               Container(
-                width: 22, height: 22,
+                width: 28, height: 28,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   gradient: advances
@@ -1351,12 +1492,12 @@ class _StandingsState extends State<Standings>
                 ),
                 child: Center(
                   child: advances && isFirst
-                      ? const Text('★', style: TextStyle(color: Color(0xFFFFD700), fontSize: 9))
+                      ? const Text('★', style: TextStyle(color: Color(0xFFFFD700), fontSize: 11))
                       : advances
-                          ? const Icon(Icons.arrow_upward_rounded, size: 10, color: Color(0xFF00FF88))
+                          ? const Icon(Icons.arrow_upward_rounded, size: 12, color: Color(0xFF00FF88))
                           : Text('$rank',
-                              style: TextStyle(color: Colors.white38,
-                                  fontSize: 9, fontWeight: FontWeight.bold)),
+                              style: TextStyle(color: Colors.white54,
+                                  fontSize: 14, fontWeight: FontWeight.w900)),
                 ),
               ),
               const SizedBox(width: 6),
@@ -1365,49 +1506,49 @@ class _StandingsState extends State<Standings>
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: textCol,
-                    fontSize: advances ? 12 : 11,
+                    fontSize: advances ? 14 : 13,
                     fontWeight: advances ? FontWeight.w900 : FontWeight.w400,
                     shadows: advances && isFirst
                         ? [const Shadow(color: Color(0x66FFD700), blurRadius: 8)]
                         : null,
                   ))),
               // P (played)
-              SizedBox(width: 26, child: Text('${team.matchesPlayed}',
+              SizedBox(width: 32, child: Text('${team.matchesPlayed}',
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white54,
-                      fontSize: 11, fontWeight: FontWeight.bold))),
+                  style: const TextStyle(color: Colors.white54,
+                      fontSize: 13, fontWeight: FontWeight.bold))),
               // W
-              SizedBox(width: 26, child: Text('${team.wins}',
+              SizedBox(width: 32, child: Text('${team.wins}',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                       color: team.wins > 0
                           ? const Color(0xFF00FF88)
                           : Colors.white24,
-                      fontSize: 11, fontWeight: FontWeight.bold))),
+                      fontSize: 13, fontWeight: FontWeight.bold))),
               // D
-              SizedBox(width: 26, child: Text('${team.draws}',
+              SizedBox(width: 32, child: Text('${team.draws}',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                       color: team.draws > 0
                           ? Colors.orange
                           : Colors.white24,
-                      fontSize: 11, fontWeight: FontWeight.bold))),
+                      fontSize: 13, fontWeight: FontWeight.bold))),
               // L
-              SizedBox(width: 26, child: Text('${team.losses}',
+              SizedBox(width: 32, child: Text('${team.losses}',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                       color: team.losses > 0
                           ? Colors.redAccent
                           : Colors.white24,
-                      fontSize: 11, fontWeight: FontWeight.bold))),
+                      fontSize: 13, fontWeight: FontWeight.bold))),
               // GD
-              SizedBox(width: 26, child: Text(gdStr,
+              SizedBox(width: 32, child: Text(gdStr,
                   textAlign: TextAlign.center,
                   style: TextStyle(color: gdColor,
-                      fontSize: 11, fontWeight: FontWeight.bold))),
+                      fontSize: 13, fontWeight: FontWeight.bold))),
               // PTS
-              SizedBox(width: 26, child: Container(
-                height: 22,
+              SizedBox(width: 32, child: Container(
+                height: 26,
                 decoration: BoxDecoration(
                   color: team.points > 0
                       ? const Color(0xFFFFD700).withOpacity(0.12)
@@ -1419,7 +1560,7 @@ class _StandingsState extends State<Standings>
                         color: team.points > 0
                             ? const Color(0xFFFFD700)
                             : Colors.white24,
-                        fontSize: 11, fontWeight: FontWeight.w900))),
+                        fontSize: 13, fontWeight: FontWeight.w900))),
               )),
             ]),
           );
@@ -1499,15 +1640,44 @@ class _StandingsState extends State<Standings>
     }
   }
 
+  /// Returns true for categories that rank by fastest time (navigation, line tracing).
+  bool _isTimerCategory(String categoryName) {
+    final n = categoryName.toLowerCase();
+    return n.contains('navigation') || n.contains('line tracing') || n.contains('line-tracing');
+  }
+
+  /// Parses "MM:SS" → total seconds.
+  /// Returns 999999 for missing / zero times so those teams sort to the bottom.
+  int _parseDurationSeconds(String dur) {
+    final parts = dur.split(':');
+    if (parts.length < 2) return 999999;
+    final m = int.tryParse(parts[0]) ?? 0;
+    final s = int.tryParse(parts[1]) ?? 0;
+    final total = m * 60 + s;
+    return total == 0 ? 999999 : total;
+  }
+
+  /// Ensures duration is displayed as MM:SS (zero-padded).
+  String _formatDuration(String dur) {
+    if (dur.isEmpty || dur == '00:00') return '—';
+    final parts = dur.split(':');
+    if (parts.length < 2) return dur;
+    final m = (int.tryParse(parts[0]) ?? 0).toString().padLeft(2, '0');
+    final s = (int.tryParse(parts[1]) ?? 0).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  /// Returns the best (fastest, i.e. shortest) duration string across all rounds.
   String _bestDuration(Map<int, Map<String, dynamic>> rounds) {
-    if (rounds.isEmpty) return '00:00';
-    int    bestScore    = -1;
-    String bestDuration = '00:00';
+    if (rounds.isEmpty) return '—';
+    int    bestSecs     = 999999;
+    String bestDuration = '—';
     for (final r in rounds.values) {
-      final s = r['score'] as int? ?? 0;
-      if (s > bestScore) {
-        bestScore    = s;
-        bestDuration = r['duration'] as String? ?? '00:00';
+      final dur  = r['duration'] as String? ?? '';
+      final secs = _parseDurationSeconds(dur);
+      if (secs < bestSecs) {
+        bestSecs     = secs;
+        bestDuration = _formatDuration(dur);
       }
     }
     return bestDuration;
@@ -1582,6 +1752,320 @@ class _StandingsState extends State<Standings>
         ],
       ),
     );
+  }
+
+  // ── Accomplishment Report ────────────────────────────────────────────────
+  void _showAccomplishmentReport() {
+    showDialog(
+      context: context,
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(16),
+        child: Container(
+          width: double.infinity,
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.85,
+          ),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF0C0628)],
+            ),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.4), width: 1.5),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFFFFD700).withOpacity(0.15),
+                blurRadius: 30,
+                spreadRadius: 2,
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // ── Header ────────────────────────────────────────────
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(colors: [
+                    const Color(0xFFFFD700).withOpacity(0.15),
+                    Colors.transparent,
+                  ]),
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(15)),
+                  border: Border(
+                    bottom: BorderSide(color: const Color(0xFFFFD700).withOpacity(0.25)),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.emoji_events_rounded,
+                        color: Color(0xFFFFD700), size: 26),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'ACCOMPLISHMENT REPORT',
+                        style: TextStyle(
+                          color: Color(0xFFFFD700),
+                          fontSize: 18,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 1.5,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close_rounded, color: Colors.white54),
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  ],
+                ),
+              ),
+              // ── Body ──────────────────────────────────────────────
+              Flexible(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: _categories.map((cat) {
+                      final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
+                      final catName = (cat['category_type'] ?? '').toString().toUpperCase();
+                      final isSoccer = catName.toLowerCase().contains('soccer');
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 20),
+                        child: _buildReportSection(catId, catName, isSoccer),
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildReportSection(int catId, String catName, bool isSoccer) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Section title
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF5C2ECC).withOpacity(0.35),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
+            ),
+            child: Row(children: [
+              Icon(isSoccer ? Icons.sports_soccer : Icons.sports_esports,
+                  color: const Color(0xFF00CFFF), size: 16),
+              const SizedBox(width: 8),
+              Text(catName,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1,
+                  )),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: isSoccer
+                ? _buildSoccerReportContent()
+                : _buildRegularReportContent(catId),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRegularReportContent(int catId) {
+    final rows = _standingsByCategory[catId] ?? [];
+    if (rows.isEmpty) {
+      return const Text('No results yet.',
+          style: TextStyle(color: Colors.white38, fontSize: 13));
+    }
+
+    // Detect if this category is timer-based
+    final cat = _categories.firstWhere(
+      (c) => (int.tryParse(c['category_id'].toString()) ?? 0) == catId,
+      orElse: () => {},
+    );
+    final catName  = (cat['category_type'] ?? '').toString();
+    final isTimer  = _isTimerCategory(catName);
+
+    final top = rows.take(3).toList();
+    final medals = ['🥇', '🥈', '🥉'];
+    final medalColors = [
+      const Color(0xFFFFD700),
+      const Color(0xFFC0C0C0),
+      const Color(0xFFCD7F32),
+    ];
+    return Column(
+      children: [
+        ...List.generate(top.length, (i) {
+          final t   = top[i];
+          final col = medalColors[i];
+          return Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: col.withOpacity(0.06),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: col.withOpacity(0.25)),
+            ),
+            child: Row(children: [
+              Text(medals[i], style: const TextStyle(fontSize: 20)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text((t['team_name'] as String).toUpperCase(),
+                        style: TextStyle(
+                          color: col,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900,
+                        )),
+                    Text('Team ID: C${(t['team_id'] as int).toString().padLeft(3, '0')}R',
+                        style: const TextStyle(color: Colors.white38, fontSize: 11)),
+                  ],
+                ),
+              ),
+              if (isTimer)
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.timer_rounded, color: col, size: 14),
+                  const SizedBox(width: 4),
+                  Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                    Text(
+                      t['bestTimeStr'] as String? ?? '—',
+                      style: TextStyle(
+                        color: col,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    const Text('best time',
+                        style: TextStyle(color: Colors.white38, fontSize: 10)),
+                  ]),
+                ])
+              else
+                Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                  Text('${t['totalScore'] as int}',
+                      style: TextStyle(
+                        color: col,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w900,
+                      )),
+                  const Text('pts',
+                      style: TextStyle(color: Colors.white38, fontSize: 10)),
+                ]),
+            ]),
+          );
+        }),
+        if (rows.length > 3) ...[
+          const SizedBox(height: 4),
+          Text('+${rows.length - 3} more team(s) participated',
+              style: const TextStyle(color: Colors.white38, fontSize: 12)),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildSoccerReportContent() {
+    if (_soccerGroups.isEmpty) {
+      return const Text('No results yet.',
+          style: TextStyle(color: Colors.white38, fontSize: 13));
+    }
+
+    // Overall sorted list
+    final all = <Map<String, dynamic>>[];
+    for (final g in _soccerGroups) {
+      for (final t in g.teams) {
+        all.add({
+          'name': t.teamName,
+          'group': g.label,
+          'pts': t.points,
+          'w': t.wins,
+          'd': t.draws,
+          'l': t.losses,
+          'gf': t.goalsFor,
+          'ga': t.goalsAgainst,
+          'gd': t.goalDiff,
+          'gc': _groupColor(g.label),
+        });
+      }
+    }
+    all.sort((a, b) {
+      if (b['pts'] != a['pts']) return (b['pts'] as int).compareTo(a['pts'] as int);
+      if (b['gd']  != a['gd'])  return (b['gd']  as int).compareTo(a['gd']  as int);
+      return (b['gf'] as int).compareTo(a['gf'] as int);
+    });
+
+    final medals = ['🥇', '🥈', '🥉'];
+    final medalColors = [
+      const Color(0xFFFFD700),
+      const Color(0xFFC0C0C0),
+      const Color(0xFFCD7F32),
+    ];
+    final top = all.take(3).toList();
+
+    return Column(children: [
+      ...List.generate(top.length, (i) {
+        final t = top[i];
+        final col = medalColors[i];
+        final gc = t['gc'] as Color;
+        return Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: col.withOpacity(0.06),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: col.withOpacity(0.25)),
+          ),
+          child: Row(children: [
+            Text(medals[i], style: const TextStyle(fontSize: 20)),
+            const SizedBox(width: 8),
+            Container(
+              width: 22, height: 22,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: gc.withOpacity(0.15),
+                border: Border.all(color: gc.withOpacity(0.6)),
+              ),
+              child: Center(child: Text(t['group'] as String,
+                  style: TextStyle(color: gc, fontSize: 9, fontWeight: FontWeight.w900))),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text((t['name'] as String).toUpperCase(),
+                  style: TextStyle(
+                    color: col, fontSize: 15, fontWeight: FontWeight.w900)),
+            ),
+            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              Text('${t['pts']} pts',
+                  style: TextStyle(color: col, fontSize: 16, fontWeight: FontWeight.w900)),
+              Text('${t['w']}W ${t['d']}D ${t['l']}L  ${t['gf']}:${t['ga']}',
+                  style: const TextStyle(color: Colors.white38, fontSize: 10)),
+            ]),
+          ]),
+        );
+      }),
+      if (all.length > 3) ...[
+        const SizedBox(height: 4),
+        Text('+${all.length - 3} more team(s) participated',
+            style: const TextStyle(color: Colors.white38, fontSize: 12)),
+      ],
+    ]);
   }
 
   // ── Live indicator ────────────────────────────────────────────────────────
@@ -1680,314 +2164,6 @@ class _PulsingDotState extends State<_PulsingDot>
           color: Color(0xFF00FF88),
           shape: BoxShape.circle,
         ),
-      ),
-    );
-  }
-}
-
-// ── Animated crown widget ─────────────────────────────────────────────────────
-class _AnimatedCrown extends StatefulWidget {
-  const _AnimatedCrown();
-  @override
-  State<_AnimatedCrown> createState() => _AnimatedCrownState();
-}
-
-class _AnimatedCrownState extends State<_AnimatedCrown>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _ctrl;
-  late Animation<double> _scale;
-  late Animation<double> _glow;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1400),
-    )..repeat(reverse: true);
-    _scale = Tween<double>(begin: 0.92, end: 1.08).animate(
-        CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
-    _glow = Tween<double>(begin: 0.4, end: 1.0).animate(
-        CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _ctrl,
-      builder: (_, __) => Transform.scale(
-        scale: _scale.value,
-        child: Container(
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFFFFD700).withOpacity(_glow.value * 0.6),
-                blurRadius: 18,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-          child: const Text('👑', style: TextStyle(fontSize: 28)),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Champion banner for rank #1 ───────────────────────────────────────────────
-class _ChampionBanner extends StatelessWidget {
-  final dynamic teamId;
-  final String teamName;
-  final Map<int, Map<String, dynamic>> rounds;
-  final int total;
-  final int maxRounds;
-  final Map<int, int> roundMaxScore;
-  final Widget trendWidget;
-  final String categoryName;
-
-  const _ChampionBanner({
-    required this.teamId,
-    required this.teamName,
-    required this.rounds,
-    required this.total,
-    required this.maxRounds,
-    required this.roundMaxScore,
-    required this.trendWidget,
-    required this.categoryName,
-  });
-
-  String _bestDuration() {
-    if (rounds.isEmpty) return '00:00';
-    int bestScore = -1;
-    String bestDur = '00:00';
-    for (final r in rounds.values) {
-      final s = r['score'] as int? ?? 0;
-      if (s > bestScore) {
-        bestScore = s;
-        bestDur   = r['duration'] as String? ?? '00:00';
-      }
-    }
-    return bestDur;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFF2A1A00),
-            Color(0xFF1E0E5A),
-            Color(0xFF1A0A30),
-          ],
-        ),
-        border: Border.all(
-          color: const Color(0xFFFFD700).withOpacity(0.55),
-          width: 1.5,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFFFFD700).withOpacity(0.18),
-            blurRadius: 20,
-            spreadRadius: 1,
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // ── Champion label bar ───────────────────────────────────
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 5),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  const Color(0xFFFFD700).withOpacity(0.25),
-                  const Color(0xFFFFD700).withOpacity(0.05),
-                  const Color(0xFFFFD700).withOpacity(0.25),
-                ],
-              ),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Text('✦', style: TextStyle(color: Color(0xFFFFD700), fontSize: 10)),
-                const SizedBox(width: 8),
-                Text(
-                  'CURRENT LEADER',
-                  style: TextStyle(
-                    color: const Color(0xFFFFD700).withOpacity(0.9),
-                    fontSize: 10,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 3,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                const Text('✦', style: TextStyle(color: Color(0xFFFFD700), fontSize: 10)),
-              ],
-            ),
-          ),
-          // ── Main row ─────────────────────────────────────────────
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
-            child: Row(
-              children: [
-                // Animated crown
-                const SizedBox(
-                  width: 44,
-                  child: Center(child: _AnimatedCrown()),
-                ),
-                const SizedBox(width: 8),
-                // Team ID + Name
-                Expanded(
-                  flex: 5,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'C${teamId.toString().padLeft(3, '0')}R',
-                        style: TextStyle(
-                          color: const Color(0xFFFFD700).withOpacity(0.6),
-                          fontWeight: FontWeight.bold,
-                          fontSize: 11,
-                          letterSpacing: 1,
-                        ),
-                      ),
-                      Text(
-                        teamName.toUpperCase(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w900,
-                          fontSize: 18,
-                          letterSpacing: 1,
-                          shadows: [
-                            Shadow(color: Color(0x88FFD700), blurRadius: 10),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                // Round scores with progress bars
-                ...List.generate(maxRounds, (i) {
-                  final roundNum  = i + 1;
-                  final roundData = rounds[roundNum];
-                  final score     = roundData?['score'] as int? ?? 0;
-                  final maxScore  = roundMaxScore[roundNum] ?? 1;
-                  final pct       = maxScore > 0 ? score / maxScore : 0.0;
-                  return Expanded(
-                    flex: 2,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '$score',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Color(0xFFFFD700),
-                            fontWeight: FontWeight.w900,
-                            fontSize: 18,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                          child: Stack(children: [
-                            Container(
-                              height: 4,
-                              decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.07),
-                                borderRadius: BorderRadius.circular(2),
-                              ),
-                            ),
-                            FractionallySizedBox(
-                              widthFactor: pct.clamp(0.0, 1.0),
-                              child: Container(
-                                height: 4,
-                                decoration: BoxDecoration(
-                                  gradient: const LinearGradient(colors: [
-                                    Color(0xFFFFD700),
-                                    Color(0xFFFF9F43),
-                                  ]),
-                                  borderRadius: BorderRadius.circular(2),
-                                  boxShadow: [BoxShadow(
-                                    color: const Color(0xFFFFD700).withOpacity(0.6),
-                                    blurRadius: 5,
-                                  )],
-                                ),
-                              ),
-                            ),
-                          ]),
-                        ),
-                      ],
-                    ),
-                  );
-                }),
-                // Trend
-                Expanded(
-                  flex: 1,
-                  child: Center(child: trendWidget),
-                ),
-                // Final score
-                Expanded(
-                  flex: 2,
-                  child: Column(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(8),
-                          gradient: LinearGradient(colors: [
-                            const Color(0xFFFFD700).withOpacity(0.25),
-                            const Color(0xFFFFD700).withOpacity(0.08),
-                          ]),
-                          border: Border.all(
-                              color: const Color(0xFFFFD700).withOpacity(0.5),
-                              width: 1.5),
-                          boxShadow: [
-                            BoxShadow(
-                              color: const Color(0xFFFFD700).withOpacity(0.3),
-                              blurRadius: 10,
-                            ),
-                          ],
-                        ),
-                        child: Text(
-                          '$total',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Color(0xFFFFD700),
-                            fontWeight: FontWeight.w900,
-                            fontSize: 22,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        _bestDuration(),
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.white60,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
