@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'db_helper.dart';
 import 'landing_page.dart';
+import 'splash_screen.dart';
 import 'step1_school.dart';
 import 'step2_mentor.dart';
 import 'step3_team.dart';
@@ -15,15 +16,6 @@ import 'category_manager.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  try {
-    await DBHelper.getConnection();
-    print("✅ Connected to database!");
-    await DBHelper.runMigrations();
-  } catch (e) {
-    print("❌ Connection failed: $e");
-  }
-
   runApp(const MyApp());
 }
 
@@ -39,7 +31,7 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF3D1A8C)),
         useMaterial3: true,
       ),
-      home: const LandingPage(),
+      home: const SplashScreen(),
     );
   }
 }

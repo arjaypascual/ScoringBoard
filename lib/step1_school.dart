@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'db_helper.dart';
 
 class Step1School extends StatefulWidget {
@@ -43,18 +44,65 @@ class _Step1SchoolState extends State<Step1School> {
     'BARMM - Bangsamoro',
   ];
 
+  // ── Validation helpers ────────────────────────────────────────────────────
+
+  /// Validates school name: required, 2–120 chars, no control characters.
+  String? _validateSchoolName(String value) {
+    final v = value.trim();
+    if (v.isEmpty) return 'School name is required.';
+    if (v.length < 2) return 'School name must be at least 2 characters.';
+    if (v.length > 120) return 'School name must not exceed 120 characters.';
+    if (RegExp(r'[\x00-\x1F]').hasMatch(v))
+      return 'School name contains invalid characters.';
+    return null;
+  }
+
+  /// Validates campus (optional): 1–80 chars when provided.
+  String? _validateCampus(String value) {
+    final v = value.trim();
+    if (v.isEmpty) return null; // optional
+    if (v.length > 80) return 'Campus must not exceed 80 characters.';
+    return null;
+  }
+
   Future<void> _register() async {
     final name   = _nameController.text.trim();
     final campus = _campusController.text.trim();
 
-    if (name.isEmpty || _selectedRegion == null) {
+    final nameErr   = _validateSchoolName(name);
+    final campusErr = _validateCampus(campus);
+
+    if (nameErr != null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill in School Name and Region.')),
+        SnackBar(content: Text('❌ $nameErr'), backgroundColor: Colors.red),
+      );
+      return;
+    }
+    if (campusErr != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('❌ $campusErr'), backgroundColor: Colors.red),
+      );
+      return;
+    }
+    if (_selectedRegion == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('❌ Please select a region.')),
       );
       return;
     }
 
     final fullName = campus.isNotEmpty ? '$name - $campus' : name;
+
+    // Guard: combined name must not exceed DB column limit (150 chars)
+    if (fullName.length > 150) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('❌ Combined school + campus name is too long (max 150 characters).'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
 
     setState(() => _isLoading = true);
     try {
@@ -563,6 +611,7 @@ class _Step1SchoolState extends State<Step1School> {
     required IconData icon,
     bool isRequired = false,
     bool isOptional = false,
+    int maxLength = 150,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -589,6 +638,7 @@ class _Step1SchoolState extends State<Step1School> {
         TextField(
           controller: controller,
           style: const TextStyle(color: Colors.white, fontSize: 14),
+          inputFormatters: [LengthLimitingTextInputFormatter(maxLength)],
           decoration: InputDecoration(
             hintText: hint,
             hintStyle: TextStyle(

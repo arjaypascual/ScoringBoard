@@ -394,14 +394,36 @@ class _CategoryView extends StatefulWidget {
   State<_CategoryView> createState() => _CategoryViewState();
 }
 
+// Filter mode enum
+enum _FilterMode { all, present, absent }
+
 class _CategoryViewState extends State<_CategoryView> {
   final TextEditingController _searchCtrl = TextEditingController();
-  String _searchQuery = '';
+  String      _searchQuery = '';
+  _FilterMode _filterMode  = _FilterMode.all;
 
   @override
   void dispose() {
     _searchCtrl.dispose();
     super.dispose();
+  }
+
+  /// Returns teams that match the current search query and filter mode.
+  List<Map<String, dynamic>> _applyFilters(List<Map<String, dynamic>> teams) {
+    final q = _searchQuery.toLowerCase().trim();
+    return teams.where((t) {
+      // ── Presence filter ─────────────────────────────────────────────
+      if (_filterMode == _FilterMode.present &&
+          t['team_ispresent'].toString() != '1') return false;
+      if (_filterMode == _FilterMode.absent &&
+          t['team_ispresent'].toString() == '1') return false;
+
+      // ── Text search: team name OR mentor name ────────────────────────
+      if (q.isEmpty) return true;
+      final teamName   = (t['team_name']   ?? '').toString().toLowerCase();
+      final mentorName = (t['mentor_name'] ?? '').toString().toLowerCase();
+      return teamName.contains(q) || mentorName.contains(q);
+    }).toList();
   }
 
   @override
@@ -415,16 +437,11 @@ class _CategoryViewState extends State<_CategoryView> {
     final presentCount = present.length;
     final pct          = total == 0 ? 0.0 : presentCount / total;
 
-    // Filter by search query
-    final q = _searchQuery.toLowerCase();
-    final filteredPresent = q.isEmpty
-        ? present
-        : present.where((t) =>
-            (t['team_name'] ?? '').toString().toLowerCase().contains(q)).toList();
-    final filteredAbsent = q.isEmpty
-        ? absent
-        : absent.where((t) =>
-            (t['team_name'] ?? '').toString().toLowerCase().contains(q)).toList();
+    // Apply search + filter
+    final filtered        = _applyFilters(allTeams);
+    final filteredPresent = filtered.where((t) => t['team_ispresent'].toString() == '1').toList();
+    final filteredAbsent  = filtered.where((t) => t['team_ispresent'].toString() != '1').toList();
+    final hasActiveFilter = _searchQuery.isNotEmpty || _filterMode != _FilterMode.all;
 
     return Column(
       children: [
@@ -604,47 +621,145 @@ class _CategoryViewState extends State<_CategoryView> {
           ),
         ),
 
-        // ── Search bar ─────────────────────────────────────────────────
+        // ── Search + Filter bar ────────────────────────────────────────
         Container(
           color: const Color(0xFF0F0828),
-          padding: const EdgeInsets.fromLTRB(28, 8, 28, 8),
-          child: Row(
+          padding: const EdgeInsets.fromLTRB(28, 8, 28, 0),
+          child: Column(
             children: [
-              Expanded(
-                child: Container(
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.05),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: accent.withOpacity(0.25)),
-                  ),
-                  child: TextField(
-                    controller: _searchCtrl,
-                    style: const TextStyle(color: Colors.white70, fontSize: 13),
-                    decoration: InputDecoration(
-                      hintText: 'Search teams…',
-                      hintStyle: TextStyle(
-                          color: Colors.white24, fontSize: 13),
-                      prefixIcon: Icon(Icons.search_rounded,
-                          color: accent.withOpacity(0.6), size: 18),
-                      suffixIcon: _searchQuery.isNotEmpty
-                          ? GestureDetector(
-                              onTap: () {
-                                _searchCtrl.clear();
-                                setState(() => _searchQuery = '');
-                              },
-                              child: Icon(Icons.close_rounded,
-                                  color: Colors.white38, size: 16),
-                            )
-                          : null,
-                      border: InputBorder.none,
-                      contentPadding:
-                          const EdgeInsets.symmetric(vertical: 9),
+              Row(
+                children: [
+                  // ── Search field ──────────────────────────────────
+                  Expanded(
+                    child: Container(
+                      height: 36,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.05),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: accent.withOpacity(0.25)),
+                      ),
+                      child: TextField(
+                        controller: _searchCtrl,
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 13),
+                        decoration: InputDecoration(
+                          hintText: 'Search by team or mentor name…',
+                          hintStyle: TextStyle(
+                              color: Colors.white24, fontSize: 13),
+                          prefixIcon: Icon(Icons.search_rounded,
+                              color: accent.withOpacity(0.6), size: 18),
+                          suffixIcon: _searchQuery.isNotEmpty
+                              ? GestureDetector(
+                                  onTap: () {
+                                    _searchCtrl.clear();
+                                    setState(() => _searchQuery = '');
+                                  },
+                                  child: const Icon(Icons.close_rounded,
+                                      color: Colors.white38, size: 16),
+                                )
+                              : null,
+                          border: InputBorder.none,
+                          contentPadding:
+                              const EdgeInsets.symmetric(vertical: 9),
+                        ),
+                        onChanged: (v) =>
+                            setState(() => _searchQuery = v),
+                      ),
                     ),
-                    onChanged: (v) => setState(() => _searchQuery = v),
                   ),
+                  const SizedBox(width: 10),
+
+                  // ── Clear all filters button ──────────────────────
+                  if (hasActiveFilter) ...[
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: () {
+                        _searchCtrl.clear();
+                        setState(() {
+                          _searchQuery = '';
+                          _filterMode  = _FilterMode.all;
+                        });
+                      },
+                      child: Container(
+                        height: 36,
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.red.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: Colors.red.withOpacity(0.3)),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.filter_alt_off_rounded,
+                                color: Colors.redAccent, size: 15),
+                            SizedBox(width: 5),
+                            Text('Clear',
+                                style: TextStyle(
+                                    color: Colors.redAccent,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+
+              // ── Status filter chips — always visible ──────────────
+              Padding(
+                padding: const EdgeInsets.only(top: 8, bottom: 2),
+                child: Row(
+                  children: [
+                    Text('STATUS:',
+                        style: TextStyle(
+                            color: Colors.white38,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.2)),
+                    const SizedBox(width: 10),
+                    _filterChip(
+                      label: 'All',
+                      icon: Icons.groups_rounded,
+                      selected: _filterMode == _FilterMode.all,
+                      color: accent,
+                      onTap: () => setState(
+                          () => _filterMode = _FilterMode.all),
+                    ),
+                    const SizedBox(width: 8),
+                    _filterChip(
+                      label: 'Present',
+                      icon: Icons.check_circle_rounded,
+                      selected: _filterMode == _FilterMode.present,
+                      color: Colors.green,
+                      onTap: () => setState(
+                          () => _filterMode = _FilterMode.present),
+                    ),
+                    const SizedBox(width: 8),
+                    _filterChip(
+                      label: 'Absent',
+                      icon: Icons.cancel_rounded,
+                      selected: _filterMode == _FilterMode.absent,
+                      color: Colors.redAccent,
+                      onTap: () => setState(
+                          () => _filterMode = _FilterMode.absent),
+                    ),
+                    const Spacer(),
+                    // Results count
+                    Text(
+                      '${filtered.length} of $total team${total != 1 ? "s" : ""}',
+                      style: TextStyle(
+                          color: accent.withOpacity(0.6),
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold),
+                    ),
+                  ],
                 ),
               ),
+              const SizedBox(height: 8),
             ],
           ),
         ),
@@ -655,30 +770,37 @@ class _CategoryViewState extends State<_CategoryView> {
           padding: const EdgeInsets.fromLTRB(28, 4, 28, 8),
           child: Row(
             children: [
-              Expanded(
-                child: _sectionHeader(
-                    Icons.check_circle_outline_rounded,
-                    'PRESENT',
-                    '${filteredPresent.length} team${filteredPresent.length != 1 ? "s" : ""}',
-                    Colors.green),
-              ),
-              Container(width: 1, height: 36,
-                  color: Colors.white.withOpacity(0.08)),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 20),
+              if (_filterMode != _FilterMode.absent) ...[
+                Expanded(
                   child: _sectionHeader(
-                      Icons.cancel_outlined,
-                      'ABSENT',
-                      '${filteredAbsent.length} team${filteredAbsent.length != 1 ? "s" : ""}',
-                      Colors.redAccent),
+                      Icons.check_circle_outline_rounded,
+                      'PRESENT',
+                      '${filteredPresent.length} team${filteredPresent.length != 1 ? "s" : ""}',
+                      Colors.green),
                 ),
-              ),
+              ],
+              if (_filterMode == _FilterMode.all) ...[
+                Container(width: 1, height: 36,
+                    color: Colors.white.withOpacity(0.08)),
+              ],
+              if (_filterMode != _FilterMode.present) ...[
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(
+                        left: _filterMode == _FilterMode.all ? 20 : 0),
+                    child: _sectionHeader(
+                        Icons.cancel_outlined,
+                        'ABSENT',
+                        '${filteredAbsent.length} team${filteredAbsent.length != 1 ? "s" : ""}',
+                        Colors.redAccent),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
 
-        // ── Two-column team list ───────────────────────────────────────
+        // ── Two-column (or single-column) team list ────────────────────
         Expanded(
           child: allTeams.isEmpty
               ? Center(
@@ -697,45 +819,90 @@ class _CategoryViewState extends State<_CategoryView> {
               : Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // PRESENT column
-                    Expanded(
-                      child: _TeamColumn(
-                        teams:              filteredPresent,
-                        playersByTeam:      widget.playersByTeam,
-                        accent:             Colors.green,
-                        isEmpty:            filteredPresent.isEmpty,
-                        emptyLabel:         _searchQuery.isNotEmpty
-                            ? 'No results'
-                            : 'No teams present',
-                        catIndex:           widget.catIndex,
-                        isPresent:          true,
-                        onTogglePresence:   widget.onTogglePresence,
+                    // PRESENT column — hidden when filter = Absent
+                    if (_filterMode != _FilterMode.absent)
+                      Expanded(
+                        child: _TeamColumn(
+                          teams:            filteredPresent,
+                          playersByTeam:    widget.playersByTeam,
+                          accent:           Colors.green,
+                          isEmpty:          filteredPresent.isEmpty,
+                          emptyLabel:       hasActiveFilter
+                              ? 'No results'
+                              : 'No teams present',
+                          catIndex:         widget.catIndex,
+                          isPresent:        true,
+                          onTogglePresence: widget.onTogglePresence,
+                        ),
                       ),
-                    ),
-                    // Divider
-                    Container(
-                      width: 1,
-                      color: Colors.white.withOpacity(0.06),
-                    ),
-                    // ABSENT column
-                    Expanded(
-                      child: _TeamColumn(
-                        teams:              filteredAbsent,
-                        playersByTeam:      widget.playersByTeam,
-                        accent:             Colors.redAccent,
-                        isEmpty:            filteredAbsent.isEmpty,
-                        emptyLabel:         _searchQuery.isNotEmpty
-                            ? 'No results'
-                            : 'All teams present!',
-                        catIndex:           widget.catIndex,
-                        isPresent:          false,
-                        onTogglePresence:   widget.onTogglePresence,
+                    // Divider — only shown when both columns are visible
+                    if (_filterMode == _FilterMode.all)
+                      Container(
+                        width: 1,
+                        color: Colors.white.withOpacity(0.06),
                       ),
-                    ),
+                    // ABSENT column — hidden when filter = Present
+                    if (_filterMode != _FilterMode.present)
+                      Expanded(
+                        child: _TeamColumn(
+                          teams:            filteredAbsent,
+                          playersByTeam:    widget.playersByTeam,
+                          accent:           Colors.redAccent,
+                          isEmpty:          filteredAbsent.isEmpty,
+                          emptyLabel:       hasActiveFilter
+                              ? 'No results'
+                              : 'All teams present!',
+                          catIndex:         widget.catIndex,
+                          isPresent:        false,
+                          onTogglePresence: widget.onTogglePresence,
+                        ),
+                      ),
                   ],
                 ),
         ),
       ],
+    );
+  }
+
+  Widget _filterChip({
+    required String label,
+    required IconData icon,
+    required bool selected,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected
+              ? color.withOpacity(0.18)
+              : Colors.white.withOpacity(0.04),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: selected
+                ? color.withOpacity(0.7)
+                : Colors.white.withOpacity(0.12),
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon,
+                color: selected ? color : Colors.white38, size: 13),
+            const SizedBox(width: 5),
+            Text(label,
+                style: TextStyle(
+                  color: selected ? color : Colors.white38,
+                  fontSize: 11,
+                  fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+                )),
+          ],
+        ),
+      ),
     );
   }
 

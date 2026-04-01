@@ -206,6 +206,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   }
 
   Future<void> _silentRefresh() async {
+    if (_isSilentRefreshing) return; // already running — skip this tick
+    _isSilentRefreshing = true;
     try {
       final conn   = await DBHelper.getConnection();
 
@@ -262,8 +264,14 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         await _loadKoScores();
         // Auto-advance to knockout when group stage completes
         _checkAndAutoAdvance();
+        // BUG FIX 2: also check KO advancement on every refresh tick
+        // so existing winners are re-advanced after a reload/restart
+        await _checkAndAutoAdvanceKnockout();
       }
     } catch (_) {}
+    finally {
+      _isSilentRefreshing = false;
+    }
   }
 
   Future<void> _loadData({bool initial = false}) async {
@@ -417,9 +425,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     if (sourceTeams.isEmpty) return;
     final shuffled = List<Map<String, dynamic>>.from(sourceTeams)..shuffle(Random());
     final n = shuffled.length;
-    const int maxGroups     = 8;
-    const int teamsPerGroup = 4;
-    final int numGroups = (n / teamsPerGroup).ceil().clamp(1, maxGroups);
+    // ── Fixed group count: always 3 groups ──────────────────────────────────
+    const int numGroups = 3;
     final int baseSize  = n ~/ numGroups;
     final int extras    = n % numGroups;
     final counts = List.generate(numGroups, (i) => baseSize + (i < extras ? 1 : 0));
@@ -488,6 +495,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           );
         }
       }
+      // Reset flags so regenerating groups always re-triggers auto-advance
+      _hasAutoAdvanced   = false;
+      _lastAdvancedRound = '';
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -692,8 +702,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         ORDER BY s.schedule_start, m.match_id
       """);
 
-      final rows = result.rows.map((r) => r.assoc()).toList();
-      final sig  = rows.map((r) => r.toString()).join('|');
+      final rows        = result.rows.map((r) => r.assoc()).toList();
+      final emptyKoRows = emptyKoResult.rows.map((r) => r.assoc()).toList();
+      // FIX: include empty KO slots in the signature so the bracket renders
+      // the ELIM/QF/SF columns immediately after schedule generation — before
+      // any teams are seeded — instead of waiting until teams appear (which
+      // could be never if the early-return fires every tick).
+      final sig = (rows + emptyKoRows).map((r) => r.toString()).join('|');
       if (sig == _lastScheduleSig) return;
       _lastScheduleSig = sig;
 
@@ -753,11 +768,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       // Add empty knockout slots so bracket tree renders before seeding
       // Track position within each time slot to assign correct arena number
       final Map<String, int> timeSlotCounter = {};
-      for (final row in emptyKoResult.rows) {
-        final matchId = int.tryParse(row.assoc()['match_id']?.toString() ?? '0') ?? 0;
-        final rawBt   = row.assoc()['bracket_type']?.toString() ?? '';
+      for (final row in emptyKoRows) {
+        final matchId = int.tryParse(row['match_id']?.toString() ?? '0') ?? 0;
+        final rawBt   = row['bracket_type']?.toString() ?? '';
         final bt      = _ScheduleViewerState._normalizeBracketType(rawBt, 0);
-        final time    = row.assoc()['match_time']?.toString() ?? '';
+        final time    = row['match_time']?.toString() ?? '';
         if (matchId == 0 || byMatch.containsKey(matchId)) continue;
         // Assign sequential arena number within same time slot
         final slotKey = '${bt}_${time}';
@@ -876,13 +891,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   static String _normalizeBracketType(String raw, int totalKoMatches) {
     // Always trust these exact labels
     const canonical = {
-      'elimination', 'quarter-finals',
+      'elimination', 'round-of-16', 'quarter-finals',
       'semi-finals', 'third-place', 'final',
     };
     if (canonical.contains(raw)) return raw;
 
-    // round-of-16 from DB → 'elimination'
-    if (raw == 'round-of-16') return 'elimination';
+    // round-of-16 from DB stays as round-of-16
     if (raw == 'round-of-32') return 'elimination';
 
     // Normalize legacy labels by team count implied by name
@@ -893,39 +907,50 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     final m = RegExp(r'round-of-(\d+)').firstMatch(raw);
     if (m != null) {
       final n = int.tryParse(m.group(1) ?? '') ?? 0;
-      if (n >= 16) return 'elimination';
+      if (n >= 32) return 'elimination';
+      if (n == 16) return 'round-of-16';
       if (n == 8)  return 'quarter-finals';
       if (n == 4)  return 'semi-finals';
     }
     return raw;
   }
 
-  // Derive correct round order from advancing teams count.
+  // ── Bracket flow rules ───────────────────────────────────────────────────
   //
-  // advancing = numGroups * 2  (top 2 per group)
+  //   BYE rule: ALWAYS only top 2 seeds (rank 1 & 2 overall) get a BYE
+  //             when an ELIM round exists. Never more than 2 BYEs.
   //
-  //   advancing  2-4  -> SF -> 3RD -> FINAL
-  //   advancing  5-8  -> QF -> SF -> 3RD -> FINAL
-  //   advancing   >8  -> ELIMINATION -> QF -> SF -> 3RD -> FINAL
-  //                      (bracketSize = nextPow2(advancing), byeSlots = bracketSize - advancing)
+  //   2 grp →  4 teams → SF(2)                    → 3RD → FINAL
+  //   3 grp →  6 teams → ELIM(2, 2BYE) → SF(2)   → 3RD → FINAL  ★ no QF
+  //   4 grp →  8 teams → QF(4)          → SF(2)   → 3RD → FINAL
+  //   5 grp → 10 teams → ELIM(2, 2BYE) → QF(4) → SF(2) → 3RD → FINAL
+  //   6 grp → 12 teams → ELIM(4, 2BYE) → QF(4) → SF(2) → 3RD → FINAL
+  //   7 grp → 14 teams → ELIM(6, 2BYE) → QF(4) → SF(2) → 3RD → FINAL
+  //   8 grp → 16 teams → QF(4)          → SF(2)   → 3RD → FINAL
   //
-  // Examples:
-  //   4  groups ->  8 advancing -> QF(4) -> SF -> 3RD -> FINAL          (0 BYEs)
-  //   5  groups -> 10 advancing -> ELIM(8 slots, 6 BYEs, 2 real) -> QF -> SF -> FINAL
-  //   6  groups -> 12 advancing -> ELIM(8 slots, 4 BYEs, 4 real) -> QF -> SF -> FINAL
-  //   7  groups -> 14 advancing -> ELIM(8 slots, 2 BYEs, 6 real) -> QF -> SF -> FINAL
-  //   8  groups -> 16 advancing -> ELIM(8 slots, 0 BYEs, 8 real) -> QF -> SF -> FINAL
-  //   9  groups -> 18 advancing -> ELIM(16 slots,14 BYEs, 2 real)-> QF -> SF -> FINAL
+  //   Key for 3 groups: 6 teams, top 2 BYE to SF, bottom 4 play 2 ELIM
+  //   matches → 2 ELIM winners join 2 BYE teams = 4 SF slots. QF skipped.
+  //
   static List<String> _fifaRoundOrder(int numGroups, {int totalRegisteredTeams = 0}) {
     final rounds    = <String>[];
-    final advancing = numGroups * 2;
+    final advancing = numGroups * 2; // top 2 per group advance
 
-    if (advancing > 8) {
-      // Any count above 8 needs an Elimination round.
-      // Odd counts (e.g. 18) are handled with play-in matches + byes.
+    if (advancing <= 4) {
+      // 2 groups → 4 teams → SF directly
+    } else if (advancing == 6) {
+      // 3 groups → 6 teams → ELIM(2) → SF directly (NO QF)
+      // Top 2 seeds BYE to SF; bottom 4 play 2 ELIM → 2 winners to SF
       rounds.add('elimination');
+      // quarter-finals intentionally skipped
+    } else if (advancing == 8) {
+      // 4 groups → 8 teams → QF directly
       rounds.add('quarter-finals');
-    } else if (advancing > 4) {
+    } else if (advancing == 16) {
+      // 8 groups → 16 teams → QF directly
+      rounds.add('quarter-finals');
+    } else {
+      // 5,6,7 groups → ELIM(top 2 BYE) → QF(4)
+      rounds.add('elimination');
       rounds.add('quarter-finals');
     }
 
@@ -935,43 +960,41 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     return rounds;
   }
 
-  // How many play-in (Elimination) match SLOTS are needed for N advancing teams.
-  //
-  // Formula: find the next power-of-2 bracket size (≥ advancing), then
-  // the ELIM round has (bracketSize / 2) slots total.
-  // Of those, (bracketSize - advancing) slots are BYEs (free wins).
-  // The remaining slots are real matches: advancing - (bracketSize / 2).
-  //
-  // Examples (targeting next power-of-2 bracket):
-  //   advancing=4  -> bracketSize=4,  elimSlots=2,  byeSlots=0,  realMatches=2  -> no ELIM round needed (≤8)
-  //   advancing=8  -> bracketSize=8,  elimSlots=4,  byeSlots=0,  realMatches=4  -> QF directly
-  //   advancing=10 -> bracketSize=16, elimSlots=8,  byeSlots=6,  realMatches=2  -> 2 real play-ins, 6 BYEs
-  //   advancing=12 -> bracketSize=16, elimSlots=8,  byeSlots=4,  realMatches=4  -> 4 real play-ins, 4 BYEs
-  //   advancing=14 -> bracketSize=16, elimSlots=8,  byeSlots=2,  realMatches=6  -> 6 real play-ins, 2 BYEs
-  //   advancing=16 -> bracketSize=16, elimSlots=8,  byeSlots=0,  realMatches=8  -> 8 ELIM matches, 0 BYEs
-  //   advancing=18 -> bracketSize=32, elimSlots=16, byeSlots=14, realMatches=2  -> 2 real play-ins, 14 BYEs
-  //
-  // Returns the total ELIM slot count (= bracketSize / 2).
-  // Use byeCount(advancing) for number of BYE slots.
+  // Real ELIM match count (matches actually played, excluding BYEs).
+  //   3 grp: 6 advancing, 2 BYEs → 4 play ELIM → 2 matches → 2 winners to SF
+  //   5 grp: 10 advancing, 2 BYEs → 8 play ELIM → need 4 for QF → 2 ELIM matches
+  //   6 grp: 12 advancing, 2 BYEs → 10 play ELIM → need 4 for QF → 4 ELIM matches
+  //   7 grp: 14 advancing, 2 BYEs → 12 play ELIM → need 4 for QF → 6 ELIM matches
+  static int realElimMatches(int numGroups) {
+    final advancing = numGroups * 2;
+    if (advancing <= 4)  return 0; // SF direct
+    if (advancing == 6)  return 2; // 3 grp: 4 teams play → 2 matches → 2 to SF
+    if (advancing == 8)  return 0; // QF direct
+    if (advancing == 16) return 0; // QF direct
+    // 5,6,7 groups: top 2 BYE to QF; rest play ELIM to fill remaining QF slots
+    // QF has 4 slots; 2 taken by BYEs; 2 winners needed from ELIM
+    // ELIM matches = (advancing - 2) / 2 ... but we need exactly 2 QF spots
+    // So ELIM real = (advancing - 2) - 2 = advancing - 4
+    // i.e. the non-bye teams (advancing-2) play each other; winners (half) go to QF
+    return (advancing - 2) ~/ 2; // winners = half of non-bye teams
+  }
+
+  // BYE count = always 2 (top 2 seeds) whenever an ELIM round exists.
+  static int byeCount(int numGroups) {
+    final advancing = numGroups * 2;
+    if (advancing <= 4)  return 0; // SF direct, no ELIM
+    if (advancing == 8)  return 0; // QF direct, no ELIM
+    if (advancing == 16) return 0; // QF direct, no ELIM
+    return 2; // top 2 seeds always BYE past ELIM
+  }
+
+  // Total ELIM slot count (real + bye) — kept for legacy callers.
   static int eliminationMatchCount(int advancing) {
-    if (advancing <= 8) return 0;          // QF or SF directly — no ELIM round
-    final bracketSize = _nextPow2(advancing);
-    return bracketSize ~/ 2;              // total ELIM slots (includes BYE slots)
-  }
-
-  // Number of BYE slots in the ELIM round.
-  static int byeCount(int advancing) {
-    if (advancing <= 8) return 0;
-    final bracketSize = _nextPow2(advancing);
-    return bracketSize - advancing;       // empty slots that auto-advance
-  }
-
-  // Number of REAL (non-BYE) play-in matches.
-  static int realElimMatches(int advancing) {
-    if (advancing <= 8) return 0;
-    final bracketSize = _nextPow2(advancing);
-    final elimSlots   = bracketSize ~/ 2;
-    return advancing - elimSlots;         // teams that must play in
+    final ng = advancing ~/ 2;
+    if (advancing <= 4)  return 0;
+    if (advancing == 8)  return 0;
+    if (advancing == 16) return 0;
+    return realElimMatches(ng) + byeCount(ng);
   }
 
   static int _nextPow2(int n) {
@@ -1228,8 +1251,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   // Rounds: R32 → R16 → QF → SF → 3rd Place → Final
   // ════════════════════════════════════════════════════════════════════════════
   // ── Advance to knockout state ────────────────────────────────────────────
-  bool _isAdvancing = false;
-  bool _hasAutoAdvanced = false;  // prevents repeat auto-advance calls
+  bool _isAdvancing        = false;
+  bool _hasAutoAdvanced    = false; // prevents repeat group→KO advance
+  bool _isSilentRefreshing = false; // prevents overlapping refresh calls
+  bool _isKoChecking       = false; // prevents overlapping KO advance calls
+  String _lastAdvancedRound = '';   // prevents repeated snackbar for same round
+  bool _showBracketFlowInfo = false; // toggles "how does this work" panel
 
   // ── Auto-advance: fires once when groups finish and KO slots are ready ────
   void _checkAndAutoAdvance() {
@@ -1258,8 +1285,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     if (_soccerCategoryId == null) return;
     setState(() => _isAdvancing = true);
     try {
+      // Delegate ALL group counts (including 3 groups) to DBHelper.
       await DBHelper.advanceToKnockout(_soccerCategoryId!);
-      await _silentRefresh();
+
+      // Direct reload — bypass _isSilentRefreshing guard
+      await _loadSoccerSchedule();
+      await _loadKoScores();
+      if (mounted) setState(() {});
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('✅ Teams advanced to knockout!',
@@ -1277,6 +1309,131 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         ));
       }
     } finally {
+      if (mounted) setState(() => _isAdvancing = false);
+    }
+  }
+
+  // ── Auto-advance through every knockout round until the Final ──────────────
+  // Fires after each KO result. Once a full round is complete it seeds the
+  // next round automatically.
+  // For 3 groups: ELIM → SF directly (QF skipped).
+  // For other group counts: follows the standard round order.
+  Future<void> _checkAndAutoAdvanceKnockout() async {
+    if (_isKoChecking) return;  // already running — skip
+    if (_isAdvancing) return;   // manual advance in progress — skip
+    if (_soccerCategoryId == null) return;
+    _isKoChecking = true;
+    // Dynamic round order: use _fifaRoundOrder so 3-group correctly skips QF
+    final roundOrder = _fifaRoundOrder(_groups.isNotEmpty ? _groups.length : 3);
+    try {
+      final conn = await DBHelper.getConnection();
+      for (final round in roundOrder) {
+        // BUG FIX 3: removed backslash escaping so variables interpolate correctly
+        final matchResult = await conn.execute("""
+          SELECT m.match_id
+          FROM tbl_match m
+          JOIN tbl_teamschedule ts ON ts.match_id = m.match_id
+          JOIN tbl_team t ON t.team_id = ts.team_id
+          WHERE t.category_id = ${_soccerCategoryId}
+            AND m.bracket_type = '$round'
+          GROUP BY m.match_id HAVING COUNT(DISTINCT ts.team_id) = 2
+        """);
+        if (matchResult.rows.isEmpty) continue;
+        final matchIds = matchResult.rows
+            .map((r) => int.tryParse(r.assoc()['match_id']?.toString() ?? '0') ?? 0)
+            .where((id) => id > 0).toList();
+        final scoredResult = await conn.execute("""
+          SELECT m.match_id, COUNT(DISTINCT sc.team_id) AS scored
+          FROM tbl_match m JOIN tbl_score sc ON sc.match_id = m.match_id
+          JOIN tbl_team t ON t.team_id = sc.team_id
+          WHERE t.category_id = ${_soccerCategoryId} AND m.bracket_type = '$round'
+          GROUP BY m.match_id
+        """);
+        final scoredIds = scoredResult.rows
+            .where((r) => (int.tryParse(r.assoc()['scored']?.toString() ?? '0') ?? 0) >= 2)
+            .map((r) => int.tryParse(r.assoc()['match_id']?.toString() ?? '0') ?? 0)
+            .toSet();
+        // Round not fully scored yet — stop here, don't check later rounds
+        if (!matchIds.every((id) => scoredIds.contains(id))) break;
+        final nextIdx = roundOrder.indexOf(round) + 1;
+        if (nextIdx >= roundOrder.length) break;
+        final nextRound = roundOrder[nextIdx];
+        // Only skip if ALL matches in the next round are already FULL (2 teams each).
+        // A simple count > 0 would wrongly block advancement when BYE teams are
+        // pre-seeded (1 team per SF match) — ELIM winners would never fill TBD slots.
+        final seededCheck = await conn.execute("""
+          SELECT m.match_id, COUNT(ts.teamschedule_id) AS team_count
+          FROM tbl_match m
+          LEFT JOIN tbl_teamschedule ts ON ts.match_id = m.match_id
+          LEFT JOIN tbl_team t ON t.team_id = ts.team_id
+            AND t.category_id = ${_soccerCategoryId}
+          WHERE m.bracket_type = '$nextRound'
+          GROUP BY m.match_id
+        """);
+        final nextMatchCounts = seededCheck.rows
+            .map((r) => int.tryParse(r.assoc()['team_count']?.toString() ?? '0') ?? 0)
+            .toList();
+        final alreadySeeded = nextMatchCounts.isNotEmpty &&
+            nextMatchCounts.every((c) => c >= 2);
+        if (alreadySeeded) break;
+        // Skip if we already announced this exact round advancement this session
+        final advanceKey = '$round→$nextRound';
+        if (_lastAdvancedRound == advanceKey) break;
+        if (mounted) setState(() => _isAdvancing = true);
+        for (final matchId in matchIds) {
+          final scoreRows = await conn.execute("""
+            SELECT sc.team_id, sc.score_totalscore AS goals
+            FROM tbl_score sc JOIN tbl_team t ON t.team_id = sc.team_id
+            WHERE sc.match_id = $matchId AND t.category_id = ${_soccerCategoryId}
+            ORDER BY sc.score_totalscore DESC LIMIT 2
+          """);
+          if (scoreRows.rows.length < 2) continue;
+          final rs = scoreRows.rows.map((r) => r.assoc()).toList();
+          final g0 = int.tryParse(rs[0]['goals']?.toString() ?? '0') ?? 0;
+          final g1 = int.tryParse(rs[1]['goals']?.toString() ?? '0') ?? 0;
+          // Skip tied scores — knockout draw is invalid, admin must correct score
+          if (g0 == g1) {
+            debugPrint('⚠️ Tied KO score for match $matchId ($g0-$g1) — skipping');
+            continue;
+          }
+          final winnerId = g0 > g1
+              ? int.tryParse(rs[0]['team_id']?.toString() ?? '0') ?? 0
+              : int.tryParse(rs[1]['team_id']?.toString() ?? '0') ?? 0;
+          final loserId = g0 > g1
+              ? int.tryParse(rs[1]['team_id']?.toString() ?? '0') ?? 0
+              : int.tryParse(rs[0]['team_id']?.toString() ?? '0') ?? 0;
+          if (winnerId == 0) continue;
+          try {
+            await DBHelper.advanceKnockoutWinner(
+              matchId: matchId, winnerTeamId: winnerId,
+              loserTeamId: loserId, categoryId: _soccerCategoryId!,
+            );
+          } catch (_) {}
+        }
+        await _loadSoccerSchedule();
+        await _loadKoScores();
+        if (mounted) setState(() {});
+        _lastAdvancedRound = '$round→$nextRound';
+        if (mounted) {
+          final roundLabel = {
+            'elimination': 'Play-in', 'quarter-finals': 'Quarter Finals',
+            'semi-finals': 'Semi Finals', 'third-place': '3rd Place', 'final': 'Final',
+          }[round] ?? round.toUpperCase();
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+              '✅ $roundLabel complete — advancing to ${nextRound.toUpperCase()}!',
+              style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+            ),
+            backgroundColor: const Color(0xFF00FF88),
+            duration: const Duration(seconds: 3),
+          ));
+        }
+        break;
+      }
+    } catch (e) {
+      debugPrint('_checkAndAutoAdvanceKnockout error: $e');
+    } finally {
+      _isKoChecking = false;
       if (mounted) setState(() => _isAdvancing = false);
     }
   }
@@ -1429,6 +1586,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       );
 
       await _silentRefresh();
+      // Auto-advance if this round is now fully complete
+      await _checkAndAutoAdvanceKnockout();
 
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('✅ Result saved! Winner advances to next round.',
@@ -1456,11 +1615,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     final groupsDone = _allGroupMatchesDone() && _groupsGenerated;
 
     return Column(children: [
-      // ── Phase indicator ─────────────────────────────────────────────────
+      // ── Bracket flow preview panel ───────────────────────────────────────
       Container(
-        color: const Color(0xFF0A0620),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: _buildFifaPhaseIndicator(),
+        color: const Color(0xFF080518),
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        child: _buildBracketFlowPreview(),
       ),
 
       // ── Status bar ──────────────────────────────────────────────────────
@@ -1692,6 +1851,360 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     ]),
   );
 
+  // ── Bracket flow preview — button only, toggles info panel ──────────────
+  Widget _buildBracketFlowPreview() {
+    final ng = _groups.isNotEmpty ? _groups.length : 0;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // ── HOW DOES THIS WORK? button ─────────────────────────────────
+        Align(
+          alignment: Alignment.centerRight,
+          child: GestureDetector(
+            onTap: () => setState(
+                () => _showBracketFlowInfo = !_showBracketFlowInfo),
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: _showBracketFlowInfo
+                    ? const Color(0xFF00CFFF).withOpacity(0.12)
+                    : const Color(0xFF7B6AFF).withOpacity(0.10),
+                borderRadius: BorderRadius.circular(7),
+                border: Border.all(
+                    color: _showBracketFlowInfo
+                        ? const Color(0xFF00CFFF).withOpacity(0.45)
+                        : const Color(0xFF7B6AFF).withOpacity(0.4)),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(
+                  _showBracketFlowInfo
+                      ? Icons.close
+                      : Icons.help_outline_rounded,
+                  size: 12,
+                  color: _showBracketFlowInfo
+                      ? const Color(0xFF00CFFF)
+                      : const Color(0xFF7B6AFF),
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  _showBracketFlowInfo
+                      ? 'CLOSE'
+                      : 'HOW DOES THIS WORK?',
+                  style: TextStyle(
+                    color: _showBracketFlowInfo
+                        ? const Color(0xFF00CFFF)
+                        : const Color(0xFF7B6AFF),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        ),
+
+        // ── Info panel — shown when button is tapped ───────────────────
+        if (_showBracketFlowInfo) ...[
+          const SizedBox(height: 8),
+          _buildBracketInfoPanel(ng),
+        ],
+      ],
+    );
+  }
+
+  // ── Dynamic bracket info panel — content based on current group count ────
+  Widget _buildBracketInfoPanel(int ng) {
+    // ── Per-group explanation data ──────────────────────────────────────────
+    // Returns {flow, why, byeWho, diagram} specific to ng groups
+    String _flow() {
+      switch (ng) {
+        case 2:  return 'GROUP STAGE  →  SF (2)  →  3RD  →  FINAL';
+        case 3:  return 'GROUP STAGE  →  ELIM (2)  →  SF (2)  →  3RD  →  FINAL';
+        case 4:  return 'GROUP STAGE  →  QF (4)  →  SF (2)  →  3RD  →  FINAL';
+        case 5:  return 'GROUP STAGE  →  ELIM (2)  →  QF (4)  →  SF (2)  →  3RD  →  FINAL';
+        case 6:  return 'GROUP STAGE  →  ELIM (4)  →  QF (4)  →  SF (2)  →  3RD  →  FINAL';
+        case 7:  return 'GROUP STAGE  →  ELIM (6)  →  QF (4)  →  SF (2)  →  3RD  →  FINAL';
+        case 8:  return 'GROUP STAGE  →  QF (4)  →  SF (2)  →  3RD  →  FINAL';
+        case 9:  return 'GROUP STAGE  →  ELIM (2)  →  R16 (8)  →  QF (4)  →  SF (2)  →  3RD  →  FINAL';
+        default: return 'GROUP STAGE  →  ELIM  →  ...  →  FINAL';
+      }
+    }
+
+    String _why() {
+      final adv = ng * 2;
+      switch (ng) {
+        case 2:
+          return '$adv teams advance (top 2 per group). $adv fills SF directly — no elimination round needed.';
+        case 3:
+          return '$adv teams advance but the bracket needs 8 slots. Only 4 can fit QF, so 2 teams play ELIM first and 2 get BYEs straight to SF.';
+        case 4:
+          return '$adv teams advance and fills QF perfectly — 8 teams, 4 matches. No elimination round needed.';
+        case 5:
+          return '$adv teams advance but 10 doesn\'t fit QF (needs 8). Top 2 seeds BYE to QF; remaining 8 play 2 ELIM matches → 2 winners join the BYEs in QF.';
+        case 6:
+          return '$adv teams advance. 12 teams → 4 ELIM matches needed to reduce to 8 for QF. Top 2 seeds BYE to QF; remaining 10 play 4 ELIM matches → 4 winners join BYEs.';
+        case 7:
+          return '$adv teams advance. 14 teams → 6 ELIM matches to reduce to 8 for QF. Top 2 seeds BYE to QF; remaining 12 play 6 ELIM matches.';
+        case 8:
+          return '$adv teams advance and fills QF perfectly — 16 teams, 4 matches. No elimination round needed.';
+        case 9:
+          return '$adv teams advance. 18 teams → ELIM first to reduce, then R16 (8 matches), then QF → SF → FINAL.';
+        default:
+          return '$adv teams advance (top 2 per group). Bracket adjusts automatically.';
+      }
+    }
+
+    String _byeWho() {
+      final byes = byeCount(ng);
+      if (byes == 0) return '';
+      switch (ng) {
+        case 3:
+          return 'Group C has no opponent to cross-pair with (odd number of groups), so 1st and 2nd place of Group C both get BYEs directly into SF.';
+        case 5:
+          return 'Overall 1st and 2nd seeds (best records across all groups) get BYEs into QF. The remaining 8 teams play ELIM.';
+        case 6:
+          return 'Overall top 2 seeds get BYEs into QF. Remaining 10 teams play 4 ELIM matches.';
+        case 7:
+          return 'Overall top 2 seeds get BYEs into QF. Remaining 12 teams play 6 ELIM matches.';
+        case 9:
+          return 'Overall top 2 seeds get BYEs into R16. Remaining 16 teams play 2 ELIM matches.';
+        default:
+          return 'Top $byes seed${byes > 1 ? 's' : ''} advance directly, skipping the first knockout round.';
+      }
+    }
+
+    // ── ASCII-style diagram per group count ─────────────────────────────────
+    String _diagram() {
+      switch (ng) {
+        case 2:
+          return
+            'Group A (1st) ──┐\n'
+            '                ├── SF Match 1 ──┐\n'
+            'Group B (2nd) ──┘                ├── FINAL\n'
+            'Group B (1st) ──┐                |\n'
+            '                ├── SF Match 2 ──┘\n'
+            'Group A (2nd) ──┘\n'
+            '\nSF Losers → 3RD PLACE MATCH';
+        case 3:
+          return
+            'Group A (1st) ──┐\n'
+            '                ├── ELIM 1 ──┐\n'
+            'Group B (2nd) ──┘            ├── SF Match 1 ──┐\n'
+            'Group C (1st) ── BYE ────────┘                ├── FINAL\n'
+            'Group A (2nd) ──┐                             |\n'
+            '                ├── ELIM 2 ──┐                |\n'
+            'Group B (1st) ──┘            ├── SF Match 2 ──┘\n'
+            'Group C (2nd) ── BYE ────────┘\n'
+            '\nSF Losers → 3RD PLACE MATCH';
+        case 4:
+          return
+            'Group A (1st) ──┐\n'
+            '                ├── QF 1 ──┐\n'
+            'Group B (2nd) ──┘          ├── SF 1 ──┐\n'
+            'Group C (1st) ──┐          |          ├── FINAL\n'
+            '                ├── QF 2 ──┘          |\n'
+            'Group D (2nd) ──┘          ┌── SF 2 ──┘\n'
+            'Group B (1st) ──┐          |\n'
+            '                ├── QF 3 ──┘\n'
+            'Group A (2nd) ──┘\n'
+            'Group D (1st) ──┐\n'
+            '                ├── QF 4\n'
+            'Group C (2nd) ──┘\n'
+            '\nSF Losers → 3RD PLACE MATCH';
+        case 5:
+          return
+            '── BYE ──────────────────────────────── QF slot 1\n'
+            '(Overall 1st seed skips ELIM)\n'
+            '── BYE ──────────────────────────────── QF slot 2\n'
+            '(Overall 2nd seed skips ELIM)\n\n'
+            'Remaining 8 teams play 2 ELIM matches:\n'
+            'Team 3 ──┐\n'
+            '         ├── ELIM 1 ──── QF slot 3\n'
+            'Team 4 ──┘\n'
+            'Team 5 ──┐\n'
+            '         ├── ELIM 2 ──── QF slot 4\n'
+            'Team 6 ──┘\n'
+            '\nQF → SF → 3RD / FINAL';
+        case 6:
+          return
+            '── BYE ──────────────────────────────── QF slot 1\n'
+            '── BYE ──────────────────────────────── QF slot 2\n\n'
+            'Remaining 10 teams play 4 ELIM matches:\n'
+            'Team 3 ──┐\n'
+            '         ├── ELIM 1 ──── QF slot 3\n'
+            'Team 4 ──┘\n'
+            'Team 5 ──┐\n'
+            '         ├── ELIM 2 ──── QF slot 4\n'
+            'Team 6 ──┘\n'
+            'Team 7 ──┐\n'
+            '         ├── ELIM 3 (extra, feeds QF)\n'
+            'Team 8 ──┘\n'
+            'Team 9 ──┐\n'
+            '         ├── ELIM 4 (extra, feeds QF)\n'
+            'Team 10 ─┘\n'
+            '\nQF → SF → 3RD / FINAL';
+        case 7:
+          return
+            '── BYE ──────────────────────────────── QF slot 1\n'
+            '── BYE ──────────────────────────────── QF slot 2\n\n'
+            'Remaining 12 teams play 6 ELIM matches → 6 winners\n'
+            '(6 winners + 2 BYEs = 8 → fills QF)\n'
+            '\nQF → SF → 3RD / FINAL';
+        case 8:
+          return
+            'Group A (1st) ──┐\n'
+            '                ├── QF 1 ──┐\n'
+            'Group B (2nd) ──┘          ├── SF 1 ──┐\n'
+            'Group C (1st) ──┐          |          ├── FINAL\n'
+            '                ├── QF 2 ──┘          |\n'
+            'Group D (2nd) ──┘          ┌── SF 2 ──┘\n'
+            '... (8 QF matches total)   |\n'
+            '\nSF Losers → 3RD PLACE MATCH';
+        case 9:
+          return
+            '── BYE ──────────────────── R16 slot 1\n'
+            '── BYE ──────────────────── R16 slot 2\n\n'
+            'Remaining 16 teams play 2 ELIM matches:\n'
+            'Team 3 ──┐\n'
+            '         ├── ELIM 1 ──── R16 slot 3\n'
+            'Team 4 ──┘\n'
+            'Team 5 ──┐\n'
+            '         ├── ELIM 2 ──── R16 slot 4\n'
+            'Team 6 ──┘\n'
+            '... (fills remaining R16 slots)\n'
+            '\nR16 → QF → SF → 3RD / FINAL';
+        default:
+          return 'Top 2 per group advance. Bracket auto-adjusts.';
+      }
+    }
+
+    final hasBye = byeCount(ng) > 0;
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF080418),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF3D1E88).withOpacity(0.4)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+        // ── Title ──────────────────────────────────────────────────────
+        Row(children: [
+          const Icon(Icons.account_tree,
+              color: Color(0xFF7B6AFF), size: 13),
+          const SizedBox(width: 6),
+          Text(
+            'Bracket for $ng Group${ng == 1 ? '' : 's'}',
+            style: const TextStyle(
+                color: Color(0xFF7B6AFF),
+                fontSize: 12, fontWeight: FontWeight.w900,
+                letterSpacing: 0.5),
+          ),
+        ]),
+        const SizedBox(height: 10),
+
+        // ── Flow line ──────────────────────────────────────────────────
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0F0A2A),
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(
+                color: const Color(0xFF7B6AFF).withOpacity(0.2)),
+          ),
+          child: Text(_flow(),
+              style: const TextStyle(
+                  color: Color(0xFF9B85FF),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.3,
+                  height: 1.4)),
+        ),
+        const SizedBox(height: 10),
+
+        // ── Why section ────────────────────────────────────────────────
+        _infoSection(
+          icon: Icons.lightbulb_outline,
+          color: const Color(0xFFFF9F43),
+          title: 'Why this flow?',
+          body: _why(),
+        ),
+
+        // ── BYE section (only if applicable) ──────────────────────────
+        if (hasBye) ...[
+          const SizedBox(height: 8),
+          _infoSection(
+            icon: Icons.directions_run,
+            color: const Color(0xFFFFD700),
+            title: 'Who gets the BYE?',
+            body: _byeWho(),
+          ),
+        ],
+        const SizedBox(height: 10),
+
+        // ── Diagram ────────────────────────────────────────────────────
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF04020F),
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(
+                color: Colors.white.withOpacity(0.07)),
+          ),
+          child: Text(_diagram(),
+              style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 10,
+                  fontFamily: 'monospace',
+                  height: 1.6)),
+        ),
+      ]),
+    );
+  }
+
+  Widget _infoSection({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String body,
+  }) =>
+      Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(7),
+          border: Border.all(color: color.withOpacity(0.2)),
+        ),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+          Icon(icon, color: color, size: 13),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+              Text(title,
+                  style: TextStyle(
+                      color: color,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800)),
+              const SizedBox(height: 4),
+              Text(body,
+                  style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 10,
+                      height: 1.5)),
+            ]),
+          ),
+        ]),
+      );
+
   // ── FIFA phase indicator ─────────────────────────────────────────────────
   Widget _buildFifaPhaseIndicator() {
     final koRows = _soccerScheduleRows
@@ -1708,10 +2221,10 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     final numGroupsNow   = _groups.isNotEmpty ? _groups.length : 8;
     final advancingNow   = numGroupsNow * 2;
     final roundOrder     = _fifaRoundOrder(numGroupsNow, totalRegisteredTeams: _soccerTeams.length);
-    final byes           = byeCount(advancingNow);
-    final realMatches    = realElimMatches(advancingNow);
-    final elimLabel      = advancingNow > 8
-        ? 'ELIM\n($realMatches real, $byes BYE)'
+    final byes           = byeCount(numGroupsNow);
+    final realMatches    = realElimMatches(numGroupsNow);
+    final elimLabel      = (realMatches > 0)
+        ? 'ELIM\n($realMatches matches\n$byes BYE)'
         : 'ELIM';
     final roundShort = {
       'elimination':    elimLabel,
@@ -1838,11 +2351,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     final roundOrder = _fifaRoundOrder(numGroups, totalRegisteredTeams: _soccerTeams.length)
         .where((r) => r != 'third-place').toList(); // 3rd shown separately
 
-    final advancingForCanvas = (_groups.isNotEmpty ? _groups.length : 8) * 2;
-    final canvasByes         = byeCount(advancingForCanvas);
-    final canvasReal         = realElimMatches(advancingForCanvas);
-    final elimCanvasLabel    = advancingForCanvas > 8
-        ? 'PLAY-IN\n($canvasReal real, $canvasByes BYE)'
+    final canvasNumGroups    = _groups.isNotEmpty ? _groups.length : 8;
+    final canvasByes         = byeCount(canvasNumGroups);
+    final canvasReal         = realElimMatches(canvasNumGroups);
+    final elimCanvasLabel    = (canvasReal > 0)
+        ? 'PLAY-IN\n($canvasReal matches\n$canvasByes BYE)'
         : 'ELIM';
     final roundLabels = {
       'elimination':    elimCanvasLabel,
@@ -2573,7 +3086,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               border: Border.all(
                   color: const Color(0xFFFFD700).withOpacity(0.4)),
             ),
-            child: Center(child: Text('ARENA ${a + 1}',
+            child: Center(child: Text('ARENA $a',
                 style: const TextStyle(color: Color(0xFFFFD700),
                     fontSize: 11, fontWeight: FontWeight.w900,
                     letterSpacing: 1))),
@@ -2652,8 +3165,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     final t2Wins = isDone && gm?.winner == gm?.team2;
 
                     return Expanded(child: GestureDetector(
-                      onTap: gm != null
-                          ? () => _showGroupMatchDialog(gm!) : null,
+                      onTap: null,
                       child: Container(
                         margin: const EdgeInsets.symmetric(
                             horizontal: 4, vertical: 4),
@@ -2745,22 +3257,84 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                                 FontWeight.w600))),
                                   ]),
                           ),
-                          Container(
-                            width: double.infinity,
-                            padding:
-                                const EdgeInsets.symmetric(vertical: 3),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.03),
-                              borderRadius: const BorderRadius.vertical(
-                                  bottom: Radius.circular(8)),
-                            ),
-                            child: Center(child: Text('Pending',
-                                style: TextStyle(
-                                    color:
-                                        Colors.white.withOpacity(0.2),
-                                    fontSize: 9,
-                                    fontWeight:
-                                        FontWeight.bold))),
+                          GestureDetector(
+                            onTap: !isDone && gm != null
+                                ? () {
+                                    final key = _statusKey(
+                                        _soccerCategoryId ?? 0,
+                                        gm!.matchId ?? 0);
+                                    final cur = _statusMap[key] ??
+                                        MatchStatus.pending;
+                                    setState(() {
+                                      _statusMap[key] = cur ==
+                                              MatchStatus.pending
+                                          ? MatchStatus.inProgress
+                                          : MatchStatus.pending;
+                                    });
+                                  }
+                                : null,
+                            child: Builder(builder: (_) {
+                              final key = _statusKey(
+                                  _soccerCategoryId ?? 0,
+                                  gm?.matchId ?? 0);
+                              final st = isDone
+                                  ? MatchStatus.done
+                                  : (_statusMap[key] ??
+                                      MatchStatus.pending);
+                              if (st == MatchStatus.inProgress) {
+                                return Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.symmetric(
+                                      vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF00CFFF)
+                                        .withOpacity(0.07),
+                                    borderRadius:
+                                        const BorderRadius.vertical(
+                                            bottom: Radius.circular(8)),
+                                  ),
+                                  child: const Center(
+                                      child: _BouncingSoccerBall()),
+                                );
+                              }
+                              return Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(
+                                    vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: st == MatchStatus.done
+                                      ? Colors.green.withOpacity(0.08)
+                                      : Colors.white.withOpacity(0.03),
+                                  borderRadius:
+                                      const BorderRadius.vertical(
+                                          bottom: Radius.circular(8)),
+                                ),
+                                child: Center(
+                                    child: st == MatchStatus.done
+                                        ? const Row(
+                                            mainAxisSize:
+                                                MainAxisSize.min,
+                                            children: [
+                                              Icon(Icons.check_circle,
+                                                  color: Colors.green,
+                                                  size: 10),
+                                              SizedBox(width: 4),
+                                              Text('Done',
+                                                  style: TextStyle(
+                                                      color: Colors.green,
+                                                      fontSize: 9,
+                                                      fontWeight:
+                                                          FontWeight.bold)),
+                                            ])
+                                        : Text('Tap to go live',
+                                            style: TextStyle(
+                                                color: Colors.white
+                                                    .withOpacity(0.2),
+                                                fontSize: 9,
+                                                fontWeight:
+                                                    FontWeight.bold))),
+                              );
+                            }),
                           ),
                         ]),
                       ),
@@ -2780,11 +3354,16 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   // ── FIFA Knockout Bracket View ───────────────────────────────────────────────
   Widget _buildKnockoutView(List<Map<String, dynamic>> koRows) {
     // Dynamic round order based on actual group count
-    final roundOrder = _fifaRoundOrder(_groups.isNotEmpty ? _groups.length : 8, totalRegisteredTeams: _soccerTeams.length);
-    final advancingKo     = (_groups.isNotEmpty ? _groups.length : 8) * 2;
-    final elimKoLabel     = advancingKo > 16 ? 'ELIMINATION (PLAY-IN)' : 'ELIMINATION';
+    final koNumGroups  = _groups.isNotEmpty ? _groups.length : 8;
+    final roundOrder   = _fifaRoundOrder(koNumGroups, totalRegisteredTeams: _soccerTeams.length);
+    final koReal       = realElimMatches(koNumGroups);
+    final koByes       = byeCount(koNumGroups);
+    final elimKoLabel  = koReal > 0
+        ? 'ELIMINATION (${koReal} matches, ${koByes} BYE)'
+        : 'ELIMINATION';
     final roundLabels = {
       'elimination':    elimKoLabel,
+      'round-of-16':    'ROUND OF 16',
       'quarter-finals': 'QUARTER FINALS',
       'semi-finals':    'SEMI FINALS',
       'third-place':    '3RD PLACE',
@@ -2792,6 +3371,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     };
     const roundColors = {
       'elimination':    Color(0xFF00CFFF),
+      'round-of-16':    Color(0xFF00CFFF),
       'quarter-finals': Color(0xFF00FF88),
       'semi-finals':    Color(0xFFFF9F43),
       'third-place':    Color(0xFFCD7F32),
@@ -2827,8 +3407,10 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               .compareTo((b['matchId'] as int?) ?? 0);
         });
 
-        // Group by time slot — all matches at same time = one row
-        // If times differ (overflow slots), each time = new row
+        // Group by time slot, then chunk into rows of max 2 arenas each.
+        // This ensures QF (4 matches) shows as 2 rows of 2 instead of
+        // 1 row of 3 + 1 row of 1 when 3 matches share the same time.
+        const int maxArenasPerRow = 2;
         final Map<String, List<Map<String, dynamic>>> byTimeMap = {};
         for (final m in matches) {
           final t = (m['time'] as String? ?? '').isNotEmpty
@@ -2836,13 +3418,24 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           byTimeMap.putIfAbsent(t, () => []);
           byTimeMap[t]!.add(m);
         }
-        final timeKeys = byTimeMap.keys.toList()
+        final sortedTimeKeys = byTimeMap.keys.toList()
           ..sort((a, b) {
             if (a == '__notime__') return 1;
             if (b == '__notime__') return -1;
             return a.compareTo(b);
           });
-        final rows = timeKeys.map((t) => byTimeMap[t]!).toList();
+        // Flatten into rows of max maxArenasPerRow
+        final List<List<Map<String, dynamic>>> rows = [];
+        final List<String> timeKeys = [];
+        for (final t in sortedTimeKeys) {
+          final slotMatches = byTimeMap[t]!;
+          for (int i = 0; i < slotMatches.length; i += maxArenasPerRow) {
+            final chunk = slotMatches.sublist(
+                i, (i + maxArenasPerRow).clamp(0, slotMatches.length));
+            rows.add(chunk);
+            timeKeys.add(t);
+          }
+        }
 
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           // ── Round header ──────────────────────────────────────────────
@@ -3143,7 +3736,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             final t1Wins = isDone && gm?.winner == gm?.team1;
             final t2Wins = isDone && gm?.winner == gm?.team2;
             return GestureDetector(
-              onTap: gm != null ? () => _showGroupMatchDialog(gm!) : null,
+              onTap: null,
               child: Container(
                 decoration: BoxDecoration(
                   color: isDone ? const Color(0xFF0D1A10)
@@ -3196,7 +3789,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     ]),
                   )),
                   Expanded(flex: 1, child: Center(child: GestureDetector(
-                    onTap: gm != null ? () => _showGroupMatchDialog(gm!) : null,
+                    onTap: null,
                     child: isDone
                         ? Text('${gm!.score1}–${gm.score2}',
                             style: const TextStyle(color: Colors.white,
@@ -3398,17 +3991,19 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           )),
           Expanded(flex: 2, child: Center(child: GestureDetector(
             onTap: () => _cycleStatus(catId, matchNum),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-              decoration: BoxDecoration(
-                color: status.color.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: status.color, width: 1.5),
-              ),
-              child: Text(status.label, textAlign: TextAlign.center,
-                  style: TextStyle(color: status.color,
-                      fontWeight: FontWeight.bold, fontSize: 12)),
-            ),
+            child: status == MatchStatus.inProgress
+                ? const _BouncingSoccerBall()
+                : Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: status.color.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: status.color, width: 1.5),
+                    ),
+                    child: Text(status.label, textAlign: TextAlign.center,
+                        style: TextStyle(color: status.color,
+                            fontWeight: FontWeight.bold, fontSize: 12)),
+                  ),
           ))),
         ]),
       ),
@@ -4100,6 +4695,17 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   );
 }
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// ROUND INFO — helper for bracket flow preview
+// ════════════════════════════════════════════════════════════════════════════
+class _RoundInfo {
+  final String label;
+  final int    matches;
+  final int    byes;
+  final Color  color;
+  const _RoundInfo(this.label, this.matches, this.byes, this.color);
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // _MplBracketCanvas  — MPL-style UB/LB double elim visual bracket
@@ -4895,4 +5501,85 @@ class _PulsingDotState extends State<_PulsingDot> with SingleTickerProviderState
     child: Container(width: 8, height: 8,
         decoration: const BoxDecoration(color: Color(0xFF00FF88), shape: BoxShape.circle)),
   );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// BOUNCING SOCCER BALL — shown when match status is In Progress
+// ════════════════════════════════════════════════════════════════════════════
+class _BouncingSoccerBall extends StatefulWidget {
+  const _BouncingSoccerBall();
+  @override
+  State<_BouncingSoccerBall> createState() => _BouncingSoccerBallState();
+}
+
+class _BouncingSoccerBallState extends State<_BouncingSoccerBall>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double>   _bounce;
+  late Animation<double>   _squash;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 550),
+    )..repeat(reverse: true);
+
+    // Ball moves up then comes back down
+    _bounce = Tween(begin: 0.0, end: -18.0).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeOut,
+          reverseCurve: Curves.bounceIn),
+    );
+
+    // Slight squash at bottom (wide + flat), stretch at top (narrow + tall)
+    _squash = Tween(begin: 1.0, end: 0.85).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 48,
+      height: 52,
+      child: AnimatedBuilder(
+        animation: _ctrl,
+        builder: (_, __) {
+          return Column(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              Transform.translate(
+                offset: Offset(0, _bounce.value),
+                child: Transform.scale(
+                  scaleX: 2.0 - _squash.value,  // wider when squashed
+                  scaleY: _squash.value,          // shorter when squashed
+                  child: const Text('⚽', style: TextStyle(fontSize: 26)),
+                ),
+              ),
+              const SizedBox(height: 2),
+              // Shadow — shrinks when ball is high
+              Opacity(
+                opacity: 0.25 + (_ctrl.value * 0.35),
+                child: Container(
+                  width: 18 + (_ctrl.value * 6),
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.black,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
 }

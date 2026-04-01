@@ -57,7 +57,6 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   // ── Soccer data ────────────────────────────────────────────────────────────
   List<Map<String, dynamic>> _soccerTeams   = [];
   int?  _soccerCatId;
-  bool  _showSoccerTeams  = false;
   bool  _bracketGenerated = false;
   bool  _isGenBracket     = false;
 
@@ -87,15 +86,12 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   ];
 
   late AnimationController _soccerAnimCtrl;
-  late Animation<double>   _soccerAnim;
 
   @override
   void initState() {
     super.initState();
     _soccerAnimCtrl = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 300));
-    _soccerAnim = CurvedAnimation(
-        parent: _soccerAnimCtrl, curve: Curves.easeInOut);
     _loadCategories();
   }
 
@@ -224,18 +220,59 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   // ── Generate single category ───────────────────────────────────────────────
   Future<void> _generateForCategory(int id) async {
     final dur = int.tryParse(_durationPerCat[id]?.text.trim() ?? '') ?? 0;
-    if (dur <= 0) { _snack('Duration must be > 0.', Colors.red); return; }
+    if (dur <= 0) { _snack('Duration must be greater than 0 minutes.', Colors.red); return; }
+    if (dur > 480) { _snack('Duration cannot exceed 480 minutes (8 hours).', Colors.red); return; }
     final warn = _arenaWarning(id);
     if (warn != null) { _snack(warn, Colors.red); return; }
+
+    // ── Time validation ────────────────────────────────────────────────────
+    final st       = _startTimePerCat[id] ?? const TimeOfDay(hour: 8, minute: 0);
+    final interval = int.tryParse(_matchBreakPerCat[id]?.text.trim() ?? '0') ?? 0;
+    if (interval < 0) { _snack('Match break cannot be negative.', Colors.red); return; }
+    if (interval > 120) { _snack('Match break cannot exceed 120 minutes.', Colors.red); return; }
+
+    // If health break is enabled, validate its window
+    if (_hbEnabled[id] == true) {
+      final hbS = _hbStart[id] ?? const TimeOfDay(hour: 12, minute: 0);
+      final hbE = _hbEnd[id]   ?? const TimeOfDay(hour: 13, minute: 0);
+      final hbStartMin = hbS.hour * 60 + hbS.minute;
+      final hbEndMin   = hbE.hour * 60 + hbE.minute;
+      final stMin      = st.hour * 60 + st.minute;
+      if (hbEndMin <= hbStartMin) {
+        _snack('Health break end time must be after its start time.', Colors.red); return;
+      }
+      if (hbStartMin <= stMin) {
+        _snack('Health break must start after the schedule start time.', Colors.red); return;
+      }
+    }
+
+    // ── Lock check: block regeneration if any match has scores ───────────────
+    try {
+      final conn       = await DBHelper.getConnection();
+      final lockResult = await conn.execute('''
+        SELECT COUNT(DISTINCT sc.match_id) AS cnt
+        FROM tbl_score sc
+        INNER JOIN tbl_teamschedule ts ON ts.match_id = sc.match_id
+        INNER JOIN tbl_team t          ON t.team_id   = ts.team_id
+        WHERE t.category_id = :catId
+      ''', {'catId': id});
+      final inProgressCount =
+          int.tryParse(lockResult.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
+      if (inProgressCount > 0) {
+        await _showLockedDialog(inProgressCount);
+        return;
+      }
+    } catch (e) {
+      _snack('Could not verify match status: $e', Colors.orange);
+      return;
+    }
 
     final confirmed = await _showConfirmDialog();
     if (confirmed != true) return;
 
     setState(() => _isGeneratingCat[id] = true);
     try {
-      final st       = _startTimePerCat[id] ?? const TimeOfDay(hour: 8, minute: 0);
-      final interval = int.tryParse(_matchBreakPerCat[id]?.text.trim() ?? '0') ?? 0;
-      final stStr    = '${st.hour.toString().padLeft(2, "0")}:${st.minute.toString().padLeft(2, "0")}';
+      final stStr = '${st.hour.toString().padLeft(2, "0")}:${st.minute.toString().padLeft(2, "0")}';
       final enabled  = _hbEnabled[id] ?? false;
       final hbMins   = enabled
           ? _hbDuration(
@@ -274,12 +311,72 @@ class _GenerateScheduleState extends State<GenerateSchedule>
     }
     final dur = int.tryParse(_sharedDuration.text.trim()) ?? 0;
     if (activeCats.isNotEmpty && dur <= 0) {
-      _snack('Duration must be > 0.', Colors.red); return;
+      _snack('Duration must be greater than 0 minutes.', Colors.red); return;
+    }
+    if (activeCats.isNotEmpty && dur > 480) {
+      _snack('Duration cannot exceed 480 minutes (8 hours).', Colors.red); return;
+    }
+    final sharedInterval = int.tryParse(_sharedBreak.text.trim()) ?? 0;
+    if (activeCats.isNotEmpty && sharedInterval < 0) {
+      _snack('Match break cannot be negative.', Colors.red); return;
+    }
+    if (activeCats.isNotEmpty && sharedInterval > 120) {
+      _snack('Match break cannot exceed 120 minutes.', Colors.red); return;
+    }
+    // Shared health break window validation
+    if (activeCats.isNotEmpty && _sharedHbEnabled) {
+      final hbSMin = _sharedHbStart.hour * 60 + _sharedHbStart.minute;
+      final hbEMin = _sharedHbEnd.hour   * 60 + _sharedHbEnd.minute;
+      final stMin  = _sharedStartTime.hour * 60 + _sharedStartTime.minute;
+      if (hbEMin <= hbSMin) {
+        _snack('Health break end time must be after its start time.', Colors.red); return;
+      }
+      if (hbSMin <= stMin) {
+        _snack('Health break must start after the schedule start time.', Colors.red); return;
+      }
     }
     final soccerDur = int.tryParse(_soccerDurationCtrl.text.trim()) ?? 10;
     if (hasSoccer && soccerDur <= 0) {
-      _snack('Soccer match duration must be > 0.', Colors.red); return;
+      _snack('Soccer match duration must be greater than 0 minutes.', Colors.red); return;
     }
+    if (hasSoccer && soccerDur > 480) {
+      _snack('Soccer match duration cannot exceed 480 minutes.', Colors.red); return;
+    }
+    final soccerInterval = int.tryParse(_soccerMatchBreakCtrl.text.trim()) ?? 5;
+    if (hasSoccer && soccerInterval < 0) {
+      _snack('Soccer match break cannot be negative.', Colors.red); return;
+    }
+    if (hasSoccer && soccerInterval > 120) {
+      _snack('Soccer match break cannot exceed 120 minutes.', Colors.red); return;
+    }
+    // Soccer health break window validation
+    if (hasSoccer && _soccerHbEnabled) {
+      final hbSMin = _soccerHbStart.hour * 60 + _soccerHbStart.minute;
+      final hbEMin = _soccerHbEnd.hour   * 60 + _soccerHbEnd.minute;
+      final stMin  = _soccerStartTime.hour * 60 + _soccerStartTime.minute;
+      if (hbEMin <= hbSMin) {
+        _snack('Soccer health break end time must be after its start time.', Colors.red); return;
+      }
+      if (hbSMin <= stMin) {
+        _snack('Soccer health break must start after the soccer start time.', Colors.red); return;
+      }
+    }
+    // ── Lock check: block if ANY match across ALL categories has scores ───────
+    try {
+      final conn       = await DBHelper.getConnection();
+      final lockResult = await conn.execute(
+          'SELECT COUNT(DISTINCT match_id) AS cnt FROM tbl_score');
+      final inProgressCount =
+          int.tryParse(lockResult.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
+      if (inProgressCount > 0) {
+        await _showLockedDialog(inProgressCount);
+        return;
+      }
+    } catch (e) {
+      _snack('Could not verify match status: $e', Colors.orange);
+      return;
+    }
+
     final confirmed = await _showConfirmDialog();
     if (confirmed != true) return;
     setState(() { _isGeneratingAll = true; _isGenBracket = true; });
@@ -324,7 +421,6 @@ class _GenerateScheduleState extends State<GenerateSchedule>
         final ng  = (shuffled.length / tpg).ceil().clamp(1, 8);
         final bs  = shuffled.length ~/ ng;
         final ex  = shuffled.length % ng;
-        final gl  = List.generate(ng, (i) => String.fromCharCode(65 + i));
         final List<List<Map<String, dynamic>>> groups = [];
         int cur = 0;
         for (int gi = 0; gi < ng; gi++) {
@@ -359,7 +455,43 @@ class _GenerateScheduleState extends State<GenerateSchedule>
     final tc = _soccerTeams.length;
     if (tc < 4) { _snack('Need at least 4 Soccer teams (have $tc).', Colors.red); return; }
     final durVal = int.tryParse(_soccerDurationCtrl.text.trim()) ?? 10;
-    if (durVal <= 0) { _snack('Match duration must be > 0.', Colors.red); return; }
+    if (durVal <= 0) { _snack('Soccer match duration must be greater than 0 minutes.', Colors.red); return; }
+    if (durVal > 480) { _snack('Soccer match duration cannot exceed 480 minutes.', Colors.red); return; }
+    final bracketInterval = int.tryParse(_soccerMatchBreakCtrl.text.trim()) ?? 5;
+    if (bracketInterval < 0) { _snack('Match break cannot be negative.', Colors.red); return; }
+    if (bracketInterval > 120) { _snack('Match break cannot exceed 120 minutes.', Colors.red); return; }
+    if (_soccerHbEnabled) {
+      final hbSMin = _soccerHbStart.hour * 60 + _soccerHbStart.minute;
+      final hbEMin = _soccerHbEnd.hour   * 60 + _soccerHbEnd.minute;
+      final stMin  = _soccerStartTime.hour * 60 + _soccerStartTime.minute;
+      if (hbEMin <= hbSMin) {
+        _snack('Health break end time must be after its start time.', Colors.red); return;
+      }
+      if (hbSMin <= stMin) {
+        _snack('Health break must start after the soccer start time.', Colors.red); return;
+      }
+    }
+    // ── Lock check: block if soccer category has scores ───────────────────────
+    try {
+      final conn       = await DBHelper.getConnection();
+      final lockResult = await conn.execute('''
+        SELECT COUNT(DISTINCT sc.match_id) AS cnt
+        FROM tbl_score sc
+        INNER JOIN tbl_teamschedule ts ON ts.match_id = sc.match_id
+        INNER JOIN tbl_team t          ON t.team_id   = ts.team_id
+        WHERE t.category_id = :catId
+      ''', {'catId': _soccerCatId});
+      final inProgressCount =
+          int.tryParse(lockResult.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
+      if (inProgressCount > 0) {
+        await _showLockedDialog(inProgressCount);
+        return;
+      }
+    } catch (e) {
+      _snack('Could not verify match status: $e', Colors.orange);
+      return;
+    }
+
     final confirmed = await _showConfirmDialog();
     if (confirmed != true) return;
     setState(() => _isGenBracket = true);
@@ -467,6 +599,64 @@ class _GenerateScheduleState extends State<GenerateSchedule>
                       style: TextStyle(color: Colors.white,
                           fontWeight: FontWeight.bold, letterSpacing: 1))))))),
           ]),
+        ]),
+      ),
+    ),
+  );
+
+  // ── Locked dialog (shown when matches are in progress) ────────────────────
+  Future<void> _showLockedDialog(int count) => showDialog<void>(
+    context: context,
+    builder: (ctx) => Dialog(
+      backgroundColor: Colors.transparent,
+      child: Container(
+        width: 380, padding: const EdgeInsets.all(28),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+              begin: Alignment.topLeft, end: Alignment.bottomRight,
+              colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)]),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.redAccent.withOpacity(0.45), width: 1.5)),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(width: 58, height: 58,
+            decoration: BoxDecoration(shape: BoxShape.circle,
+                color: Colors.red.withOpacity(0.15),
+                border: Border.all(color: Colors.redAccent.withOpacity(0.5))),
+            child: const Icon(Icons.lock_rounded,
+                color: Colors.redAccent, size: 28)),
+          const SizedBox(height: 16),
+          const Text('Cannot Regenerate',
+              style: TextStyle(color: Colors.white, fontSize: 17,
+                  fontWeight: FontWeight.w800)),
+          const SizedBox(height: 10),
+          Text(
+            '$count match${count > 1 ? "es have" : " has"} already been '
+            'scored.\n\nRegenerating would permanently delete all recorded '
+            'scores and standings. Please reset scores first if you really '
+            'need to regenerate.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white.withOpacity(0.55),
+                fontSize: 13, height: 1.6)),
+          const SizedBox(height: 24),
+          SizedBox(width: double.infinity,
+            child: ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.transparent,
+                shadowColor: Colors.transparent,
+                padding: EdgeInsets.zero,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10))),
+              child: Ink(
+                decoration: BoxDecoration(
+                  color: Colors.redAccent.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.redAccent.withOpacity(0.4))),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 13),
+                  child: Center(child: Text('UNDERSTOOD',
+                      style: TextStyle(color: Colors.redAccent,
+                          fontWeight: FontWeight.bold, letterSpacing: 1))))))),
         ]),
       ),
     ),

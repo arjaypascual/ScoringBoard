@@ -5,7 +5,9 @@ import 'dart:math' as math;
 import 'main.dart';
 import 'schedule_viewer.dart';
 import 'standings.dart';
-import 'teams_players.dart';
+import 'generate_schedule.dart';
+import 'teams_players.dart';  // ADDED: import for TeamsPlayers
+import 'dashboard.dart';
 
 class LandingPage extends StatefulWidget {
   const LandingPage({super.key});
@@ -24,22 +26,22 @@ class _LandingPageState extends State<LandingPage>
   late Animation<double> _logoOpacity;
   late Animation<double> _btn1Offset;
   late Animation<double> _btn2Offset;
+  late Animation<double> _btn3Offset;
   late Animation<double> _btn4Offset;
   late Animation<double> _btn1Opacity;
   late Animation<double> _btn2Opacity;
+  late Animation<double> _btn3Opacity;
   late Animation<double> _btn4Opacity;
 
   @override
   void initState() {
     super.initState();
 
-    // Background rotation
     _bgController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 30),
     )..repeat();
 
-    // Logo entrance
     _logoController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1200),
@@ -53,48 +55,58 @@ class _LandingPageState extends State<LandingPage>
           curve: const Interval(0.0, 0.5, curve: Curves.easeIn)),
     );
 
-    // Buttons staggered entrance
     _buttonsController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 900),
+      duration: const Duration(milliseconds: 1000),
     );
+
     _btn1Offset = Tween<double>(begin: 60.0, end: 0.0).animate(
       CurvedAnimation(
           parent: _buttonsController,
-          curve: const Interval(0.0, 0.6, curve: Curves.easeOutCubic)),
+          curve: const Interval(0.0, 0.55, curve: Curves.easeOutCubic)),
     );
     _btn2Offset = Tween<double>(begin: 60.0, end: 0.0).animate(
       CurvedAnimation(
           parent: _buttonsController,
-          curve: const Interval(0.2, 0.75, curve: Curves.easeOutCubic)),
+          curve: const Interval(0.15, 0.70, curve: Curves.easeOutCubic)),
+    );
+    _btn3Offset = Tween<double>(begin: 60.0, end: 0.0).animate(
+      CurvedAnimation(
+          parent: _buttonsController,
+          curve: const Interval(0.30, 0.82, curve: Curves.easeOutCubic)),
     );
     _btn4Offset = Tween<double>(begin: 60.0, end: 0.0).animate(
       CurvedAnimation(
           parent: _buttonsController,
-          curve: const Interval(0.5, 1.0, curve: Curves.easeOutCubic)),
+          curve: const Interval(0.48, 1.0, curve: Curves.easeOutCubic)),
     );
+
     _btn1Opacity = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
           parent: _buttonsController,
-          curve: const Interval(0.0, 0.5, curve: Curves.easeIn)),
+          curve: const Interval(0.0, 0.45, curve: Curves.easeIn)),
     );
     _btn2Opacity = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
           parent: _buttonsController,
-          curve: const Interval(0.2, 0.65, curve: Curves.easeIn)),
+          curve: const Interval(0.15, 0.60, curve: Curves.easeIn)),
+    );
+    _btn3Opacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(
+          parent: _buttonsController,
+          curve: const Interval(0.30, 0.72, curve: Curves.easeIn)),
     );
     _btn4Opacity = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(
           parent: _buttonsController,
-          curve: const Interval(0.5, 0.9, curve: Curves.easeIn)),
+          curve: const Interval(0.48, 0.88, curve: Curves.easeIn)),
     );
 
-    // Start animations
     Future.delayed(const Duration(milliseconds: 200), () {
-      _logoController.forward();
+      if (mounted) _logoController.forward();
     });
     Future.delayed(const Duration(milliseconds: 800), () {
-      _buttonsController.forward();
+      if (mounted) _buttonsController.forward();
     });
   }
 
@@ -107,21 +119,17 @@ class _LandingPageState extends State<LandingPage>
   }
 
   void _goToRegistration() {
-    Navigator.of(context).push(
-      _buildRoute(const RegistrationFlow()),
-    );
+    Navigator.of(context).push(_buildRoute(const RegistrationFlow()));
   }
 
   void _goToSchedule() {
     Navigator.of(context).push(
       _buildRoute(ScheduleViewer(
-        onRegister:  () => Navigator.of(context).pop(),
+        onRegister: () => Navigator.of(context).pop(),
         onStandings: () {
           Navigator.of(context).pop();
           Navigator.of(context).push(
-            _buildRoute(Standings(
-              onBack: () => Navigator.of(context).pop(),
-            )),
+            _buildRoute(Standings(onBack: () => Navigator.of(context).pop())),
           );
         },
       )),
@@ -130,15 +138,34 @@ class _LandingPageState extends State<LandingPage>
 
   void _goToStandings() {
     Navigator.of(context).push(
-      _buildRoute(Standings(
+      _buildRoute(Standings(onBack: () => Navigator.of(context).pop())),
+    );
+  }
+
+  void _goToGenerateSchedule() {
+    Navigator.of(context).push(
+      _buildRoute(GenerateSchedule(
+        onBack: () => Navigator.of(context).pop(),
+        onGenerated: () {
+          Navigator.of(context).pop();
+          _goToSchedule();
+        },
+      )),
+    );
+  }
+
+  // ADDED: Navigation to TeamsPlayers page
+  void _goToTeamsPlayers() {
+    Navigator.of(context).push(
+      _buildRoute(TeamsPlayers(
         onBack: () => Navigator.of(context).pop(),
       )),
     );
   }
 
-  void _goToTeams() {
+  void _goToDashboard() {
     Navigator.of(context).push(
-      _buildRoute(TeamsPlayers(
+      _buildRoute(Dashboard(
         onBack: () => Navigator.of(context).pop(),
       )),
     );
@@ -170,33 +197,22 @@ class _LandingPageState extends State<LandingPage>
     return Scaffold(
       body: Stack(
         children: [
-          // ── Animated background ──────────────────────────────────────
           _buildBackground(size),
-
-          // ── Geometric circuit decorations ────────────────────────────
           _buildCircuitLines(size),
-
-          // ── Main content ─────────────────────────────────────────────
           SafeArea(
             child: Column(
               children: [
-                // ── Sponsor logos row (Makeblock left, Creotec right) ──
+                // ── Sponsor logos ──────────────────────────────────────
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Image.asset(
-                        'assets/images/RoboventureLogo.png',
-                        height: 44,
-                        fit: BoxFit.contain,
-                      ),
-                      Image.asset(
-                        'assets/images/CreotecLogo.png',
-                        height: 44,
-                        fit: BoxFit.contain,
-                      ),
+                      Image.asset('assets/images/RoboventureLogo.png',
+                          height: 44, fit: BoxFit.contain),
+                      Image.asset('assets/images/CreotecLogo.png',
+                          height: 44, fit: BoxFit.contain),
                     ],
                   ),
                 ),
@@ -210,7 +226,7 @@ class _LandingPageState extends State<LandingPage>
                         children: [
                           const SizedBox(height: 12),
 
-                          // ── Main Philippine Robotics Cup logo ──
+                          // ── Logo ──────────────────────────────────────
                           AnimatedBuilder(
                             animation: _logoController,
                             builder: (_, __) => Opacity(
@@ -221,75 +237,88 @@ class _LandingPageState extends State<LandingPage>
                               ),
                             ),
                           ),
-
-
                           const SizedBox(height: 28),
 
-                          // Buttons
+                          // ── Buttons ───────────────────────────────────
                           AnimatedBuilder(
                             animation: _buttonsController,
                             builder: (_, __) => Column(
                               children: [
-                                // ── REGISTRATION (Primary - largest, filled) ──
-                                _animatedButton(
-                                  offset: _btn1Offset.value,
+
+                                // 1 ── REGISTRATION (primary)
+                                _animBtn(
+                                  offset:  _btn1Offset.value,
                                   opacity: _btn1Opacity.value,
                                   child: _NavButton(
-                                    label: 'REGISTRATION',
-                                    subtitle: 'Register Now',
-                                    icon: Icons.app_registration_rounded,
-                                    color: const Color(0xFF00CFFF),
+                                    label:     'REGISTRATION',
+                                    subtitle:  'Register teams, mentors & players',
+                                    icon:      Icons.app_registration_rounded,
+                                    color:     const Color(0xFF00CFFF),
                                     isPrimary: true,
-                                    onTap: _goToRegistration,
+                                    onTap:     _goToRegistration,
                                   ),
                                 ),
                                 const SizedBox(height: 12),
 
-                                // ── SCHEDULE + STANDINGS side by side ──
-                                _animatedButton(
-                                  offset: _btn2Offset.value,
+                                // 2 ── SCHEDULE + STANDINGS
+                                _animBtn(
+                                  offset:  _btn2Offset.value,
                                   opacity: _btn2Opacity.value,
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        child: _NavButton(
-                                          label: 'SCHEDULE',
-                                          subtitle: 'View match schedule',
-                                          icon: Icons.calendar_month_rounded,
-                                          color: const Color(0xFF967BB6),
-                                          isPrimary: false,
-                                          onTap: _goToSchedule,
-                                        ),
+                                  child: Row(children: [
+                                    Expanded(
+                                      child: _NavButton(
+                                        label:    'SCHEDULE',
+                                        subtitle: 'View match schedule',
+                                        icon:     Icons.calendar_month_rounded,
+                                        color:    const Color(0xFF967BB6),
+                                        onTap:    _goToSchedule,
                                       ),
-                                      const SizedBox(width: 12),
-                                      Expanded(
-                                        child: _NavButton(
-                                          label: 'STANDINGS',
-                                          subtitle: 'View leaderboard',
-                                          icon: Icons.emoji_events_rounded,
-                                          color: const Color(0xFFFFD700),
-                                          isPrimary: false,
-                                          onTap: _goToStandings,
-                                        ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: _NavButton(
+                                        label:    'STANDINGS',
+                                        subtitle: 'View leaderboard',
+                                        icon:     Icons.emoji_events_rounded,
+                                        color:    const Color(0xFFFFD700),
+                                        onTap:    _goToStandings,
                                       ),
-                                    ],
-                                  ),
+                                    ),
+                                  ]),
                                 ),
                                 const SizedBox(height: 12),
 
-                                // ── TEAMS & PLAYERS (smallest, tertiary) ──
-                                _animatedButton(
-                                  offset: _btn4Offset.value,
-                                  opacity: _btn4Opacity.value,
+                                // 3 ── GENERATE SCHEDULE
+                                _animBtn(
+                                  offset:  _btn3Offset.value,
+                                  opacity: _btn3Opacity.value,
                                   child: _NavButton(
-                                    label: 'TEAMS & PLAYERS',
-                                    subtitle: 'Browse registered teams',
-                                    icon: Icons.groups_rounded,
-                                    color: const Color(0xFF00E5A0),
-                                    isPrimary: false,
-                                    isTertiary: true,
-                                    onTap: _goToTeams,
+                                    label:    'GENERATE SCHEDULE',
+                                    subtitle: 'Auto-generate match brackets',
+                                    icon:     Icons.auto_awesome_rounded,
+                                    color:    const Color(0xFF00E5A0),
+                                    onTap:    _goToGenerateSchedule,
                                   ),
+                                ),
+                                const SizedBox(height: 20),
+
+                                // 4 ── Teams & Players + Dashboard row
+                                _animBtn(
+                                  offset:  _btn4Offset.value,
+                                  opacity: _btn4Opacity.value,
+                                  child: Row(children: [
+                                    Expanded(child: _TeamsLink(
+                                      icon: Icons.groups_rounded,
+                                      label: 'View Teams & Players',
+                                      onTap: _goToTeamsPlayers,
+                                    )),
+                                    const SizedBox(width: 12),
+                                    Expanded(child: _TeamsLink(
+                                      icon: Icons.dashboard_rounded,
+                                      label: 'Dashboard',
+                                      onTap: _goToDashboard,
+                                    )),
+                                  ]),
                                 ),
                               ],
                             ),
@@ -300,7 +329,6 @@ class _LandingPageState extends State<LandingPage>
                   ),
                 ),
 
-                // Footer
                 _buildFooter(),
               ],
             ),
@@ -310,7 +338,6 @@ class _LandingPageState extends State<LandingPage>
     );
   }
 
-  // ── Background ───────────────────────────────────────────────────────────
   Widget _buildBackground(Size size) {
     return Container(
       width: size.width,
@@ -319,100 +346,69 @@ class _LandingPageState extends State<LandingPage>
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [
-            Color(0xFF0A0520),
-            Color(0xFF1A0A4A),
-            Color(0xFF0D1535),
-          ],
+          colors: [Color(0xFF0A0520), Color(0xFF1A0A4A), Color(0xFF0D1535)],
           stops: [0.0, 0.5, 1.0],
         ),
       ),
       child: AnimatedBuilder(
         animation: _bgController,
-        builder: (_, __) {
-          return CustomPaint(
-            painter: _OrbitPainter(_bgController.value),
-          );
-        },
+        builder: (_, __) =>
+            CustomPaint(painter: _OrbitPainter(_bgController.value)),
       ),
     );
   }
 
-  // ── Circuit line decorations ─────────────────────────────────────────────
   Widget _buildCircuitLines(Size size) {
-    return Positioned.fill(
-      child: CustomPaint(
-        painter: _CircuitPainter(),
-      ),
-    );
+    return Positioned.fill(child: CustomPaint(painter: _CircuitPainter()));
   }
 
-
-  // ── Logo ─────────────────────────────────────────────────────────────────
   Widget _buildLogo() {
     return Container(
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF7B2FFF).withOpacity(0.45),
-            blurRadius: 80,
-            spreadRadius: 25,
-          ),
+              color: const Color(0xFF7B2FFF).withOpacity(0.45),
+              blurRadius: 80, spreadRadius: 25),
           BoxShadow(
-            color: const Color(0xFF00CFFF).withOpacity(0.25),
-            blurRadius: 50,
-            spreadRadius: 10,
-          ),
+              color: const Color(0xFF00CFFF).withOpacity(0.25),
+              blurRadius: 50, spreadRadius: 10),
         ],
       ),
-      child: Image.asset(
-        'assets/images/CenterLogo.png',
-        width: 220,
-        height: 220,
-        fit: BoxFit.contain,
-      ),
+      child: Image.asset('assets/images/CenterLogo.png',
+          width: 220, height: 220, fit: BoxFit.contain),
     );
   }
 
-  // ── Footer ───────────────────────────────────────────────────────────────
   Widget _buildFooter() {
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
-      child: Text(
-        '© 2026 RoboVenture • Powered by Creotec',
-        style: TextStyle(
-          color: Colors.white.withOpacity(0.25),
-          fontSize: 11,
-          letterSpacing: 1,
-        ),
-      ),
+      child: Text('© 2026 RoboVenture • Powered by Creotec',
+          style: TextStyle(
+              color: Colors.white.withOpacity(0.25),
+              fontSize: 11, letterSpacing: 1)),
     );
   }
 
-  Widget _animatedButton({
+  Widget _animBtn({
     required double offset,
     required double opacity,
     required Widget child,
   }) {
     return Opacity(
       opacity: opacity,
-      child: Transform.translate(
-        offset: Offset(0, offset),
-        child: child,
-      ),
+      child: Transform.translate(offset: Offset(0, offset), child: child),
     );
   }
 }
 
-// ── Nav Button ───────────────────────────────────────────────────────────────
+// ── Nav Button ────────────────────────────────────────────────────────────────
 class _NavButton extends StatefulWidget {
   final String label;
   final String subtitle;
   final IconData icon;
   final Color color;
   final bool isPrimary;
-  final bool isTertiary;
   final VoidCallback onTap;
 
   const _NavButton({
@@ -420,9 +416,8 @@ class _NavButton extends StatefulWidget {
     required this.subtitle,
     required this.icon,
     required this.color,
-    required this.isPrimary,
     required this.onTap,
-    this.isTertiary = false,
+    this.isPrimary = false,
   });
 
   @override
@@ -431,176 +426,206 @@ class _NavButton extends StatefulWidget {
 
 class _NavButtonState extends State<_NavButton>
     with SingleTickerProviderStateMixin {
-  late AnimationController _hoverController;
+  late AnimationController _hoverCtrl;
   late Animation<double> _scaleAnim;
   late Animation<double> _glowAnim;
-  bool _hovered = false;
 
   @override
   void initState() {
     super.initState();
-    _hoverController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 180),
-    );
-    _scaleAnim = Tween<double>(begin: 1.0, end: 1.03).animate(
-      CurvedAnimation(parent: _hoverController, curve: Curves.easeOut),
-    );
-    _glowAnim = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _hoverController, curve: Curves.easeOut),
-    );
+    _hoverCtrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 180));
+    _scaleAnim = Tween<double>(begin: 1.0, end: 1.03)
+        .animate(CurvedAnimation(parent: _hoverCtrl, curve: Curves.easeOut));
+    _glowAnim = Tween<double>(begin: 0.0, end: 1.0)
+        .animate(CurvedAnimation(parent: _hoverCtrl, curve: Curves.easeOut));
   }
 
   @override
   void dispose() {
-    _hoverController.dispose();
+    _hoverCtrl.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final double height = widget.isPrimary
-        ? 76
-        : widget.isTertiary
-            ? 52
-            : 64;
+    final double height = widget.isPrimary ? 76 : 64;
 
     return MouseRegion(
-      onEnter: (_) {
-        setState(() => _hovered = true);
-        _hoverController.forward();
-      },
-      onExit: (_) {
-        setState(() => _hovered = false);
-        _hoverController.reverse();
-      },
+      onEnter: (_) => _hoverCtrl.forward(),
+      onExit:  (_) => _hoverCtrl.reverse(),
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedBuilder(
-          animation: _hoverController,
-          builder: (_, __) {
-            return Transform.scale(
-              scale: _scaleAnim.value,
-              child: Container(
-                width: double.infinity,
-                height: height,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(widget.isPrimary ? 16 : 12),
-                  gradient: widget.isPrimary
-                      ? LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            widget.color,
-                            widget.color.withOpacity(0.75),
-                            const Color(0xFF0099CC),
-                          ],
-                        )
-                      : LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            widget.color.withOpacity(
-                                0.10 + 0.12 * _glowAnim.value),
-                            widget.color.withOpacity(
-                                0.04 + 0.06 * _glowAnim.value),
-                          ],
-                        ),
-                  border: widget.isPrimary
-                      ? null
-                      : Border.all(
-                          color: widget.color
-                              .withOpacity(0.5 + 0.4 * _glowAnim.value),
-                          width: widget.isTertiary ? 1.0 : 1.5,
-                        ),
-                  boxShadow: _hovered
-                      ? [
-                          BoxShadow(
-                            color: widget.color.withOpacity(
-                                widget.isPrimary ? 0.55 : 0.30),
-                            blurRadius: widget.isPrimary ? 32 : 20,
-                            spreadRadius: widget.isPrimary ? 4 : 1,
-                          ),
-                        ]
-                      : widget.isPrimary
-                          ? [
-                              BoxShadow(
-                                color: widget.color.withOpacity(0.30),
-                                blurRadius: 20,
-                                spreadRadius: 2,
-                              ),
-                            ]
-                          : [],
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    if (widget.isPrimary)
-                      Container(
-                        width: 40,
-                        height: 40,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Colors.white.withOpacity(0.2),
-                        ),
-                        child: Icon(widget.icon,
-                            color: Colors.white,
-                            size: 22),
+          animation: _hoverCtrl,
+          builder: (_, __) => Transform.scale(
+            scale: _scaleAnim.value,
+            child: Container(
+              width: double.infinity,
+              height: height,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(widget.isPrimary ? 16 : 12),
+                gradient: widget.isPrimary
+                    ? LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          widget.color,
+                          widget.color.withOpacity(0.75),
+                          const Color(0xFF0099CC),
+                        ],
                       )
-                    else
-                      Icon(widget.icon,
-                          color: widget.isTertiary
-                              ? widget.color.withOpacity(0.8)
-                              : widget.color,
-                          size: widget.isTertiary ? 18 : 22),
-                    const SizedBox(width: 14),
-                    Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.label,
-                          style: TextStyle(
-                            color: widget.isPrimary
-                                ? Colors.white
-                                : _hovered
-                                    ? widget.color
-                                    : Colors.white,
-                            fontSize: widget.isPrimary
-                                ? 18
-                                : widget.isTertiary
-                                    ? 13
-                                    : 15,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 2.5,
-                          ),
+                    : LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          widget.color
+                              .withOpacity(0.10 + 0.12 * _glowAnim.value),
+                          widget.color
+                              .withOpacity(0.04 + 0.06 * _glowAnim.value),
+                        ],
+                      ),
+                border: widget.isPrimary
+                    ? null
+                    : Border.all(
+                        color: widget.color
+                            .withOpacity(0.5 + 0.4 * _glowAnim.value),
+                        width: 1.5,
+                      ),
+                boxShadow: _hoverCtrl.value > 0
+                    ? [
+                        BoxShadow(
+                          color: widget.color.withOpacity(
+                              widget.isPrimary ? 0.55 : 0.30),
+                          blurRadius: widget.isPrimary ? 32 : 20,
+                          spreadRadius: widget.isPrimary ? 4 : 1,
                         ),
-                        if (!widget.isTertiary)
-                          Text(
-                            widget.subtitle,
-                            style: TextStyle(
-                              color: widget.isPrimary
-                                  ? Colors.white.withOpacity(0.75)
-                                  : widget.color.withOpacity(0.6),
-                              fontSize: 11,
-                              fontWeight: FontWeight.w400,
-                              letterSpacing: 0.5,
+                      ]
+                    : widget.isPrimary
+                        ? [
+                            BoxShadow(
+                              color: widget.color.withOpacity(0.30),
+                              blurRadius: 20, spreadRadius: 2,
                             ),
-                          ),
-                      ],
-                    ),
-                  ],
-                ),
+                          ]
+                        : [],
               ),
-            );
-          },
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (widget.isPrimary)
+                    Container(
+                      width: 40, height: 40,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white.withOpacity(0.2),
+                      ),
+                      child: Icon(widget.icon, color: Colors.white, size: 22),
+                    )
+                  else
+                    Icon(widget.icon, color: widget.color, size: 22),
+                  const SizedBox(width: 14),
+                  Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.label,
+                        style: TextStyle(
+                          color: widget.isPrimary ? Colors.white : Colors.white,
+                          fontSize: widget.isPrimary ? 18 : 15,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 2.5,
+                        ),
+                      ),
+                      Text(
+                        widget.subtitle,
+                        style: TextStyle(
+                          color: widget.isPrimary
+                              ? Colors.white.withOpacity(0.75)
+                              : widget.color.withOpacity(0.6),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w400,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
   }
 }
 
-// ── Orbit painter (rotating bg rings) ────────────────────────────────────────
+// ── Subtle text link (Teams & Players / Dashboard) ───────────────────────────
+class _TeamsLink extends StatefulWidget {
+  final VoidCallback onTap;
+  final IconData icon;
+  final String label;
+  const _TeamsLink({
+    required this.onTap,
+    this.icon  = Icons.groups_rounded,
+    this.label = 'View Teams & Players',
+  });
+
+  @override
+  State<_TeamsLink> createState() => _TeamsLinkState();
+}
+
+class _TeamsLinkState extends State<_TeamsLink> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit:  (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: _hovered
+                ? Colors.white.withOpacity(0.05)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: _hovered
+                  ? Colors.white.withOpacity(0.12)
+                  : Colors.white.withOpacity(0.06),
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(widget.icon,
+                  size: 14,
+                  color: Colors.white.withOpacity(_hovered ? 0.55 : 0.30)),
+              const SizedBox(width: 7),
+              Text(
+                widget.label,
+                style: TextStyle(
+                  color: Colors.white.withOpacity(_hovered ? 0.55 : 0.30),
+                  fontSize: 11,
+                  letterSpacing: 1,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Orbit painter ─────────────────────────────────────────────────────────────
 class _OrbitPainter extends CustomPainter {
   final double progress;
   _OrbitPainter(this.progress);
@@ -609,31 +634,24 @@ class _OrbitPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final cx = size.width / 2;
     final cy = size.height / 2;
-
     for (int i = 0; i < 3; i++) {
       final radius = 200.0 + i * 160;
       final angle  = progress * 2 * math.pi + i * (math.pi / 3);
-      final paint  = Paint()
-        ..color = const Color(0xFF7B2FFF).withOpacity(0.04 - i * 0.01)
-        ..style       = PaintingStyle.stroke
-        ..strokeWidth = 1.5;
-
       canvas.drawCircle(
         Offset(cx + math.cos(angle) * 30, cy + math.sin(angle) * 20),
         radius,
-        paint,
+        Paint()
+          ..color = const Color(0xFF7B2FFF).withOpacity(0.04 - i * 0.01)
+          ..style       = PaintingStyle.stroke
+          ..strokeWidth = 1.5,
       );
     }
-
-    final radial = RadialGradient(
-      colors: [
-        const Color(0xFF7B2FFF).withOpacity(0.15),
-        Colors.transparent,
-      ],
-    );
+    final radial = RadialGradient(colors: [
+      const Color(0xFF7B2FFF).withOpacity(0.15),
+      Colors.transparent,
+    ]);
     canvas.drawCircle(
-      Offset(cx, cy),
-      300,
+      Offset(cx, cy), 300,
       Paint()
         ..shader = radial.createShader(
             Rect.fromCircle(center: Offset(cx, cy), radius: 300)),
@@ -644,7 +662,7 @@ class _OrbitPainter extends CustomPainter {
   bool shouldRepaint(_OrbitPainter old) => old.progress != progress;
 }
 
-// ── Circuit painter (static decorative lines) ────────────────────────────────
+// ── Circuit painter ───────────────────────────────────────────────────────────
 class _CircuitPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
@@ -652,7 +670,6 @@ class _CircuitPainter extends CustomPainter {
       ..color       = const Color(0xFF3D1A8C).withOpacity(0.25)
       ..strokeWidth = 1.0
       ..style       = PaintingStyle.stroke;
-
     final dotPaint = Paint()
       ..color = const Color(0xFF00CFFF).withOpacity(0.3)
       ..style = PaintingStyle.fill;
@@ -666,7 +683,6 @@ class _CircuitPainter extends CustomPainter {
       ..moveTo(40, 340)
       ..lineTo(40, 420)
       ..lineTo(100, 420);
-
     final rightPath = Path()
       ..moveTo(size.width - 40, 120)
       ..lineTo(size.width - 40, 240)
@@ -679,20 +695,14 @@ class _CircuitPainter extends CustomPainter {
     canvas.drawPath(leftPath, paint);
     canvas.drawPath(rightPath, paint);
 
-    for (final offset in [
-      const Offset(40, 200),
-      const Offset(80, 280),
-      const Offset(40, 420),
-    ]) {
-      canvas.drawCircle(offset, 3, dotPaint);
-    }
-    for (final offset in [
+    for (final o in [
+      const Offset(40, 200), const Offset(80, 280), const Offset(40, 420),
+    ]) { canvas.drawCircle(o, 3, dotPaint); }
+    for (final o in [
       Offset(size.width - 40, 240),
       Offset(size.width - 90, 320),
       Offset(size.width - 40, 460),
-    ]) {
-      canvas.drawCircle(offset, 3, dotPaint);
-    }
+    ]) { canvas.drawCircle(o, 3, dotPaint); }
   }
 
   @override

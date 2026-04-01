@@ -359,9 +359,29 @@ class _RefereeRegistrationPageState extends State<RefereeRegistrationPage>
 
     final name    = nameCtrl.text.trim();
     final contact = contactCtrl.text.trim();
-    if (name.isEmpty) { _snack('Referee name is required.', success: false); return; }
-    if (contact.isNotEmpty && contact.length != 11) {
+    // ── Name validation ───────────────────────────────────────────────────
+    if (name.isEmpty) {
+      _snack('Referee name is required.', success: false); return;
+    }
+    if (name.length < 2) {
+      _snack('Name must be at least 2 characters.', success: false); return;
+    }
+    if (name.length > 100) {
+      _snack('Name must not exceed 100 characters.', success: false); return;
+    }
+    final validName = RegExp(r"^[a-zA-ZÀ-ÿ\s.\-]+$");
+    if (!validName.hasMatch(name)) {
+      _snack('Name may only contain letters, spaces, hyphens, and periods.', success: false); return;
+    }
+    // ── Contact validation ────────────────────────────────────────────────
+    if (contact.isEmpty) {
+      _snack('Contact number is required.', success: false); return;
+    }
+    if (contact.length != 11) {
       _snack('Contact number must be exactly 11 digits.', success: false); return;
+    }
+    if (!contact.startsWith('09')) {
+      _snack('Contact number must start with 09.', success: false); return;
     }
     try {
       int refereeId;
@@ -1517,14 +1537,16 @@ class _RefereeDialogState extends State<_RefereeDialog> {
               _label('REFEREE NAME'),
               const SizedBox(height: 8),
               _field(controller: widget.nameCtrl,
-                  hint: 'e.g. Juan dela Cruz', icon: Icons.person_rounded),
+                  hint: 'e.g. Juan dela Cruz', icon: Icons.person_rounded,
+                  maxLength: 100,
+                  inputFormatters: [LengthLimitingTextInputFormatter(100)]),
 
               const SizedBox(height: 20),
 
               Row(children: [
                 _label('CONTACT NUMBER'),
                 const SizedBox(width: 8),
-                Text('(11 digits max)', style: TextStyle(
+                Text('(required, starts with 09)', style: TextStyle(
                     color: Colors.white.withOpacity(0.2),
                     fontSize: 9, fontStyle: FontStyle.italic)),
                 const Spacer(),

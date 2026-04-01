@@ -1,6 +1,6 @@
 // ignore_for_file: avoid_print
 
-import 'dart:math';
+
 import 'package:mysql_client/mysql_client.dart';
 
 class DBHelper {
@@ -162,6 +162,20 @@ class DBHelper {
       print("✅ Migration 9: normalized round-of-8 → quarter-finals.");
     } catch (e) {
       print("ℹ️  Migration 9: $e");
+    }
+
+    // Migration 10: round-of-16 is now a REAL bracket round (used for 9+ groups).
+    // We no longer rename it to 'elimination'. Instead normalize only legacy
+    // 'round-of-32' entries that were incorrectly inserted.
+    try {
+      await conn.execute("""
+        UPDATE tbl_match
+        SET bracket_type = 'elimination'
+        WHERE bracket_type = 'round-of-32'
+      """);
+      print("✅ Migration 10: normalized round-of-32 → elimination.");
+    } catch (e) {
+      print("ℹ️  Migration 10: $e");
     }
 
     print("✅ Migrations complete.");
@@ -427,10 +441,12 @@ class DBHelper {
     final conn = await getConnection();
 
     // Step 1: Get all soccer match IDs first
+    // FIX: Added 'elimination' to the bracket_type list so those slots
+    // are also cleared when regenerating the schedule.
     final soccerMatchResult = await conn.execute("""
       SELECT match_id FROM tbl_match
       WHERE bracket_type IN (
-        'group','round-of-32','round-of-16',
+        'group','round-of-32','elimination','round-of-16',
         'quarter-finals','semi-finals','third-place','final',
         'play-in','upper','lower','finals'
       )
@@ -944,17 +960,20 @@ class DBHelper {
   //
   // Generates a complete FIFA-format tournament:
   //   Phase 1: Group Stage — round-robin within groups, parallel across arenas
-  //   Phase 2: Knockout    — R16/QF/SF/3rd place/Final (single elimination)
+  //   Phase 2: Knockout    — ELIM/QF/SF/3rd place/Final (single elimination)
   //
-  // Auto-scales based on number of teams:
-  //   8  teams → 2 groups of 4 → QF (8 KO slots)
-  //   12 teams → 3 groups of 4 → R16 (with byes)
-  //   16 teams → 4 groups of 4 → R16 (16 KO slots)
-  //   24 teams → 6 groups of 4 → R16 (16 KO slots, 4 byes)
-  //   32 teams → 8 groups of 4 → R16 (32 KO slots)
+  // Auto-scales based on number of groups (top 2 per group advance):
   //
-  // Groups and schedules are saved to DB.
-  // Knockout slots are TBD placeholders filled after group stage.
+  //   2 grp →  4 teams → SF(2)            → 3RD(1) → FINAL(1)
+  //   3 grp →  6 teams → ELIM(2, 2 BYE)  → QF(4)  → SF(2) → 3RD(1) → FINAL(1)
+  //   4 grp →  8 teams → QF(4)            → SF(2)  → 3RD(1) → FINAL(1)
+  //   5 grp → 10 teams → ELIM(2, 6 BYE)  → QF(4)  → SF(2) → 3RD(1) → FINAL(1)
+  //   6 grp → 12 teams → ELIM(4, 4 BYE)  → QF(4)  → SF(2) → 3RD(1) → FINAL(1)
+  //   7 grp → 14 teams → ELIM(6, 2 BYE)  → QF(4)  → SF(2) → 3RD(1) → FINAL(1)
+  //   8 grp → 16 teams → R16(8)           → QF(4)  → SF(2) → 3RD(1) → FINAL(1)
+  //   9 grp → 18 teams → ELIM(2, 14 BYE) → R16(8) → QF(4) → SF(2) → 3RD(1) → FINAL(1)
+  //
+  // BYE = top-seeded teams that skip ELIM and advance directly to the next round.
   //
   static Future<void> generateFifaSchedule({
     required List<List<Map<String, dynamic>>> groups,
@@ -1191,44 +1210,95 @@ class DBHelper {
 
 
     // ── PHASE 2: KNOCKOUT STAGE ───────────────────────────────────────────
-    // Determine bracket size: next power of 2 >= numGroups * 2 (top 2 per group)
-    final int advancingTeams = groups.length * 2; // top 2 per group
-    int bracketSize = 1;
-    while (bracketSize < advancingTeams) bracketSize <<= 1;
+    //
+    // Bracket flow based on number of groups (top 2 per group advance):
+    //
+    //   2 grp →  4 teams → SF(2)            → 3RD(1) → FINAL(1)
+    //   3 grp →  6 teams → ELIM(2, 2 BYE)  → QF(4)  → SF(2) → 3RD(1) → FINAL(1)
+    //   4 grp →  8 teams → QF(4)            → SF(2)  → 3RD(1) → FINAL(1)
+    //   5 grp → 10 teams → ELIM(2, 6 BYE)  → QF(4)  → SF(2) → 3RD(1) → FINAL(1)
+    //   6 grp → 12 teams → ELIM(4, 4 BYE)  → QF(4)  → SF(2) → 3RD(1) → FINAL(1)
+    //   7 grp → 14 teams → ELIM(6, 2 BYE)  → QF(4)  → SF(2) → 3RD(1) → FINAL(1)
+    //   8 grp → 16 teams → R16(8)           → QF(4)  → SF(2) → 3RD(1) → FINAL(1)
+    //   9 grp → 18 teams → ELIM(2, 14 BYE) → R16(8) → QF(4) → SF(2) → 3RD(1) → FINAL(1)
+    //
+    // Formula:
+    //   advancing    = numGroups * 2
+    //   bracketSize  = next power-of-2 >= advancing
+    //   elimReal     = advancing - (bracketSize / 2)   ← real play-in matches
+    //   byeCount     = (bracketSize / 2) - elimReal    ← teams that skip ELIM
+    //
+    final int numGroups      = groups.length;
+    final int advancingTeams = numGroups * 2;
 
-    // Knockout rounds:
-    //   bracketSize=8  → QF(4)+SF(2)+3rd(1)+F(1) = 8 matches
-    //   bracketSize=16 → R16(8)+QF(4)+SF(2)+3rd(1)+F(1) = 16 matches
-    //   bracketSize=32 → R32(16)+R16(8)+QF(4)+SF(2)+3rd(1)+F(1) = 32 matches
+    // Next power of 2 >= n
+    int nextPow2(int n) { int p = 1; while (p < n) p <<= 1; return p; }
 
-    // Build knockout rounds list with correct FIFA labels.
-    // bracketSize = total teams entering knockout (always power of 2).
-    // Each round halves until we reach 4 teams (semi-finals).
+    // Compute bracket sizes
+    final int bracketSize  = nextPow2(advancingTeams);
+    final int halfBracket  = bracketSize ~/ 2;   // = QF slot count (or R16 if large)
+    final int elimReal     = advancingTeams - halfBracket; // real ELIM matches
+    // byeSlots = bracketSize - advancingTeams   (auto-advance, no match needed)
+
+    // Build ordered list of KO rounds with correct match counts
     final koRounds = <Map<String, dynamic>>[];
-    int sz = bracketSize;
-    while (sz >= 4) {
-      final int matchCount = sz ~/ 2;
-      String label;
-      if      (sz == 4)  label = 'semi-finals';
-      else if (sz == 8)  label = 'quarter-finals';
-      else if (sz == 16) label = 'round-of-16';
-      else if (sz == 32) label = 'round-of-32';
-      else               label = 'round-of-$sz';
-      koRounds.add({'label': label, 'count': matchCount});
-      sz ~/= 2;
+
+    if (advancingTeams <= 4) {
+      // 2 groups → 4 teams: straight to SF
+      // SF(2) → 3RD(1) → FINAL(1)
+      koRounds.add({'label': 'semi-finals', 'count': 2});
+
+    } else if (advancingTeams == 8) {
+      // 4 groups → 8 teams: straight to QF
+      // QF(4) → SF(2) → 3RD(1) → FINAL(1)
+      koRounds.add({'label': 'quarter-finals', 'count': 4});
+      koRounds.add({'label': 'semi-finals',    'count': 2});
+
+    } else if (advancingTeams == 16) {
+      // 8 groups → 16 teams: R16(8) → QF(4) → SF(2) → 3RD(1) → FINAL(1)
+      koRounds.add({'label': 'round-of-16',    'count': 8});
+      koRounds.add({'label': 'quarter-finals', 'count': 4});
+      koRounds.add({'label': 'semi-finals',    'count': 2});
+
+    } else if (advancingTeams == 6) {
+      // 3 groups → 6 teams:
+      // ELIM(2) → SF(2) → 3RD(1) → FINAL(1)   ★ QF intentionally skipped
+      // Top 2 seeds BYE directly to SF; bottom 4 play 2 ELIM → 2 winners to SF
+      koRounds.add({'label': 'elimination', 'count': 2});
+      koRounds.add({'label': 'semi-finals', 'count': 2});
+
+    } else if (bracketSize <= 16) {
+      // 5,6,7 groups → 10,12,14 teams:
+      // ELIM(real matches only) → QF(4) → SF(2) → 3RD(1) → FINAL(1)
+      //   5 grp → 10 teams → ELIM(2) → QF(4) → SF(2)
+      //   6 grp → 12 teams → ELIM(4) → QF(4) → SF(2)
+      //   7 grp → 14 teams → ELIM(6) → QF(4) → SF(2)
+      koRounds.add({'label': 'elimination',    'count': elimReal});
+      koRounds.add({'label': 'quarter-finals', 'count': 4});
+      koRounds.add({'label': 'semi-finals',    'count': 2});
+
+    } else {
+      // 9+ groups → 18+ teams: ELIM → R16(8) → QF(4) → SF(2)
+      //   9 grp → 18 teams → ELIM(2) → R16(8) → QF(4) → SF(2)
+      koRounds.add({'label': 'elimination',    'count': elimReal});
+      koRounds.add({'label': 'round-of-16',    'count': 8});
+      koRounds.add({'label': 'quarter-finals', 'count': 4});
+      koRounds.add({'label': 'semi-finals',    'count': 2});
     }
+
     // Always add 3rd-place (1 match) and final (1 match)
     koRounds.add({'label': 'third-place', 'count': 1});
     koRounds.add({'label': 'final',       'count': 1});
 
-    // No gap — knockout starts immediately after the last group match
-    // timeCursor already points to the next available slot
+    print("✅ Bracket plan: ${numGroups} groups → ${advancingTeams} advancing → "
+          "${koRounds.map((r) => '${r['label']}(${r['count']})').join(' → ')}");
+
 
     // ── KNOCKOUT SCHEDULING RULES ──────────────────────────────────────────
     // 1. All matches of the SAME round share the SAME time slot (one row).
     // 2. If a round has more matches than arenas, overflow to next time slot.
-    //    e.g. R16=8 matches, arenas=8 → 1 time slot with 8 arenas
-    //         QF=4 matches, arenas=8  → 1 time slot with 4 arenas (no overflow)
+    //    e.g. ELIM=8 matches, arenas=8 → 1 time slot with 8 arenas
+    //         QF=4 matches, arenas=8   → 1 time slot with 4 arenas
     // 3. Skip lunch break (12:00-13:00) — push to 13:00 if overlapping.
     // 4. Always create ALL match slots regardless of endLimit.
     for (final round in koRounds) {
@@ -1257,16 +1327,19 @@ class DBHelper {
         print("✅ $bracketType slot ${s+1}/$slotsNeeded @ ${fmt(t)} ($matchesInSlot matches)");
       }
     }
-    print("✅ FIFA schedule generated! ${groups.length} groups, bracket size $bracketSize.");
+    print("✅ FIFA schedule generated! ${groups.length} groups, "
+          "${advancingTeams} advancing, bracket: ${koRounds.map((r) => '${r['label']}(${r['count']})').join(' → ')}.");
   }
 
   // ── ADVANCE TEAMS TO KNOCKOUT ─────────────────────────────────────────────
   //
   // Called after group stage is complete.
   // 1. Reads top 2 from each group (by PTS → GD → GF)
-  // 2. Seeds them into knockout slots using FIFA cross-group pairing:
+  // 2. Seeds them into the FIRST knockout round slots using FIFA cross-group pairing:
   //    1A vs 2B, 1C vs 2D, 1B vs 2A, 1D vs 2C ...
-  // 3. Inserts tbl_teamschedule rows for each knockout match
+  // 3. For ELIM rounds with BYE slots, only seeds real matchups — BYE slots
+  //    stay empty and auto-advance their paired team to QF automatically.
+  // 4. Inserts tbl_teamschedule rows for each knockout match
   //
   static Future<void> advanceToKnockout(int categoryId) async {
     final conn = await getConnection();
@@ -1359,54 +1432,118 @@ class DBHelper {
     }
 
     // ── 4. Build seeds list — FIFA cross-group pairing ───────────────────────
-    // Groups A,B,C,D,E,F,G,H paired as:
-    //   Slot 0: 1A vs 2B   Slot 1: 1C vs 2D  ...
-    //   Slot n/2: 1B vs 2A  Slot n/2+1: 1D vs 2C  ...
-    // For odd group counts: last group's 1st vs 2nd fills the last slot.
+    //
+    // For N groups advancing 2 each, we have 2N teams going into the first KO.
+    // bracketSize = next power of 2 >= 2N.
+    // elimReal   = real play-in matches (2N - bracketSize/2).
+    // byeCount   = bracketSize/2 - elimReal (teams that skip ELIM into QF/R16).
+    //
+    // Seeding strategy:
+    //   - Pair groups in adjacent pairs: (A,B), (C,D), …
+    //   - Each pair → 2 cross-ELIM matches: 1A vs 2B  AND  1B vs 2A
+    //   - For ODD group counts, the last group has no partner → BOTH 1st AND 2nd
+    //     place of that group get BYEs directly into the next round (QF/R16).
+    //     e.g. 3 groups: A+B → ELIM(2 matches), C → BYE(2 teams into QF)
+    //   - For even groups where elimCnt < allCross produced, excess 1st-placers
+    //     also get BYEs (handles 5-group and similar cases).
+    //   - BYE teams are seeded into the next KO round slots after ELIM seeding.
+    //
     final labels = groupRanked.keys.toList()..sort();
     final n      = labels.length;
-    final seeds  = <Map<String, dynamic>>[];
+    final seeds  = <Map<String, dynamic>>[];   // real ELIM matchups
+    final byeSeeds = <int>[];                   // team IDs that get BYEs
 
     if (n == 1) {
-      // Only 1 group — 1st vs 2nd
+      // Only 1 group — 1st vs 2nd (straight to SF, no ELIM)
       final g = labels[0];
       seeds.add({
         'home': groupRanked[g]!.isNotEmpty ? groupRanked[g]![0] : 0,
         'away': groupRanked[g]!.length > 1  ? groupRanked[g]![1] : 0,
       });
     } else {
-      // Forward pairs: (A,B), (C,D), (E,F), (G,H)
-      for (int i = 0; i < n - 1; i += 2) {
-        final gA = labels[i];
-        final gB = labels[i + 1];
+      // Build matched pairs: (A,B), (C,D), (E,F), …
+      // Each pair → 1X vs 2Y  (cross: 1st of left group vs 2nd of right group)
+      //             This is ONE real ELIM match.
+      // The reciprocal seed (1Y vs 2X) also becomes a real ELIM match.
+      //
+      // For an odd number of groups the last label has no pair partner —
+      // its 1st team gets a BYE (auto-advance) and its 2nd plays no ELIM.
+      // For the "2 groups" case there is no ELIM at all (bracketSize/2 == N),
+      // so we skip seeding entirely and fall through to byeSeeds.
+
+      // How many real ELIM matches we expect
+      final int advTeams = n * 2;
+      int bSize = 1; while (bSize < advTeams) bSize <<= 1;
+      final int halfB   = bSize ~/ 2;
+      final int elimCnt = advTeams - halfB; // real matches
+      final int byeCnt  = halfB - elimCnt;  // teams with BYEs into next round
+
+      if (elimCnt == 0) {
+        // 2 groups → 4 teams → direct to SF, no ELIM.
+        // Both pairs are real semi-final seeds.
+        final gA = labels[0], gB = labels[1];
         seeds.add({
           'home': groupRanked[gA]!.isNotEmpty ? groupRanked[gA]![0] : 0,
           'away': groupRanked[gB]!.length > 1  ? groupRanked[gB]![1] : 0,
         });
-      }
-      // Reverse pairs: (B,A), (D,C), (F,E), (H,G)
-      for (int i = 1; i < n; i += 2) {
-        final gB = labels[i];
-        final gA = labels[i - 1];
         seeds.add({
           'home': groupRanked[gB]!.isNotEmpty ? groupRanked[gB]![0] : 0,
           'away': groupRanked[gA]!.length > 1  ? groupRanked[gA]![1] : 0,
         });
-      }
-      // Odd group left over (e.g. 3 groups → A,B done, C alone)
-      if (n % 2 == 1) {
-        final gLast = labels.last;
-        seeds.add({
-          'home': groupRanked[gLast]!.isNotEmpty ? groupRanked[gLast]![0] : 0,
-          'away': groupRanked[gLast]!.length > 1  ? groupRanked[gLast]![1] : 0,
-        });
+      } else {
+        // Build forward + reverse cross-pairs from adjacent group pairs.
+        // Adjacent pairs: (A,B), (C,D), …
+        // Forward:  1A vs 2B  → real ELIM match
+        // Reverse:  1B vs 2A  → real ELIM match
+        // For each adjacent pair we add 2 ELIM seeds (both cross directions).
+        // If elimCnt is smaller than the number we'd produce, we only take
+        // the first [elimCnt] seeds; excess 1st-place teams get BYEs.
+
+        final List<Map<String, dynamic>> allCross = [];
+        final List<int> allBye = [];
+
+        for (int i = 0; i + 1 < n; i += 2) {
+          final gA = labels[i];
+          final gB = labels[i + 1];
+          allCross.add({
+            'home': groupRanked[gA]!.isNotEmpty ? groupRanked[gA]![0] : 0,
+            'away': groupRanked[gB]!.length > 1  ? groupRanked[gB]![1] : 0,
+          });
+          allCross.add({
+            'home': groupRanked[gB]!.isNotEmpty ? groupRanked[gB]![0] : 0,
+            'away': groupRanked[gA]!.length > 1  ? groupRanked[gA]![1] : 0,
+          });
+        }
+        // Odd group left over → BOTH 1st AND 2nd place get BYEs.
+        // e.g. 3 groups: A+B produce 2 ELIM matches, C has no opponent → 1C and 2C both advance to QF.
+        if (n % 2 == 1) {
+          final gLast = labels.last;
+          final last1st = groupRanked[gLast]!.isNotEmpty ? groupRanked[gLast]![0] : 0;
+          final last2nd = groupRanked[gLast]!.length > 1  ? groupRanked[gLast]![1] : 0;
+          if (last1st > 0) allBye.add(last1st);
+          if (last2nd > 0) allBye.add(last2nd);
+        }
+
+        // Take only [elimCnt] real matches; remaining 1st-placers get BYEs
+        for (int i = 0; i < allCross.length; i++) {
+          if (i < elimCnt) {
+            seeds.add(allCross[i]);
+          } else {
+            // This "home" (1st placer) gets a BYE instead
+            final tid = allCross[i]['home'] as int;
+            if (tid > 0) allBye.add(tid);
+          }
+        }
+        byeSeeds.addAll(allBye);
       }
     }
 
     // ── 5. Determine first KO round label ────────────────────────────────────
+    // FIX: 'elimination' is now FIRST in the search order so it is always
+    // found before 'quarter-finals' when the schedule has an ELIM round.
     const koOrder = [
-      'round-of-32', 'round-of-16', 'round-of-8',
-      'quarter-finals', 'semi-finals', 'third-place', 'final'
+      'round-of-32', 'elimination', 'round-of-16', 'round-of-8',
+      'quarter-finals', 'semi-finals', 'third-place', 'final',
     ];
 
     // Get ALL first-round KO slots (whether seeded or not)
@@ -1416,7 +1553,7 @@ class DBHelper {
       FROM tbl_match m
       JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
       WHERE m.bracket_type IN (
-        'round-of-32','round-of-16','round-of-8',
+        'round-of-32','elimination','round-of-16','round-of-8',
         'quarter-finals','semi-finals','third-place','final'
       )
       ORDER BY s.schedule_start ASC, m.match_id ASC
@@ -1440,7 +1577,7 @@ class DBHelper {
         .where((m) => m['bracket_type'] == firstRound)
         .toList();
 
-    print("ℹ️  First KO round: $firstRound — ${firstRoundMatches.length} slots, ${seeds.length} seeds");
+    print("ℹ️  First KO round: $firstRound — ${firstRoundMatches.length} slots, ${seeds.length} seeds, ${byeSeeds.length} BYE teams");
 
     // If DB has fewer slots than seeds, create the missing ones
     if (firstRoundMatches.length < seeds.length) {
@@ -1479,7 +1616,7 @@ class DBHelper {
     final refereeId = refResult.rows.isEmpty ? 1
         : int.tryParse(refResult.rows.first.assoc()['referee_id']?.toString() ?? '1') ?? 1;
 
-    // ── 7. Insert teamschedule rows — use INSERT IGNORE to avoid duplicates ───
+    // ── 7. Insert teamschedule rows for ELIM — INSERT IGNORE to avoid duplicates ──
     for (int seedIdx = 0; seedIdx < seeds.length; seedIdx++) {
       if (seedIdx >= firstRoundMatches.length) break;
       final matchId = int.tryParse(
@@ -1506,7 +1643,53 @@ class DBHelper {
       print("✅ KO match $matchId seeded: home=$homeId away=$awayId");
     }
 
-    print("✅ Knockout seeding complete: ${seeds.length} matches.");
+    // ── 8. Seed BYE teams directly into the CORRECT next KO round ───────────
+    // BYE teams skip ELIM and go straight to SF (3 groups) or QF (5,6,7 groups).
+    //
+    // IMPORTANT: We must NOT rely on what rounds exist in tbl_match to find the
+    // "next" round — because for 3 groups the DB may contain quarter-finals slots
+    // (generated but unused), and the schedule-time ordering would wrongly pick
+    // quarter-finals as the next round after elimination.
+    //
+    // Instead we derive the correct round from the advancing team count:
+    //   3 groups  → 6 advancing → ELIM → SF  (QF skipped)
+    //   5+ groups → ELIM → QF
+    if (byeSeeds.isNotEmpty) {
+      final int advTeams = n * 2;
+      final String nextRound;
+      if (advTeams == 6) {
+        nextRound = 'semi-finals';
+      } else {
+        nextRound = 'quarter-finals';
+      }
+
+      print("ℹ️  Seeding ${byeSeeds.length} BYE team(s) directly into '$nextRound'");
+      final nextRoundMatches = await conn.execute("""
+        SELECT m.match_id
+        FROM tbl_match m
+        JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
+        WHERE m.bracket_type = '$nextRound'
+        ORDER BY s.schedule_start ASC, m.match_id ASC
+      """);
+      final nextSlots = nextRoundMatches.rows
+          .map((r) => int.tryParse(r.assoc()['match_id']?.toString() ?? '0') ?? 0)
+          .where((id) => id > 0)
+          .toList();
+
+      for (int bi = 0; bi < byeSeeds.length; bi++) {
+        final teamId = byeSeeds[bi];
+        if (teamId <= 0 || bi >= nextSlots.length) continue;
+        final matchId = nextSlots[bi];
+        await conn.execute("""
+          INSERT IGNORE INTO tbl_teamschedule
+            (match_id, round_id, team_id, referee_id, arena_number)
+          VALUES ($matchId, 1, $teamId, $refereeId, 1)
+        """);
+        print("✅ BYE team $teamId seeded into '$nextRound' match $matchId");
+      }
+    }
+
+    print("✅ Knockout seeding complete: ${seeds.length} ELIM matches, ${byeSeeds.length} BYEs.");
   }
 
   // ── ADVANCE KNOCKOUT WINNER ───────────────────────────────────────────────
@@ -1518,9 +1701,24 @@ class DBHelper {
   }) async {
     final conn = await getConnection();
 
+    // Winner progression path — ordered from earliest to latest round.
+    // Each winner advances to the NEXT entry in this list.
+    // This must exactly match the bracket plan in generateFifaSchedule:
+    //
+    //   2 grp:  SF → FINAL
+    //   3 grp:  ELIM → SF → FINAL  (QF intentionally skipped for 3 groups)
+    //   4 grp:  QF  → SF → FINAL
+    //   5 grp:  ELIM → QF → SF → FINAL
+    //   6 grp:  ELIM → QF → SF → FINAL
+    //   7 grp:  ELIM → QF → SF → FINAL
+    //   8 grp:  R16  → QF → SF → FINAL
+    //   9 grp:  ELIM → R16 → QF → SF → FINAL
+    //
+    // The path is queried from the DB at runtime so it always reflects
+    // the ACTUAL rounds that were generated (no hard-coded assumptions).
     const koOrder = [
-      'round-of-32', 'round-of-16', 'quarter-finals',
-      'semi-finals', 'third-place', 'final',
+      'round-of-32', 'elimination', 'round-of-16',
+      'quarter-finals', 'semi-finals', 'third-place', 'final',
     ];
 
     // 1. Find current bracket_type
@@ -1532,10 +1730,8 @@ class DBHelper {
 
     if (currentType == 'final' || currentType == 'third-place') return;
 
-    final curIdx = koOrder.indexOf(currentType);
-    if (curIdx == -1) return;
-
-    // 2. Determine next rounds
+    // 2. Determine next rounds by querying the actual rounds present in DB.
+    //    This avoids hard-coded path assumptions that break for edge cases.
     String nextWinnerType;
     String? nextLoserType;
 
@@ -1543,13 +1739,30 @@ class DBHelper {
       nextWinnerType = 'final';
       nextLoserType  = 'third-place';
     } else {
-      const winnerPath = [
-        'round-of-32','round-of-16','round-of-8',
-        'quarter-finals','semi-finals','final'
-      ];
-      final wi = winnerPath.indexOf(currentType);
-      nextWinnerType = wi >= 0 && wi + 1 < winnerPath.length
-          ? winnerPath[wi + 1] : 'final';
+      // Find all KO round types currently in DB, ordered by their first schedule time.
+      // This gives us the ACTUAL bracket order for this tournament.
+      final presentRoundsResult = await conn.execute("""
+        SELECT DISTINCT m.bracket_type,
+               MIN(s.schedule_start) AS first_time
+        FROM tbl_match m
+        JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
+        WHERE m.bracket_type IN (
+          'round-of-32','elimination','round-of-16',
+          'quarter-finals','semi-finals','third-place','final'
+        )
+        GROUP BY m.bracket_type
+        ORDER BY first_time ASC
+      """);
+      // Build ordered list of actual rounds
+      final presentRounds = presentRoundsResult.rows
+          .map((r) => r.assoc()['bracket_type']?.toString() ?? '')
+          .where((t) => t.isNotEmpty && t != 'third-place')
+          .toList();
+
+      final curIdx = presentRounds.indexOf(currentType);
+      nextWinnerType = (curIdx >= 0 && curIdx + 1 < presentRounds.length)
+          ? presentRounds[curIdx + 1]
+          : 'final';
     }
 
     // 3. Get default referee
@@ -1605,7 +1818,7 @@ class DBHelper {
       JOIN tbl_team  t ON t.team_id  = sc.team_id
       WHERE t.category_id = $categoryId
         AND m.bracket_type IN (
-          'round-of-32','round-of-16','round-of-8',
+          'round-of-32','elimination','round-of-16','round-of-8',
           'quarter-finals','semi-finals','third-place','final'
         )
       ORDER BY sc.match_id
@@ -1650,11 +1863,11 @@ class DBHelper {
     } else {
       await conn.execute("""
         INSERT INTO tbl_score
-          (match_id, team_id, round_id, score_totalscore,
+          (match_id, team_id, round_id, referee_id, score_totalscore,
            score_independentscore, score_violation,
            score_totalduration, score_isapproved)
         VALUES
-          ($matchId, $teamId, 1, $goals,
+          ($matchId, $teamId, 1, $refereeId, $goals,
            $goals, 0,
            '00:00:00', 1)
       """);
