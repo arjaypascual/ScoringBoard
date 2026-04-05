@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'db_helper.dart';
 import 'teams_players.dart';
+import 'export_service.dart';
 
 class Standings extends StatefulWidget {
   final VoidCallback? onBack;
@@ -19,7 +20,7 @@ class _StandingsState extends State<Standings>
     with TickerProviderStateMixin {
   TabController? _tabController;
   TabController? _soccerTabCtrl;
-  List<Map<String, dynamic>> _categories = [];
+  List<Map<String, String?>> _categories = [];
 
   // category_id → list of standing rows
   Map<int, List<Map<String, dynamic>>> _standingsByCategory = {};
@@ -366,6 +367,13 @@ class _StandingsState extends State<Standings>
               Row(
                 children: [
                   _buildLiveIndicator(),
+                  // ── Export standings ───────────────────────────────
+                  IconButton(
+                    tooltip: 'Export Standings',
+                    icon: const Icon(Icons.download_rounded,
+                        color: Color(0xFF00FF9C)),
+                    onPressed: _showExportDialog,
+                  ),
                   IconButton(
                     tooltip: 'Accomplishment Report',
                     icon: const Icon(Icons.emoji_events_rounded,
@@ -981,6 +989,12 @@ class _StandingsState extends State<Standings>
                   fontWeight: FontWeight.bold, letterSpacing: 2)),
           Row(children: [
             _buildLiveIndicator(),
+            // ── Export standings ──────────────────────────────────────
+            IconButton(
+              tooltip: 'Export Standings',
+              icon: const Icon(Icons.download_rounded, color: Color(0xFF00FF9C)),
+              onPressed: _showExportDialog,
+            ),
             IconButton(
               tooltip: 'Accomplishment Report',
               icon: const Icon(Icons.emoji_events_rounded, color: Color(0xFFFFD700)),
@@ -1897,7 +1911,7 @@ class _StandingsState extends State<Standings>
     // Detect if this category is timer-based
     final cat = _categories.firstWhere(
       (c) => (int.tryParse(c['category_id'].toString()) ?? 0) == catId,
-      orElse: () => {},
+      orElse: () => <String, String?>{},
     );
     final catName  = (cat['category_type'] ?? '').toString();
     final isTimer  = _isTimerCategory(catName);
@@ -2068,6 +2082,124 @@ class _StandingsState extends State<Standings>
     ]);
   }
 
+  // ── Export Dialog ─────────────────────────────────────────────────────────
+  void _showExportDialog() {
+    // Convert internal soccer group model to the export DTO
+    List<SoccerGroupExport> _toExportGroups() {
+      return _soccerGroups.map((g) => SoccerGroupExport(
+        label: g.label,
+        teams: g.teams.map((t) => SoccerTeamExport(
+          teamName:     t.teamName,
+          wins:         t.wins,
+          losses:       t.losses,
+          draws:        t.draws,
+          points:       t.points,
+          goalsFor:     t.goalsFor,
+          goalsAgainst: t.goalsAgainst,
+          fouls:        t.fouls,
+          matchesPlayed:t.matchesPlayed,
+        )).toList(),
+      )).toList();
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF1A0A4A),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: Color(0xFF00FF9C), width: 1.5),
+        ),
+        title: const Row(children: [
+          Icon(Icons.download_rounded, color: Color(0xFF00FF9C), size: 22),
+          SizedBox(width: 10),
+          Text('Export Standings',
+              style: TextStyle(color: Colors.white,
+                  fontWeight: FontWeight.w900, fontSize: 18)),
+        ]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('Choose a format to export the current standings:',
+                style: TextStyle(color: Colors.white70, height: 1.5)),
+            const SizedBox(height: 20),
+            // ── PDF row ────────────────────────────────────────────────
+            _ExportOptionTile(
+              icon: Icons.picture_as_pdf_rounded,
+              label: 'Export as PDF',
+              subtitle: 'Printable standings report',
+              color: const Color(0xFFFF6B6B),
+              onTap: () {
+                Navigator.of(context).pop();
+                ExportService.exportStandingsToPdf(
+                  context:             context,
+                  categories:          _categories,
+                  standingsByCategory: _standingsByCategory,
+                  soccerGroups:        _toExportGroups(),
+                );
+              },
+            ),
+            const SizedBox(height: 12),
+            // ── Excel row ──────────────────────────────────────────────
+            _ExportOptionTile(
+              icon: Icons.table_chart_rounded,
+              label: 'Export as Excel',
+              subtitle: 'Spreadsheet with all categories',
+              color: const Color(0xFF00E5A0),
+              onTap: () {
+                Navigator.of(context).pop();
+                ExportService.exportStandingsToExcel(
+                  context:             context,
+                  categories:          _categories,
+                  standingsByCategory: _standingsByCategory,
+                  soccerGroups:        _toExportGroups(),
+                );
+              },
+            ),
+            const SizedBox(height: 20),
+            const Divider(color: Colors.white12),
+            const SizedBox(height: 12),
+            const Text('Attendance Records',
+                style: TextStyle(color: Colors.white54, fontSize: 12,
+                    fontWeight: FontWeight.bold, letterSpacing: 1)),
+            const SizedBox(height: 10),
+            // ── Attendance PDF ─────────────────────────────────────────
+            _ExportOptionTile(
+              icon: Icons.people_alt_rounded,
+              label: 'Attendance → PDF',
+              subtitle: 'Teams, players & match counts',
+              color: const Color(0xFFFFD700),
+              onTap: () {
+                Navigator.of(context).pop();
+                ExportService.exportAttendanceToPdf(context);
+              },
+            ),
+            const SizedBox(height: 12),
+            // ── Attendance Excel ───────────────────────────────────────
+            _ExportOptionTile(
+              icon: Icons.grid_on_rounded,
+              label: 'Attendance → Excel',
+              subtitle: 'Teams, players & match counts',
+              color: const Color(0xFFFF9F43),
+              onTap: () {
+                Navigator.of(context).pop();
+                ExportService.exportAttendanceToExcel(context);
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel',
+                style: TextStyle(color: Colors.white54)),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Live indicator ────────────────────────────────────────────────────────
   Widget _buildLiveIndicator() {
     final timeStr = _lastUpdated == null
@@ -2097,6 +2229,75 @@ class _StandingsState extends State<Standings>
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Export option tile ────────────────────────────────────────────────────────
+class _ExportOptionTile extends StatefulWidget {
+  final IconData  icon;
+  final String    label;
+  final String    subtitle;
+  final Color     color;
+  final VoidCallback onTap;
+  const _ExportOptionTile({
+    required this.icon,
+    required this.label,
+    required this.subtitle,
+    required this.color,
+    required this.onTap,
+  });
+  @override
+  State<_ExportOptionTile> createState() => _ExportOptionTileState();
+}
+
+class _ExportOptionTileState extends State<_ExportOptionTile> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit:  (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: _hovered
+                ? widget.color.withOpacity(0.12)
+                : widget.color.withOpacity(0.06),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: _hovered
+                  ? widget.color
+                  : widget.color.withOpacity(0.3),
+              width: 1.5,
+            ),
+          ),
+          child: Row(children: [
+            Icon(widget.icon, color: widget.color, size: 22),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(widget.label,
+                        style: TextStyle(
+                            color: widget.color,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 13)),
+                    const SizedBox(height: 2),
+                    Text(widget.subtitle,
+                        style: const TextStyle(
+                            color: Colors.white38, fontSize: 11)),
+                  ]),
+            ),
+            Icon(Icons.chevron_right_rounded,
+                color: widget.color.withOpacity(0.5), size: 18),
+          ]),
+        ),
       ),
     );
   }

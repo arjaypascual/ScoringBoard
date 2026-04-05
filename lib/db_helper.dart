@@ -1,6 +1,8 @@
 // ignore_for_file: avoid_print
 
 
+import 'dart:async';
+import 'dart:math';
 import 'package:mysql_client/mysql_client.dart';
 
 class DBHelper {
@@ -181,21 +183,26 @@ class DBHelper {
     print("✅ Migrations complete.");
   }
   // Generates a random 6-char uppercase alphanumeric code, e.g. "A3F9KX"
+  // Uses Random.secure() so codes are cryptographically unpredictable and
+  // never collide even when multiple categories are seeded back-to-back.
   static String _generateCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    final rng   = DateTime.now().microsecondsSinceEpoch;
+    final rng   = Random.secure();
     final buf   = StringBuffer();
-    var   seed  = rng.abs();
     for (int i = 0; i < 6; i++) {
-      seed = (seed * 1664525 + 1013904223).abs();
-      buf.write(chars[seed % chars.length]);
+      buf.write(chars[rng.nextInt(chars.length)]);
     }
     return buf.toString();
   }
 
 
   // ── CONNECTION ────────────────────────────────────────────────────────────
+  // _connectLock serialises concurrent getConnection() callers so only one
+  // MySQLConnection is ever created, even under simultaneous async calls.
+  static Completer<MySQLConnection>? _connectLock;
+
   static Future<MySQLConnection> getConnection() async {
+    // Fast path — reuse an already-open connection.
     try {
       if (_connection != null && _connection!.connected) {
         return _connection!;
@@ -204,18 +211,34 @@ class DBHelper {
       _connection = null;
     }
 
-    _connection = await MySQLConnection.createConnection(
-      host:         _host,
-      port:         _port,
-      userName:     _userName,
-      password:     _password,
-      databaseName: _databaseName,
-      secure:       false,
-    );
+    // If another caller is already connecting, wait for it instead of
+    // creating a second connection in parallel.
+    if (_connectLock != null) {
+      return _connectLock!.future;
+    }
 
-    await _connection!.connect();
-    print("✅ Database connected!");
-    return _connection!;
+    _connectLock = Completer<MySQLConnection>();
+    try {
+      final conn = await MySQLConnection.createConnection(
+        host:         _host,
+        port:         _port,
+        userName:     _userName,
+        password:     _password,
+        databaseName: _databaseName,
+        secure:       false,
+      );
+      await conn.connect();
+      _connection = conn;
+      print("✅ Database connected!");
+      _connectLock!.complete(conn);
+      return conn;
+    } catch (e) {
+      _connectLock!.completeError(e);
+      rethrow;
+    } finally {
+      // Clear lock so a later call can retry after a connection error.
+      _connectLock = null;
+    }
   }
 
   static Future<void> closeConnection() async {
@@ -242,7 +265,7 @@ class DBHelper {
     return result.rows.map((r) => r.assoc()).toList();
   }
 
-  static Future<List<Map<String, dynamic>>> getActiveCategories() async {
+  static Future<List<Map<String, String?>>> getActiveCategories() async {
     final conn   = await getConnection();
     final result = await conn.execute(
       "SELECT * FROM tbl_category WHERE status = 'active' ORDER BY category_id",
@@ -457,6 +480,8 @@ class DBHelper {
         .toList();
 
     if (soccerMatchIds.isNotEmpty) {
+      // ids is built from DB-returned integers only — not user input — so
+      // IN ($ids) interpolation here is safe (named params can't be used for IN lists).
       final ids = soccerMatchIds.join(',');
 
       // Step 1a: Delete scores FIRST (FK → tbl_match must go before tbl_match)
@@ -476,8 +501,8 @@ class DBHelper {
     await conn.execute("""
       DELETE sc FROM tbl_score sc
       INNER JOIN tbl_team t ON sc.team_id = t.team_id
-      WHERE t.category_id = $categoryId
-    """);
+      WHERE t.category_id = :catId
+    """, {"catId": categoryId});
     // Step 4: Delete orphaned schedule rows
     final validSchedResult = await conn.execute(
         'SELECT DISTINCT schedule_id FROM tbl_match');
@@ -495,7 +520,8 @@ class DBHelper {
     // Step 5: Clear soccer groups
     try {
       await conn.execute(
-        "DELETE FROM tbl_soccer_groups WHERE category_id = $categoryId",
+        "DELETE FROM tbl_soccer_groups WHERE category_id = :catId",
+        {"catId": categoryId},
       );
     } catch (_) {}
 
@@ -510,6 +536,8 @@ class DBHelper {
   static Future<void> clearCategorySchedule(List<int> categoryIds) async {
     if (categoryIds.isEmpty) return;
     final conn = await getConnection();
+    // ids is derived from List<int> — not user input — so IN ($ids) is safe.
+    // MySQL named parameters cannot be used for variable-length IN lists.
     final ids  = categoryIds.join(',');
 
     // Step 1: Delete scores for these categories' teams
@@ -655,13 +683,9 @@ class DBHelper {
   }) async {
     final conn = await getConnection();
 
-    await clearCategorySchedule(runsPerCategory.keys.toList());
-
-    final maxRuns = runsPerCategory.values.isEmpty
-        ? 1
-        : runsPerCategory.values.reduce((a, b) => a > b ? a : b);
-    await seedRounds(maxRuns);
-
+    // ── Guard: check for referees BEFORE clearing anything ───────────────────
+    // If we cleared first and then found no referees, the schedule would be
+    // wiped with nothing written — leaving the DB in an empty broken state.
     final refResult = await conn.execute(
       "SELECT referee_id FROM tbl_referee ORDER BY referee_id LIMIT 1",
     );
@@ -674,6 +698,13 @@ class DBHelper {
     final defaultRefereeId = int.parse(
       refResult.rows.first.assoc()['referee_id'] ?? '0',
     );
+
+    await clearCategorySchedule(runsPerCategory.keys.toList());
+
+    final maxRuns = runsPerCategory.values.isEmpty
+        ? 1
+        : runsPerCategory.values.reduce((a, b) => a > b ? a : b);
+    await seedRounds(maxRuns);
 
     // ── helpers ──────────────────────────────────────────────────────────────
     String fmtMin(int t) {
@@ -913,7 +944,8 @@ class DBHelper {
   static Future<bool> soccerMatchIsScored(int matchId) async {
     final conn   = await getConnection();
     final result = await conn.execute(
-      "SELECT COUNT(*) as cnt FROM tbl_score WHERE match_id = $matchId",
+      "SELECT COUNT(*) as cnt FROM tbl_score WHERE match_id = :mid",
+      {"mid": matchId},
     );
     final cnt = int.tryParse(
         result.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
@@ -1033,7 +1065,8 @@ class DBHelper {
 
     // Already cleared by clearSoccerSchedule above, but clear again to be safe
     await conn.execute(
-        'DELETE FROM tbl_soccer_groups WHERE category_id = $categoryId');
+        'DELETE FROM tbl_soccer_groups WHERE category_id = :catId',
+        {'catId': categoryId});
 
     final groupLabels = List.generate(groups.length, (i) => String.fromCharCode(65 + i));
     for (int gi = 0; gi < groups.length; gi++) {
@@ -1042,7 +1075,8 @@ class DBHelper {
         final name = (team['team_name']?.toString() ?? '').replaceAll("'", "''");
         await conn.execute(
             "INSERT INTO tbl_soccer_groups (category_id, group_label, team_id, team_name) "
-            "VALUES ($categoryId, '${groupLabels[gi]}', $tid, '$name')");
+            "VALUES (:catId, :glabel, :tid, :tname)",
+            {"catId": categoryId, "glabel": groupLabels[gi], "tid": int.tryParse(tid) ?? 0, "tname": team['team_name']?.toString() ?? ''});
       }
     }
     print("✅ Groups saved to DB: ${groups.length} groups.");
@@ -1347,7 +1381,8 @@ class DBHelper {
     // ── 1. Get all groups and their teams ────────────────────────────────────
     final groupResult = await conn.execute(
       "SELECT group_label, team_id FROM tbl_soccer_groups "
-      "WHERE category_id = $categoryId ORDER BY group_label, id",
+      "WHERE category_id = :catId ORDER BY group_label, id",
+      {"catId": categoryId},
     );
     final Map<String, List<int>> groupTeams = {};
     for (final row in groupResult.rows) {
@@ -1396,10 +1431,10 @@ class DBHelper {
       JOIN tbl_team  t ON t.team_id  = ts.team_id
       LEFT JOIN tbl_score sc
         ON sc.team_id = ts.team_id AND sc.match_id = ts.match_id
-      WHERE t.category_id = $categoryId
+      WHERE t.category_id = :catId
         AND m.bracket_type = 'group'
       GROUP BY ts.team_id
-    """);
+    """, {"catId": categoryId});
 
     final Map<int, Map<String, int>> teamStats = {};
     for (final row in scoreResult.rows) {
@@ -1630,15 +1665,15 @@ class DBHelper {
         await conn.execute("""
           INSERT IGNORE INTO tbl_teamschedule
             (match_id, round_id, team_id, referee_id, arena_number)
-          VALUES ($matchId, 1, $homeId, $refereeId, 1)
-        """);
+          VALUES (:mid, 1, :tid, :rid, 1)
+        """, {"mid": matchId, "tid": homeId, "rid": refereeId});
       }
       if (awayId > 0) {
         await conn.execute("""
           INSERT IGNORE INTO tbl_teamschedule
             (match_id, round_id, team_id, referee_id, arena_number)
-          VALUES ($matchId, 1, $awayId, $refereeId, 1)
-        """);
+          VALUES (:mid, 1, :tid, :rid, 1)
+        """, {"mid": matchId, "tid": awayId, "rid": refereeId});
       }
       print("✅ KO match $matchId seeded: home=$homeId away=$awayId");
     }
@@ -1668,9 +1703,9 @@ class DBHelper {
         SELECT m.match_id
         FROM tbl_match m
         JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
-        WHERE m.bracket_type = '$nextRound'
+        WHERE m.bracket_type = :nr
         ORDER BY s.schedule_start ASC, m.match_id ASC
-      """);
+      """, {"nr": nextRound});
       final nextSlots = nextRoundMatches.rows
           .map((r) => int.tryParse(r.assoc()['match_id']?.toString() ?? '0') ?? 0)
           .where((id) => id > 0)
@@ -1683,8 +1718,8 @@ class DBHelper {
         await conn.execute("""
           INSERT IGNORE INTO tbl_teamschedule
             (match_id, round_id, team_id, referee_id, arena_number)
-          VALUES ($matchId, 1, $teamId, $refereeId, 1)
-        """);
+          VALUES (:mid, 1, :tid, :rid, 1)
+        """, {"mid": matchId, "tid": teamId, "rid": refereeId});
         print("✅ BYE team $teamId seeded into '$nextRound' match $matchId");
       }
     }
@@ -1723,7 +1758,8 @@ class DBHelper {
 
     // 1. Find current bracket_type
     final curResult = await conn.execute(
-      "SELECT bracket_type FROM tbl_match WHERE match_id = $matchId LIMIT 1",
+      "SELECT bracket_type FROM tbl_match WHERE match_id = :mid LIMIT 1",
+      {"mid": matchId},
     );
     if (curResult.rows.isEmpty) return;
     final currentType = curResult.rows.first.assoc()['bracket_type'] ?? '';
@@ -1779,16 +1815,16 @@ class DBHelper {
         FROM tbl_match m
         JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
         LEFT JOIN tbl_teamschedule ts ON ts.match_id = m.match_id
-        WHERE m.bracket_type = '$targetType'
+        WHERE m.bracket_type = :bt
           AND m.match_id NOT IN (
             SELECT DISTINCT ts2.match_id FROM tbl_teamschedule ts2
-            WHERE ts2.team_id = $teamId
+            WHERE ts2.team_id = :tid
           )
         GROUP BY m.match_id
         HAVING team_count < 2
         ORDER BY s.schedule_start ASC, m.match_id ASC
         LIMIT 1
-      """);
+      """, {"bt": targetType, "tid": teamId});
       if (matchResult.rows.isEmpty) return;
       final nextMatchId = int.tryParse(
           matchResult.rows.first.assoc()['match_id']?.toString() ?? '0') ?? 0;
@@ -1796,8 +1832,8 @@ class DBHelper {
       await conn.execute("""
         INSERT IGNORE INTO tbl_teamschedule
           (match_id, round_id, team_id, referee_id, arena_number)
-        VALUES ($nextMatchId, 1, $teamId, $refereeId, 1)
-      """);
+        VALUES (:nmid, 1, :tid, :rid, 1)
+      """, {"nmid": nextMatchId, "tid": teamId, "rid": refereeId});
       print("✅ Advance: team $teamId -> $targetType (match $nextMatchId)");
     }
 
@@ -1816,13 +1852,13 @@ class DBHelper {
       FROM tbl_score sc
       JOIN tbl_match m ON m.match_id = sc.match_id
       JOIN tbl_team  t ON t.team_id  = sc.team_id
-      WHERE t.category_id = $categoryId
+      WHERE t.category_id = :catId
         AND m.bracket_type IN (
           'round-of-32','elimination','round-of-16','round-of-8',
           'quarter-finals','semi-finals','third-place','final'
         )
       ORDER BY sc.match_id
-    """);
+    """, {"catId": categoryId});
     final Map<int, Map<int, int>> out = {};
     for (final row in result.rows) {
       final mid   = int.tryParse(row.assoc()['match_id']?.toString() ?? '0') ?? 0;
@@ -1849,17 +1885,18 @@ class DBHelper {
 
     // Check if a score row already exists for this match+team
     final existing = await conn.execute(
-      "SELECT score_id FROM tbl_score WHERE match_id = $matchId AND team_id = $teamId LIMIT 1",
+      "SELECT score_id FROM tbl_score WHERE match_id = :mid AND team_id = :tid LIMIT 1",
+      {"mid": matchId, "tid": teamId},
     );
 
     if (existing.rows.isNotEmpty) {
       final scoreId = existing.rows.first.assoc()['score_id'] ?? '0';
       await conn.execute("""
         UPDATE tbl_score
-        SET score_totalscore  = $goals,
+        SET score_totalscore  = :goals,
             score_isapproved  = 1
-        WHERE score_id = $scoreId
-      """);
+        WHERE score_id = :sid
+      """, {"goals": goals, "sid": scoreId});
     } else {
       await conn.execute("""
         INSERT INTO tbl_score
@@ -1867,10 +1904,10 @@ class DBHelper {
            score_independentscore, score_violation,
            score_totalduration, score_isapproved)
         VALUES
-          ($matchId, $teamId, 1, $refereeId, $goals,
-           $goals, 0,
+          (:mid, :tid, 1, :rid, :goals,
+           :goals, 0,
            '00:00:00', 1)
-      """);
+      """, {"mid": matchId, "tid": teamId, "rid": refereeId, "goals": goals});
     }
     print("✅ KO score saved: match=$matchId team=$teamId goals=$goals");
   }

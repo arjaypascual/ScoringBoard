@@ -132,14 +132,14 @@ class _Step1SchoolState extends State<Step1School> {
         return;
       }
 
-      await conn.execute(
+      // Use lastInsertID from the insert result directly — avoids a race
+      // condition where a concurrent insert could return the wrong ID if
+      // a second query (SELECT LAST_INSERT_ID()) were used instead.
+      final insertResult = await conn.execute(
         "INSERT INTO tbl_school (school_name, school_region) VALUES (:name, :region)",
         {"name": fullName, "region": _selectedRegion},
       );
-
-      final result   = await conn.execute("SELECT LAST_INSERT_ID() as id");
-      final schoolId = int.parse(
-          result.rows.first.assoc()['LAST_INSERT_ID()'] ?? '0');
+      final schoolId = insertResult.lastInsertID.toInt();
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(

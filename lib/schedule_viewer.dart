@@ -120,7 +120,7 @@ class ScheduleViewer extends StatefulWidget {
 class _ScheduleViewerState extends State<ScheduleViewer>
     with TickerProviderStateMixin {
   TabController? _tabController;
-  List<Map<String, dynamic>>           _categories         = [];
+  List<Map<String, String?>>           _categories         = [];
   Map<int, List<Map<String, dynamic>>> _scheduleByCategory = {};
   final Map<String, MatchStatus>       _statusMap          = {};
   bool      _isLoading = true;

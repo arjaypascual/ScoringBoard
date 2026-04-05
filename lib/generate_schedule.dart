@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'db_helper.dart';
 import 'registration_shared.dart';
+import 'db_backup_service.dart';
 
 class GenerateSchedule extends StatefulWidget {
   final VoidCallback? onBack;
@@ -539,70 +540,277 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   }
 
   // ── Confirm dialog ─────────────────────────────────────────────────────────
-  Future<bool?> _showConfirmDialog() => showDialog<bool>(
-    context: context,
-    builder: (ctx) => Dialog(
-      backgroundColor: Colors.transparent,
-      child: Container(
-        width: 360, padding: const EdgeInsets.all(28),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-              begin: Alignment.topLeft, end: Alignment.bottomRight,
-              colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)]),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.orange.withOpacity(0.4), width: 1.5)),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(width: 54, height: 54,
-            decoration: BoxDecoration(shape: BoxShape.circle,
-                color: Colors.orange.withOpacity(0.15),
-                border: Border.all(color: Colors.orange.withOpacity(0.4))),
-            child: const Icon(Icons.warning_amber_rounded,
-                color: Colors.orange, size: 28)),
-          const SizedBox(height: 14),
-          const Text('Regenerate Schedule?',
-              style: TextStyle(color: Colors.white, fontSize: 17,
-                  fontWeight: FontWeight.w800)),
-          const SizedBox(height: 8),
-          Text('This will DELETE the existing schedule\nand generate a new one.',
+  /// Shows the two-step confirm dialog:
+  ///   Step 1 — optional database backup
+  ///   Step 2 — destructive regeneration confirm
+  /// Returns true only when the user ultimately confirms regeneration.
+  Future<bool?> _showConfirmDialog() async {
+    // ── Step 1: Offer a backup ─────────────────────────────────────────────
+    final backupChoice = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          width: 400,
+          padding: const EdgeInsets.all(28),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF1A0550), Color(0xFF2D0E7A)]),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+                color: const Color(0xFF00CFFF).withOpacity(0.5), width: 1.5),
+            boxShadow: [
+              BoxShadow(
+                  color: const Color(0xFF00CFFF).withOpacity(0.12),
+                  blurRadius: 24)
+            ],
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            // Icon
+            Container(
+              width: 58, height: 58,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: const Color(0xFF00CFFF).withOpacity(0.12),
+                border: Border.all(
+                    color: const Color(0xFF00CFFF).withOpacity(0.4)),
+              ),
+              child: const Icon(Icons.cloud_upload_rounded,
+                  color: Color(0xFF00CFFF), size: 30),
+            ),
+            const SizedBox(height: 16),
+            const Text('Back Up Before Clearing?',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w900)),
+            const SizedBox(height: 10),
+            Text(
+              'You are about to delete the current schedule.\n'
+              'Creating a backup lets you restore it if needed.',
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white.withOpacity(0.55),
-                  fontSize: 13, height: 1.5)),
-          const SizedBox(height: 22),
-          Row(children: [
-            Expanded(child: OutlinedButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              style: OutlinedButton.styleFrom(
-                side: BorderSide(color: Colors.white.withOpacity(0.2)),
-                padding: const EdgeInsets.symmetric(vertical: 13),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10))),
-              child: Text('CANCEL', style: TextStyle(
-                  color: Colors.white.withOpacity(0.45),
-                  fontWeight: FontWeight.bold)))),
-            const SizedBox(width: 10),
-            Expanded(child: ElevatedButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.transparent,
-                shadowColor: Colors.transparent,
-                padding: EdgeInsets.zero,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10))),
-              child: Ink(
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                      colors: [Colors.orange, Color(0xFFCC4400)]),
-                  borderRadius: BorderRadius.circular(10)),
-                child: const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 13),
-                  child: Center(child: Text('REGENERATE',
-                      style: TextStyle(color: Colors.white,
-                          fontWeight: FontWeight.bold, letterSpacing: 1))))))),
+              style: TextStyle(
+                  color: Colors.white.withOpacity(0.6),
+                  fontSize: 13,
+                  height: 1.55),
+            ),
+            const SizedBox(height: 6),
+            // Backup path hint
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+              decoration: BoxDecoration(
+                color: const Color(0xFF00CFFF).withOpacity(0.07),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                    color: const Color(0xFF00CFFF).withOpacity(0.2)),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.folder_rounded,
+                      color: Color(0xFF00CFFF), size: 14),
+                  SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      'Saves a .sql file to your Downloads folder',
+                      style: TextStyle(
+                          color: Color(0xFF00CFFF),
+                          fontSize: 11,
+                          letterSpacing: 0.3),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+            // Three-button row
+            Column(children: [
+              // Primary: Backup then continue
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.save_alt_rounded, size: 16),
+                  label: const Text('Backup & Continue',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF00CFFF),
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                  onPressed: () => Navigator.of(ctx).pop('backup'),
+                ),
+              ),
+              const SizedBox(height: 8),
+              // Secondary: Skip backup, continue anyway
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: Icon(Icons.skip_next_rounded,
+                      size: 16,
+                      color: Colors.orange.withOpacity(0.8)),
+                  label: Text('Skip Backup & Continue',
+                      style: TextStyle(
+                          color: Colors.orange.withOpacity(0.8),
+                          fontWeight: FontWeight.bold)),
+                  style: OutlinedButton.styleFrom(
+                    side: BorderSide(
+                        color: Colors.orange.withOpacity(0.35), width: 1.5),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
+                  ),
+                  onPressed: () => Navigator.of(ctx).pop('skip'),
+                ),
+              ),
+              const SizedBox(height: 8),
+              // Cancel
+              SizedBox(
+                width: double.infinity,
+                child: TextButton(
+                  onPressed: () => Navigator.of(ctx).pop('cancel'),
+                  child: Text('Cancel',
+                      style: TextStyle(
+                          color: Colors.white.withOpacity(0.4),
+                          fontWeight: FontWeight.bold)),
+                ),
+              ),
+            ]),
           ]),
-        ]),
+        ),
       ),
-    ),
-  );
+    );
+
+    if (backupChoice == null || backupChoice == 'cancel') return false;
+
+    // ── Run backup if requested ────────────────────────────────────────────
+    if (backupChoice == 'backup') {
+      final path = await DbBackupService.backupDatabase(context);
+      if (path == null) {
+        // Backup was cancelled inside the service dialog or failed.
+        // Ask if they still want to proceed.
+        if (!mounted) return false;
+        final proceed = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF1A0A4A),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(
+                  color: Colors.orange.withOpacity(0.5), width: 1.5),
+            ),
+            title: const Text('Backup Not Created',
+                style: TextStyle(color: Colors.white,
+                    fontWeight: FontWeight.w800)),
+            content: const Text(
+                'No backup was saved. Do you still want to '
+                'clear and regenerate the schedule?',
+                style: TextStyle(color: Colors.white70, height: 1.5)),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancel',
+                      style: TextStyle(color: Colors.white38))),
+              ElevatedButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange,
+                      foregroundColor: Colors.black),
+                  child: const Text('Proceed Anyway',
+                      style: TextStyle(fontWeight: FontWeight.bold))),
+            ],
+          ),
+        );
+        if (proceed != true) return false;
+      }
+    }
+
+    // ── Step 2: Final destructive confirm ─────────────────────────────────
+    if (!mounted) return false;
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          width: 360, padding: const EdgeInsets.all(28),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+                begin: Alignment.topLeft, end: Alignment.bottomRight,
+                colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)]),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+                color: Colors.orange.withOpacity(0.4), width: 1.5)),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 54, height: 54,
+              decoration: BoxDecoration(shape: BoxShape.circle,
+                  color: Colors.orange.withOpacity(0.15),
+                  border: Border.all(
+                      color: Colors.orange.withOpacity(0.4))),
+              child: const Icon(Icons.warning_amber_rounded,
+                  color: Colors.orange, size: 28)),
+            const SizedBox(height: 14),
+            const Text('Regenerate Schedule?',
+                style: TextStyle(color: Colors.white, fontSize: 17,
+                    fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            Text('This will DELETE the existing schedule\nand generate a new one.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white.withOpacity(0.55),
+                    fontSize: 13, height: 1.5)),
+            const SizedBox(height: 22),
+            Row(children: [
+              Expanded(child: OutlinedButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                style: OutlinedButton.styleFrom(
+                  side: BorderSide(
+                      color: Colors.white.withOpacity(0.2)),
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10))),
+                child: Text('CANCEL', style: TextStyle(
+                    color: Colors.white.withOpacity(0.45),
+                    fontWeight: FontWeight.bold)))),
+              const SizedBox(width: 10),
+              Expanded(child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.transparent,
+                  shadowColor: Colors.transparent,
+                  padding: EdgeInsets.zero,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10))),
+                child: Ink(
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                        colors: [Colors.orange, Color(0xFFCC4400)]),
+                    borderRadius: BorderRadius.circular(10)),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 13),
+                    child: Center(child: Text('REGENERATE',
+                        style: TextStyle(color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1))))))),
+            ]),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // ── Backup / Restore entry point (accessible from header) ─────────────────
+  /// Exposed so the page header can provide direct Backup & Restore buttons.
+  Future<void> showBackupDialog() => DbBackupService.backupDatabase(context)
+      .then((_) {});
+
+  Future<void> showRestoreDialog() => DbBackupService.restoreDatabase(context)
+      .then((restored) {
+        if (restored && mounted) _loadCategories();
+      });
 
   // ── Locked dialog (shown when matches are in progress) ────────────────────
   Future<void> _showLockedDialog(int count) => showDialog<void>(
@@ -700,6 +908,47 @@ class _GenerateScheduleState extends State<GenerateSchedule>
                       style: TextStyle(
                           color: Colors.white.withOpacity(0.4), fontSize: 11)),
                 ]),
+                const Spacer(),
+                // ── Backup & Restore toolbar ─────────────────────────────
+                Tooltip(
+                  message: 'Backup Database',
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.cloud_upload_rounded, size: 15),
+                    label: const Text('Backup',
+                        style: TextStyle(fontSize: 12,
+                            fontWeight: FontWeight.bold)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF00CFFF),
+                      side: const BorderSide(
+                          color: Color(0xFF00CFFF), width: 1.2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
+                    ),
+                    onPressed: showBackupDialog,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Tooltip(
+                  message: 'Restore Database from .sql file',
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.restore_rounded, size: 15),
+                    label: const Text('Restore',
+                        style: TextStyle(fontSize: 12,
+                            fontWeight: FontWeight.bold)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFFFF9F43),
+                      side: const BorderSide(
+                          color: Color(0xFFFF9F43), width: 1.2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8)),
+                    ),
+                    onPressed: showRestoreDialog,
+                  ),
+                ),
               ]),
 
               const SizedBox(height: 28),
