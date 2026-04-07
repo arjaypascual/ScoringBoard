@@ -40,6 +40,10 @@ class _StandingsState extends State<Standings>
   int?   _soccerCategoryId;
   List<_SoccerGroup> _soccerGroups = [];
 
+  // ── Final Ranking (from knockout results) ─────────────────────────────────
+  // null = not yet determined, empty list = tournament not started
+  List<_FinalRankEntry> _finalRanking = [];
+
   @override
   void initState() {
     super.initState();
@@ -93,6 +97,7 @@ class _StandingsState extends State<Standings>
           if (gSig != _lastGroupSignature) {
             _lastGroupSignature = gSig;
             await _loadSoccerGroups(catId: _soccerCategoryId);
+            await _loadFinalRanking(catId: _soccerCategoryId);
           }
         } catch (_) {}
       }
@@ -213,8 +218,8 @@ class _StandingsState extends State<Standings>
       );
       _soccerTabCtrl?.dispose();
       _soccerTabCtrl = TabController(
-        length: 2, vsync: this,
-        initialIndex: prevSoccerIdx.clamp(0, 1),
+        length: 3, vsync: this,
+        initialIndex: prevSoccerIdx.clamp(0, 2),
       );
 
       // Find soccer category
@@ -246,6 +251,7 @@ class _StandingsState extends State<Standings>
 
       // Load soccer group standings (pass id directly to avoid state timing issue)
       if (soccerCatId != null) await _loadSoccerGroups(catId: soccerCatId);
+      if (soccerCatId != null) await _loadFinalRanking(catId: soccerCatId);
     } catch (e) {
       setState(() => _isLoading = false);
       if (mounted) {
@@ -373,12 +379,6 @@ class _StandingsState extends State<Standings>
                     icon: const Icon(Icons.download_rounded,
                         color: Color(0xFF00FF9C)),
                     onPressed: _showExportDialog,
-                  ),
-                  IconButton(
-                    tooltip: 'Accomplishment Report',
-                    icon: const Icon(Icons.emoji_events_rounded,
-                        color: Color(0xFFFFD700)),
-                    onPressed: _showAccomplishmentReport,
                   ),
                   IconButton(
                     tooltip: 'Teams & Players',
@@ -971,7 +971,159 @@ class _StandingsState extends State<Standings>
     }
   }
 
-  // ── Soccer group standings view ──────────────────────────────────────────────
+  // ── Load final ranking from knockout results ──────────────────────────────
+  // Reads the final, third-place, and semi-final results from tbl_score /
+  // tbl_match to determine Champion (1st), Runner-up (2nd), 3rd place, 4th.
+  Future<void> _loadFinalRanking({required int? catId}) async {
+    if (catId == null) return;
+    try {
+      final conn = await DBHelper.getConnection();
+
+      // Query: for each KO match type, get scores ordered desc
+      // We read 'final' and 'third-place' matches with their scores
+      final result = await conn.execute("""
+        SELECT
+          m.bracket_type,
+          m.match_id,
+          t.team_id,
+          t.team_name,
+          COALESCE(sc.score_totalscore, -1) AS goals
+        FROM tbl_match m
+        JOIN tbl_teamschedule ts ON ts.match_id = m.match_id
+        JOIN tbl_team t          ON t.team_id   = ts.team_id
+        LEFT JOIN tbl_score sc   ON sc.match_id = m.match_id
+                                AND sc.team_id  = ts.team_id
+        WHERE t.category_id = :catId
+          AND m.bracket_type IN ('final', 'third-place', 'semi-finals')
+        ORDER BY m.bracket_type, m.match_id, sc.score_totalscore DESC
+      """, {"catId": catId});
+
+      // Group by match_id → {bracket_type, teams: [{teamId, teamName, goals}]}
+      final Map<int, Map<String, dynamic>> byMatch = {};
+      for (final row in result.rows) {
+        final mid  = int.tryParse(row.assoc()['match_id']?.toString() ?? '0') ?? 0;
+        final bt   = row.assoc()['bracket_type']?.toString() ?? '';
+        final tid  = int.tryParse(row.assoc()['team_id']?.toString() ?? '0') ?? 0;
+        final name = row.assoc()['team_name']?.toString() ?? '';
+        final g    = int.tryParse(row.assoc()['goals']?.toString() ?? '-1') ?? -1;
+        if (mid == 0 || tid == 0) continue;
+        byMatch.putIfAbsent(mid, () => {'bracketType': bt, 'teams': <Map<String, dynamic>>[]});
+        (byMatch[mid]!['teams'] as List<Map<String, dynamic>>).add({
+          'teamId': tid, 'teamName': name, 'goals': g,
+        });
+      }
+
+      // Find the final match and third-place match
+      Map<String, dynamic>? finalMatch;
+      Map<String, dynamic>? thirdMatch;
+      // Also collect semi-final losers as fallback for 3rd/4th if no third-place match scored
+      final List<Map<String, dynamic>> semiMatches = [];
+
+      for (final m in byMatch.values) {
+        final bt = m['bracketType'] as String;
+        if (bt == 'final')       finalMatch = m;
+        if (bt == 'third-place') thirdMatch = m;
+        if (bt == 'semi-finals') semiMatches.add(m);
+      }
+
+      final List<_FinalRankEntry> ranking = [];
+
+      // ── Determine 1st and 2nd from Final ──────────────────────────────────
+      if (finalMatch != null) {
+        final teams = finalMatch['teams'] as List<Map<String, dynamic>>;
+        if (teams.length == 2) {
+          final t0g = teams[0]['goals'] as int;
+          final t1g = teams[1]['goals'] as int;
+          if (t0g >= 0 && t1g >= 0 && t0g != t1g) {
+            // Scores available — determine winner
+            final winner = t0g > t1g ? teams[0] : teams[1];
+            final loser  = t0g > t1g ? teams[1] : teams[0];
+            ranking.add(_FinalRankEntry(
+              rank: 1,
+              teamId:   winner['teamId'] as int,
+              teamName: winner['teamName'] as String,
+              goals:    winner['goals'] as int,
+            ));
+            ranking.add(_FinalRankEntry(
+              rank: 2,
+              teamId:   loser['teamId'] as int,
+              teamName: loser['teamName'] as String,
+              goals:    loser['goals'] as int,
+            ));
+          } else if (t0g < 0 && t1g < 0) {
+            // Final exists but no scores yet — show as TBD
+            for (int i = 0; i < teams.length; i++) {
+              ranking.add(_FinalRankEntry(
+                rank: i + 1,
+                teamId:   teams[i]['teamId'] as int,
+                teamName: teams[i]['teamName'] as String,
+                goals: -1,
+              ));
+            }
+          }
+        }
+      }
+
+      // ── Determine 3rd and 4th from third-place match ──────────────────────
+      if (thirdMatch != null) {
+        final teams = thirdMatch['teams'] as List<Map<String, dynamic>>;
+        if (teams.length == 2) {
+          final t0g = teams[0]['goals'] as int;
+          final t1g = teams[1]['goals'] as int;
+          if (t0g >= 0 && t1g >= 0 && t0g != t1g) {
+            final winner = t0g > t1g ? teams[0] : teams[1];
+            final loser  = t0g > t1g ? teams[1] : teams[0];
+            ranking.add(_FinalRankEntry(
+              rank: 3,
+              teamId:   winner['teamId'] as int,
+              teamName: winner['teamName'] as String,
+              goals:    winner['goals'] as int,
+            ));
+            ranking.add(_FinalRankEntry(
+              rank: 4,
+              teamId:   loser['teamId'] as int,
+              teamName: loser['teamName'] as String,
+              goals:    loser['goals'] as int,
+            ));
+          } else if (t0g < 0 && t1g < 0) {
+            for (int i = 0; i < teams.length; i++) {
+              ranking.add(_FinalRankEntry(
+                rank: i + 3,
+                teamId:   teams[i]['teamId'] as int,
+                teamName: teams[i]['teamName'] as String,
+                goals: -1,
+              ));
+            }
+          }
+        }
+      } else if (semiMatches.length >= 2) {
+        // No third-place match data yet — show semi losers as 3rd/4th TBD
+        int rk = 3;
+        for (final sm in semiMatches) {
+          final teams = sm['teams'] as List<Map<String, dynamic>>;
+          final t0g = teams.isNotEmpty ? (teams[0]['goals'] as int) : -1;
+          final t1g = teams.length > 1 ? (teams[1]['goals'] as int) : -1;
+          // Loser of semi = t with lower goals
+          Map<String, dynamic>? loser;
+          if (t0g >= 0 && t1g >= 0 && t0g != t1g) {
+            loser = t0g < t1g ? teams[0] : teams[1];
+          }
+          if (loser != null) {
+            ranking.add(_FinalRankEntry(
+              rank: rk++,
+              teamId:   loser['teamId'] as int,
+              teamName: loser['teamName'] as String,
+              goals: -1,
+            ));
+          }
+        }
+      }
+
+      if (mounted) setState(() => _finalRanking = ranking);
+    } catch (e) {
+      print('_loadFinalRanking error: $e');
+    }
+  }
   Widget _buildSoccerStandingsView(Map<String, dynamic> category) {
     final categoryName = (category['category_type'] ?? '').toString().toUpperCase();
     return Column(children: [
@@ -994,11 +1146,6 @@ class _StandingsState extends State<Standings>
               tooltip: 'Export Standings',
               icon: const Icon(Icons.download_rounded, color: Color(0xFF00FF9C)),
               onPressed: _showExportDialog,
-            ),
-            IconButton(
-              tooltip: 'Accomplishment Report',
-              icon: const Icon(Icons.emoji_events_rounded, color: Color(0xFFFFD700)),
-              onPressed: _showAccomplishmentReport,
             ),
             IconButton(
               tooltip: 'Back to Homepage',
@@ -1029,6 +1176,11 @@ class _StandingsState extends State<Standings>
               SizedBox(width: 6),
               Text('OVERALL'),
             ])),
+            Tab(child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.emoji_events, size: 15),
+              SizedBox(width: 6),
+              Text('FINAL RANKING'),
+            ])),
           ],
         ),
       ),
@@ -1046,6 +1198,8 @@ class _StandingsState extends State<Standings>
                   ),
             // Tab 2: Overall Standing
             _buildOverallStanding(),
+            // Tab 3: Final Ranking
+            _buildFinalRankingView(),
           ],
         ),
       ),
@@ -1279,8 +1433,442 @@ class _StandingsState extends State<Standings>
     ]);
   }
 
+  // ── Final Ranking View ────────────────────────────────────────────────────
+  Widget _buildFinalRankingView() {
+    // ── Empty state ──────────────────────────────────────────────────────────
+    if (_finalRanking.isEmpty) {
+      return Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter, end: Alignment.bottomCenter,
+            colors: [Color(0xFF0E0730), Color(0xFF1A0A4A)],
+          ),
+        ),
+        child: Center(
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            // Trophy icon with glow rings
+            Stack(alignment: Alignment.center, children: [
+              Container(width: 130, height: 130,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                      color: const Color(0xFFFFD700).withOpacity(0.08), width: 1),
+                )),
+              Container(width: 100, height: 100,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                      color: const Color(0xFFFFD700).withOpacity(0.15), width: 1),
+                )),
+              Container(width: 72, height: 72,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: RadialGradient(colors: [
+                    const Color(0xFFFFD700).withOpacity(0.18),
+                    const Color(0xFFFFD700).withOpacity(0.02),
+                  ]),
+                  border: Border.all(
+                      color: const Color(0xFFFFD700).withOpacity(0.4), width: 1.5),
+                  boxShadow: [BoxShadow(
+                      color: const Color(0xFFFFD700).withOpacity(0.25),
+                      blurRadius: 24)],
+                ),
+                child: const Center(child: Text('🏆',
+                    style: TextStyle(fontSize: 34)))),
+            ]),
+            const SizedBox(height: 28),
+            const Text('TOURNAMENT NOT FINISHED',
+                style: TextStyle(
+                    color: Color(0xFFFFD700),
+                    fontSize: 15, fontWeight: FontWeight.w900,
+                    letterSpacing: 2)),
+            const SizedBox(height: 10),
+            const Text(
+                'Complete the knockout stage to reveal\nthe final rankings.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white30,
+                    fontSize: 13, height: 1.6)),
+          ]),
+        ),
+      );
+    }
 
-  // ── Stat pill (W/D/L/MP) ──────────────────────────────────────────────────
+    // ── Sort entries ─────────────────────────────────────────────────────────
+    final sorted = List<_FinalRankEntry>.from(_finalRanking)
+      ..sort((a, b) => a.rank.compareTo(b.rank));
+
+    final top3   = sorted.where((e) => e.rank <= 3).toList();
+    final others = sorted.where((e) => e.rank >  3).toList();
+
+    // Colors per rank
+    Color _rc(int rank) {
+      switch (rank) {
+        case 1:  return const Color(0xFFFFD700);
+        case 2:  return const Color(0xFFE8E8E8);
+        case 3:  return const Color(0xFFCD7F32);
+        default: return const Color(0xFF00CFFF);
+      }
+    }
+    String _emoji(int rank) {
+      switch (rank) {
+        case 1:  return '🏆';
+        case 2:  return '🥈';
+        case 3:  return '🥉';
+        default: return '$rank';
+      }
+    }
+    String _rlabel(int rank) {
+      switch (rank) {
+        case 1:  return 'CHAMPION';
+        case 2:  return 'RUNNER-UP';
+        case 3:  return '3RD PLACE';
+        default: return '${rank}TH PLACE';
+      }
+    }
+
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter, end: Alignment.bottomCenter,
+          colors: [Color(0xFF0A051E), Color(0xFF130742)],
+        ),
+      ),
+      child: SingleChildScrollView(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+
+          // ══════════════════════════════════════════════════════════════════
+          // HERO HEADER
+          // ══════════════════════════════════════════════════════════════════
+          Container(
+            padding: const EdgeInsets.fromLTRB(0, 32, 0, 0),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter, end: Alignment.bottomCenter,
+                colors: [
+                  const Color(0xFFFFD700).withOpacity(0.07),
+                  Colors.transparent,
+                ],
+              ),
+            ),
+            child: Column(children: [
+              // Sparkle line
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                _sparkle(), const SizedBox(width: 8),
+                _sparkle(), const SizedBox(width: 12),
+                const Text('✦', style: TextStyle(
+                    color: Color(0xFFFFD700), fontSize: 16)),
+                const SizedBox(width: 12),
+                _sparkle(), const SizedBox(width: 8),
+                _sparkle(),
+              ]),
+              const SizedBox(height: 10),
+              const Text('FINAL RANKING',
+                  style: TextStyle(
+                      color: Color(0xFFFFD700),
+                      fontSize: 28, fontWeight: FontWeight.w900,
+                      letterSpacing: 4)),
+              const SizedBox(height: 4),
+              Text('ROBOVENTURE  •  PHILIPPINE ROBOTICS CUP',
+                  style: TextStyle(
+                      color: Colors.white.withOpacity(0.3),
+                      fontSize: 10, letterSpacing: 2,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 20),
+              // Divider with trophy
+              Row(children: [
+                Expanded(child: Container(height: 1,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(colors: [
+                        Colors.transparent,
+                        const Color(0xFFFFD700).withOpacity(0.4),
+                      ]),
+                    ))),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  child: Container(
+                    width: 36, height: 36,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: RadialGradient(colors: [
+                        const Color(0xFFFFD700).withOpacity(0.20),
+                        const Color(0xFFFFD700).withOpacity(0.03),
+                      ]),
+                      border: Border.all(
+                          color: const Color(0xFFFFD700).withOpacity(0.5)),
+                      boxShadow: [BoxShadow(
+                          color: const Color(0xFFFFD700).withOpacity(0.3),
+                          blurRadius: 12)],
+                    ),
+                    child: const Center(child: Text('🏆',
+                        style: TextStyle(fontSize: 18))),
+                  ),
+                ),
+                Expanded(child: Container(height: 1,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(colors: [
+                        const Color(0xFFFFD700).withOpacity(0.4),
+                        Colors.transparent,
+                      ]),
+                    ))),
+              ]),
+            ]),
+          ),
+
+          // ══════════════════════════════════════════════════════════════════
+          // VISUAL PODIUM — top 3 side by side (2nd | 1st | 3rd)
+          // ══════════════════════════════════════════════════════════════════
+          if (top3.isNotEmpty) ...[
+            const SizedBox(height: 28),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _buildPodium(top3, _rc, _emoji, _rlabel),
+            ),
+          ],
+
+          // ══════════════════════════════════════════════════════════════════
+          // 4TH PLACE + BEYOND — horizontal slim cards
+          // ══════════════════════════════════════════════════════════════════
+          if (others.isNotEmpty) ...[
+            const SizedBox(height: 28),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Row(children: [
+                Expanded(child: Divider(color: Colors.white.withOpacity(0.08))),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Text('OTHER FINALISTS',
+                      style: TextStyle(
+                          color: Colors.white.withOpacity(0.25),
+                          fontSize: 10, letterSpacing: 1.5,
+                          fontWeight: FontWeight.w700)),
+                ),
+                Expanded(child: Divider(color: Colors.white.withOpacity(0.08))),
+              ]),
+            ),
+            const SizedBox(height: 12),
+            ...others.map((e) => _buildSlimRankCard(e, _rc(e.rank), _emoji(e.rank), _rlabel(e.rank))),
+          ],
+
+          // ── Footer note ──────────────────────────────────────────────────
+          const SizedBox(height: 32),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.03),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.white.withOpacity(0.06)),
+              ),
+              child: Row(children: [
+                const Icon(Icons.info_outline, color: Colors.white24, size: 13),
+                const SizedBox(width: 8),
+                const Expanded(child: Text(
+                  'Based on knockout results — Final & 3rd Place match. '
+                  'Separate from Group Stage standings.',
+                  style: TextStyle(color: Colors.white24,
+                      fontSize: 10, height: 1.4),
+                )),
+              ]),
+            ),
+          ),
+          const SizedBox(height: 32),
+        ]),
+      ),
+    );
+  }
+
+  // ── Visual podium widget ──────────────────────────────────────────────────
+  // Arranges: 2nd (left) | 1st (center, tallest) | 3rd (right)
+  Widget _buildPodium(
+    List<_FinalRankEntry> top3,
+    Color Function(int) rc,
+    String Function(int) emoji,
+    String Function(int) rlabel,
+  ) {
+    // Map rank → entry
+    final Map<int, _FinalRankEntry> byRank = {
+      for (final e in top3) e.rank: e,
+    };
+
+    // Display order: 2nd, 1st, 3rd
+    final displayOrder = [2, 1, 3];
+    final podiumHeights = {1: 110.0, 2: 80.0, 3: 60.0};
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: displayOrder.map((rank) {
+        final entry   = byRank[rank];
+        final color   = rc(rank);
+        final em      = emoji(rank);
+        final label   = rlabel(rank);
+        final podH    = podiumHeights[rank]!;
+        final isFirst = rank == 1;
+        final pending = entry == null || entry.goals < 0;
+        final name    = entry?.teamName ?? '— TBD —';
+
+        return Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // ── Avatar circle with emoji ────────────────────────────────
+              Stack(alignment: Alignment.topRight, children: [
+                Container(
+                  width: isFirst ? 88 : 68,
+                  height: isFirst ? 88 : 68,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(colors: [
+                      color.withOpacity(isFirst ? 0.35 : 0.20),
+                      color.withOpacity(0.04),
+                    ]),
+                    border: Border.all(
+                        color: color.withOpacity(isFirst ? 0.80 : 0.55),
+                        width: isFirst ? 2.5 : 1.8),
+                    boxShadow: [BoxShadow(
+                        color: color.withOpacity(isFirst ? 0.45 : 0.20),
+                        blurRadius: isFirst ? 28 : 14,
+                        spreadRadius: isFirst ? 2 : 0)],
+                  ),
+                  child: Center(child: Text(em,
+                      style: TextStyle(fontSize: isFirst ? 38 : 28))),
+                ),
+
+              ]),
+
+              // ── Team name ──────────────────────────────────────────────
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Text(
+                  pending ? '— TBD —' : name,
+                  maxLines: 2,
+                  textAlign: TextAlign.center,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: pending ? Colors.white24 : Colors.white,
+                    fontSize: isFirst ? 20 : 17,
+                    fontWeight: FontWeight.w900,
+                    height: 1.2,
+                    letterSpacing: 0.3,
+                    fontStyle: pending ? FontStyle.italic : FontStyle.normal,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+
+              // ── Podium block ───────────────────────────────────────────
+              Container(
+                height: podH,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      color.withOpacity(isFirst ? 0.30 : 0.18),
+                      color.withOpacity(0.05),
+                    ],
+                  ),
+                  borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(10)),
+                  border: Border(
+                    top:   BorderSide(color: color.withOpacity(0.6),
+                        width: isFirst ? 2.5 : 1.5),
+                    left:  BorderSide(color: color.withOpacity(0.3), width: 1),
+                    right: BorderSide(color: color.withOpacity(0.3), width: 1),
+                  ),
+                  boxShadow: [BoxShadow(
+                      color: color.withOpacity(isFirst ? 0.25 : 0.10),
+                      blurRadius: 20, offset: const Offset(0, -4))],
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // Rank number big
+                    Text(rank == 1 ? '1ST' : rank == 2 ? '2ND' : '3RD',
+                        style: TextStyle(
+                            color: color,
+                            fontSize: isFirst ? 22 : 16,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 1)),
+                    const SizedBox(height: 3),
+                    // Label
+                    Text(label,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            color: color.withOpacity(0.7),
+                            fontSize: 8, fontWeight: FontWeight.w700,
+                            letterSpacing: 0.8)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  // ── Slim rank card for 4th place and beyond ───────────────────────────────
+  Widget _buildSlimRankCard(
+      _FinalRankEntry entry, Color color, String em, String label) {
+    final pending = entry.goals < 0;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0D0828),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.25), width: 1),
+        boxShadow: [BoxShadow(
+            color: color.withOpacity(0.06), blurRadius: 10)],
+      ),
+      child: Row(children: [
+        // Rank badge
+        Container(
+          width: 42, height: 42,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: RadialGradient(colors: [
+              color.withOpacity(0.15),
+              color.withOpacity(0.02),
+            ]),
+            border: Border.all(color: color.withOpacity(0.4), width: 1.5),
+          ),
+          child: Center(child: Text(em,
+              style: TextStyle(
+                  color: color,
+                  fontSize: 14, fontWeight: FontWeight.w900))),
+        ),
+        const SizedBox(width: 14),
+        // Label + name
+        Expanded(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: TextStyle(
+                color: color.withOpacity(0.6),
+                fontSize: 9, fontWeight: FontWeight.w900,
+                letterSpacing: 1)),
+            const SizedBox(height: 3),
+            Text(pending ? '— TBD —' : entry.teamName,
+                style: TextStyle(
+                    color: pending ? Colors.white24 : Colors.white70,
+                    fontSize: 18, fontWeight: FontWeight.w800,
+                    fontStyle: pending ? FontStyle.italic : FontStyle.normal)),
+          ],
+        )),
+      ]),
+    );
+  }
+
+  // ── Sparkle dot helper ────────────────────────────────────────────────────
+  Widget _sparkle() => Container(
+    width: 4, height: 4,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      color: const Color(0xFFFFD700).withOpacity(0.5),
+    ),
+  );
   Widget _statPill(String label, String value, Color color) =>
       Expanded(child: Container(
         padding: const EdgeInsets.symmetric(vertical: 8),
@@ -1768,320 +2356,6 @@ class _StandingsState extends State<Standings>
     );
   }
 
-  // ── Accomplishment Report ────────────────────────────────────────────────
-  void _showAccomplishmentReport() {
-    showDialog(
-      context: context,
-      builder: (_) => Dialog(
-        backgroundColor: Colors.transparent,
-        insetPadding: const EdgeInsets.all(16),
-        child: Container(
-          width: double.infinity,
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.85,
-          ),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF0C0628)],
-            ),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.4), width: 1.5),
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFFFFD700).withOpacity(0.15),
-                blurRadius: 30,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // ── Header ────────────────────────────────────────────
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(colors: [
-                    const Color(0xFFFFD700).withOpacity(0.15),
-                    Colors.transparent,
-                  ]),
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(15)),
-                  border: Border(
-                    bottom: BorderSide(color: const Color(0xFFFFD700).withOpacity(0.25)),
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.emoji_events_rounded,
-                        color: Color(0xFFFFD700), size: 26),
-                    const SizedBox(width: 10),
-                    const Expanded(
-                      child: Text(
-                        'ACCOMPLISHMENT REPORT',
-                        style: TextStyle(
-                          color: Color(0xFFFFD700),
-                          fontSize: 18,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 1.5,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.close_rounded, color: Colors.white54),
-                      onPressed: () => Navigator.of(context).pop(),
-                    ),
-                  ],
-                ),
-              ),
-              // ── Body ──────────────────────────────────────────────
-              Flexible(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: _categories.map((cat) {
-                      final catId = int.tryParse(cat['category_id'].toString()) ?? 0;
-                      final catName = (cat['category_type'] ?? '').toString().toUpperCase();
-                      final isSoccer = catName.toLowerCase().contains('soccer');
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 20),
-                        child: _buildReportSection(catId, catName, isSoccer),
-                      );
-                    }).toList(),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildReportSection(int catId, String catName, bool isSoccer) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.03),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white12),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Section title
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF5C2ECC).withOpacity(0.35),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
-            ),
-            child: Row(children: [
-              Icon(isSoccer ? Icons.sports_soccer : Icons.sports_esports,
-                  color: const Color(0xFF00CFFF), size: 16),
-              const SizedBox(width: 8),
-              Text(catName,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: 1,
-                  )),
-            ]),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(14),
-            child: isSoccer
-                ? _buildSoccerReportContent()
-                : _buildRegularReportContent(catId),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildRegularReportContent(int catId) {
-    final rows = _standingsByCategory[catId] ?? [];
-    if (rows.isEmpty) {
-      return const Text('No results yet.',
-          style: TextStyle(color: Colors.white38, fontSize: 13));
-    }
-
-    // Detect if this category is timer-based
-    final cat = _categories.firstWhere(
-      (c) => (int.tryParse(c['category_id'].toString()) ?? 0) == catId,
-      orElse: () => <String, String?>{},
-    );
-    final catName  = (cat['category_type'] ?? '').toString();
-    final isTimer  = _isTimerCategory(catName);
-
-    final top = rows.take(3).toList();
-    final medals = ['🥇', '🥈', '🥉'];
-    final medalColors = [
-      const Color(0xFFFFD700),
-      const Color(0xFFC0C0C0),
-      const Color(0xFFCD7F32),
-    ];
-    return Column(
-      children: [
-        ...List.generate(top.length, (i) {
-          final t   = top[i];
-          final col = medalColors[i];
-          return Container(
-            margin: const EdgeInsets.only(bottom: 8),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: col.withOpacity(0.06),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: col.withOpacity(0.25)),
-            ),
-            child: Row(children: [
-              Text(medals[i], style: const TextStyle(fontSize: 20)),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text((t['team_name'] as String).toUpperCase(),
-                        style: TextStyle(
-                          color: col,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w900,
-                        )),
-                    Text('Team ID: C${(t['team_id'] as int).toString().padLeft(3, '0')}R',
-                        style: const TextStyle(color: Colors.white38, fontSize: 11)),
-                  ],
-                ),
-              ),
-              if (isTimer)
-                Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.timer_rounded, color: col, size: 14),
-                  const SizedBox(width: 4),
-                  Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                    Text(
-                      t['bestTimeStr'] as String? ?? '—',
-                      style: TextStyle(
-                        color: col,
-                        fontSize: 20,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                    const Text('best time',
-                        style: TextStyle(color: Colors.white38, fontSize: 10)),
-                  ]),
-                ])
-              else
-                Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                  Text('${t['totalScore'] as int}',
-                      style: TextStyle(
-                        color: col,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w900,
-                      )),
-                  const Text('pts',
-                      style: TextStyle(color: Colors.white38, fontSize: 10)),
-                ]),
-            ]),
-          );
-        }),
-        if (rows.length > 3) ...[
-          const SizedBox(height: 4),
-          Text('+${rows.length - 3} more team(s) participated',
-              style: const TextStyle(color: Colors.white38, fontSize: 12)),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildSoccerReportContent() {
-    if (_soccerGroups.isEmpty) {
-      return const Text('No results yet.',
-          style: TextStyle(color: Colors.white38, fontSize: 13));
-    }
-
-    // Overall sorted list
-    final all = <Map<String, dynamic>>[];
-    for (final g in _soccerGroups) {
-      for (final t in g.teams) {
-        all.add({
-          'name': t.teamName,
-          'group': g.label,
-          'pts': t.points,
-          'w': t.wins,
-          'd': t.draws,
-          'l': t.losses,
-          'gf': t.goalsFor,
-          'ga': t.goalsAgainst,
-          'gd': t.goalDiff,
-          'gc': _groupColor(g.label),
-        });
-      }
-    }
-    all.sort((a, b) {
-      if (b['pts'] != a['pts']) return (b['pts'] as int).compareTo(a['pts'] as int);
-      if (b['gd']  != a['gd'])  return (b['gd']  as int).compareTo(a['gd']  as int);
-      return (b['gf'] as int).compareTo(a['gf'] as int);
-    });
-
-    final medals = ['🥇', '🥈', '🥉'];
-    final medalColors = [
-      const Color(0xFFFFD700),
-      const Color(0xFFC0C0C0),
-      const Color(0xFFCD7F32),
-    ];
-    final top = all.take(3).toList();
-
-    return Column(children: [
-      ...List.generate(top.length, (i) {
-        final t = top[i];
-        final col = medalColors[i];
-        final gc = t['gc'] as Color;
-        return Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            color: col.withOpacity(0.06),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: col.withOpacity(0.25)),
-          ),
-          child: Row(children: [
-            Text(medals[i], style: const TextStyle(fontSize: 20)),
-            const SizedBox(width: 8),
-            Container(
-              width: 22, height: 22,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: gc.withOpacity(0.15),
-                border: Border.all(color: gc.withOpacity(0.6)),
-              ),
-              child: Center(child: Text(t['group'] as String,
-                  style: TextStyle(color: gc, fontSize: 9, fontWeight: FontWeight.w900))),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text((t['name'] as String).toUpperCase(),
-                  style: TextStyle(
-                    color: col, fontSize: 15, fontWeight: FontWeight.w900)),
-            ),
-            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              Text('${t['pts']} pts',
-                  style: TextStyle(color: col, fontSize: 16, fontWeight: FontWeight.w900)),
-              Text('${t['w']}W ${t['d']}D ${t['l']}L  ${t['gf']}:${t['ga']}',
-                  style: const TextStyle(color: Colors.white38, fontSize: 10)),
-            ]),
-          ]),
-        );
-      }),
-      if (all.length > 3) ...[
-        const SizedBox(height: 4),
-        Text('+${all.length - 3} more team(s) participated',
-            style: const TextStyle(color: Colors.white38, fontSize: 12)),
-      ],
-    ]);
-  }
-
   // ── Export Dialog ─────────────────────────────────────────────────────────
   void _showExportDialog() {
     // Convert internal soccer group model to the export DTO
@@ -2324,6 +2598,20 @@ class _SoccerGroup {
   final String              label;
   final List<_SoccerTeamStat> teams;
   _SoccerGroup({required this.label, required this.teams});
+}
+
+// ── Final ranking entry model ─────────────────────────────────────────────────
+class _FinalRankEntry {
+  final int    rank;
+  final int    teamId;
+  final String teamName;
+  final int    goals;   // -1 = pending/not yet played
+  const _FinalRankEntry({
+    required this.rank,
+    required this.teamId,
+    required this.teamName,
+    required this.goals,
+  });
 }
 
 // ── Pulsing dot animation ─────────────────────────────────────────────────────

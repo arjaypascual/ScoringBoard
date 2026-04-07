@@ -232,8 +232,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       if (_soccerCategoryId != null) {
         try {
           // Check for score changes in group matches
+          // FIX 1: use score_independentscore (goals) not score_totalscore
           final scoreResult = await conn.execute(
-            "SELECT sc.score_id, sc.match_id, sc.team_id, sc.score_totalscore "
+            "SELECT sc.score_id, sc.match_id, sc.team_id, sc.score_independentscore "
             "FROM tbl_score sc "
             "JOIN tbl_teamschedule ts ON ts.match_id = sc.match_id AND ts.team_id = sc.team_id "
             "JOIN tbl_match m ON m.match_id = sc.match_id "
@@ -527,9 +528,10 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       if (rows.isEmpty) return;
 
       // ── Load scores from DB for all group matches ─────────────────────────
+      // FIX 2: use score_independentscore (goals) not score_totalscore
       final scoreResult = await conn.execute("""
         SELECT ts.match_id, ts.team_id,
-               sc.score_totalscore AS goals
+               sc.score_independentscore AS goals
         FROM tbl_teamschedule ts
         JOIN tbl_match m  ON m.match_id  = ts.match_id
         JOIN tbl_team  t  ON t.team_id   = ts.team_id
@@ -611,15 +613,16 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                   gm.score1  = g1;
                   gm.score2  = g2;
                   gm.winner  = g1 >= g2 ? t1 : t2;
-                  // Update team stats
+                  // Update team stats — 3 pts for win, 1 pt each for draw, 0 for loss
                   if (g1 > g2) {
-                    t1.wins++;   t1.points++;
+                    t1.wins++;   t1.points += 3;  // FIX: was +1
                     t2.losses++;
                   } else if (g2 > g1) {
-                    t2.wins++;   t2.points++;
+                    t2.wins++;   t2.points += 3;  // FIX: was +1
                     t1.losses++;
                   } else {
-                    t1.draws++; t2.draws++;
+                    t1.draws++; t1.points += 1;   // FIX: draws now give 1 pt each
+                    t2.draws++; t2.points += 1;
                   }
                 }
               }
@@ -840,8 +843,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         : (match.winner == match.team1 ? match.team2 : match.team1);
     setState(() {
       if (match.isDone && wasLoser1 != null) {
+        // Undo previous result — remove 3 pts from winner, not 1
         match.winner!.wins--;
-        match.winner!.points--;
+        match.winner!.points -= 3;  // FIX: was -1, must be -3 to match 3-pt system
         wasLoser1.losses--;
       }
       match.winner = winner;
@@ -849,7 +853,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       match.score2 = s2;
       final loser = winner == match.team1 ? match.team2 : match.team1;
       winner.wins++;
-      winner.points++;
+      winner.points += 3;  // FIX: was +1, must be +3 to match db_helper 3-pt system
       loser.losses++;
     });
   }
@@ -857,16 +861,46 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   List<GroupTeam> _getGroupStandings(TournamentGroup group) {
     final sorted = List<GroupTeam>.from(group.teams);
     sorted.sort((a, b) {
+      // Primary: points (3 per win, 1 per draw)
       if (b.points != a.points) return b.points.compareTo(a.points);
+      // Tiebreaker 1: head-to-head result
       for (final m in group.matches) {
         if (m.isDone) {
           if (m.team1 == a && m.team2 == b) return m.winner == a ? -1 : 1;
           if (m.team1 == b && m.team2 == a) return m.winner == b ? 1 : -1;
         }
       }
+      // Tiebreaker 2: goal difference across all group matches
+      final gdA = _calcGoalDiffInGroup(a, group);
+      final gdB = _calcGoalDiffInGroup(b, group);
+      if (gdB != gdA) return gdB.compareTo(gdA);
+      // Tiebreaker 3: goals for across all group matches
+      final gfA = _calcGoalsForInGroup(a, group);
+      final gfB = _calcGoalsForInGroup(b, group);
+      if (gfB != gfA) return gfB.compareTo(gfA);
       return a.teamName.compareTo(b.teamName);
     });
     return sorted;
+  }
+
+  int _calcGoalDiffInGroup(GroupTeam team, TournamentGroup group) {
+    int gf = 0, ga = 0;
+    for (final m in group.matches) {
+      if (!m.isDone || m.score1 == null || m.score2 == null) continue;
+      if (m.team1 == team) { gf += m.score1!; ga += m.score2!; }
+      if (m.team2 == team) { gf += m.score2!; ga += m.score1!; }
+    }
+    return gf - ga;
+  }
+
+  int _calcGoalsForInGroup(GroupTeam team, TournamentGroup group) {
+    int gf = 0;
+    for (final m in group.matches) {
+      if (!m.isDone || m.score1 == null || m.score2 == null) continue;
+      if (m.team1 == team) gf += m.score1!;
+      if (m.team2 == team) gf += m.score2!;
+    }
+    return gf;
   }
 
   List<GroupTeam> _getAdvancingTeams() {
@@ -877,8 +911,49 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         result.add(standings[i]);
       }
     }
-    result.sort((a, b) => b.points.compareTo(a.points));
+    // Sort by overall standings: points → goal difference → goals for.
+    // This must match the DB-side ranking in DBHelper.advanceToKnockout
+    // so that the bracket preview always shows the correct BYE recipients.
+    result.sort((a, b) {
+      if (b.points != a.points) return b.points.compareTo(a.points);
+      // Tiebreaker 1: goal difference (goals_for - goals_against)
+      final gdA = _calcGoalDiff(a);
+      final gdB = _calcGoalDiff(b);
+      if (gdB != gdA) return gdB.compareTo(gdA);
+      // Tiebreaker 2: goals for
+      final gfA = _calcGoalsFor(a);
+      final gfB = _calcGoalsFor(b);
+      if (gfB != gfA) return gfB.compareTo(gfA);
+      // Final fallback: alphabetical
+      return a.teamName.compareTo(b.teamName);
+    });
     return result;
+  }
+
+  /// Computes total goal difference for a team across all their group matches.
+  int _calcGoalDiff(GroupTeam team) {
+    int gf = 0, ga = 0;
+    for (final g in _groups) {
+      for (final m in g.matches) {
+        if (!m.isDone || m.score1 == null || m.score2 == null) continue;
+        if (m.team1 == team) { gf += m.score1!; ga += m.score2!; }
+        if (m.team2 == team) { gf += m.score2!; ga += m.score1!; }
+      }
+    }
+    return gf - ga;
+  }
+
+  /// Computes total goals for a team across all their group matches.
+  int _calcGoalsFor(GroupTeam team) {
+    int gf = 0;
+    for (final g in _groups) {
+      for (final m in g.matches) {
+        if (!m.isDone || m.score1 == null || m.score2 == null) continue;
+        if (m.team1 == team) gf += m.score1!;
+        if (m.team2 == team) gf += m.score2!;
+      }
+    }
+    return gf;
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -1281,6 +1356,71 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
   }
 
+  // ── Reset knockout seeding and re-run with correct rankings ─────────────
+  Future<void> _resetAndReseedKnockout() async {
+    if (_soccerCategoryId == null) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF130742),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Reset Bracket Seeding',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        content: const Text(
+          'This will clear all knockout match assignments and re-seed the bracket '
+          'using the correct overall standings (top 2 seeds get BYEs).\n\n'
+          'Knockout scores will also be cleared. Continue?',
+          style: TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white38)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Reset & Re-seed',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    setState(() => _isAdvancing = true);
+    try {
+      await DBHelper.resetKnockoutSeeding(_soccerCategoryId!);
+      _hasAutoAdvanced = false;
+      _lastAdvancedRound = '';
+      await _loadSoccerSchedule();
+      await _loadKoScores();
+      // Re-seed immediately
+      await DBHelper.advanceToKnockout(_soccerCategoryId!);
+      await _loadSoccerSchedule();
+      await _loadKoScores();
+      if (mounted) setState(() {});
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('✅ Bracket re-seeded! Top 2 seeds now have BYEs.',
+              style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+          backgroundColor: Color(0xFF00FF88),
+          duration: Duration(seconds: 4),
+        ));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Error: $e', style: const TextStyle(color: Colors.white)),
+          backgroundColor: Colors.redAccent,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _isAdvancing = false);
+    }
+  }
+
   Future<void> _advanceToKnockout() async {
     if (_soccerCategoryId == null) return;
     setState(() => _isAdvancing = true);
@@ -1373,6 +1513,27 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         final nextMatchCounts = seededCheck.rows
             .map((r) => int.tryParse(r.assoc()['team_count']?.toString() ?? '0') ?? 0)
             .toList();
+        // FIX 3: Don't skip if next round has 2 teams but NO scores yet —
+        // that means teams were seeded by championship_sched.dart (mobile app)
+        // but scores haven't been entered yet. We should NOT block advancement.
+        // Only skip if next round matches are ALREADY SCORED (have winners).
+        final nextRoundScoredCheck = await conn.execute("""
+          SELECT m.match_id, COUNT(DISTINCT sc.team_id) AS scored_teams
+          FROM tbl_match m
+          LEFT JOIN tbl_score sc ON sc.match_id = m.match_id
+          LEFT JOIN tbl_team t ON t.team_id = sc.team_id
+            AND t.category_id = ${_soccerCategoryId}
+          WHERE m.bracket_type = '$nextRound'
+          GROUP BY m.match_id
+        """);
+        final nextRoundScoredCounts = nextRoundScoredCheck.rows
+            .map((r) => int.tryParse(r.assoc()['scored_teams']?.toString() ?? '0') ?? 0)
+            .toList();
+        // Only skip if ALL matches in next round are already fully scored (2 teams scored)
+        final alreadyScored = nextRoundScoredCounts.isNotEmpty &&
+            nextRoundScoredCounts.every((c) => c >= 2);
+        if (alreadyScored) break;
+        // Also skip if teams are already seeded AND this session already announced it
         final alreadySeeded = nextMatchCounts.isNotEmpty &&
             nextMatchCounts.every((c) => c >= 2);
         if (alreadySeeded) break;
@@ -1381,11 +1542,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         if (_lastAdvancedRound == advanceKey) break;
         if (mounted) setState(() => _isAdvancing = true);
         for (final matchId in matchIds) {
+          // FIX 4: use score_independentscore (goals scored) not score_totalscore
+          // score_totalscore may be 0 for all teams in soccer — goals are in score_independentscore
           final scoreRows = await conn.execute("""
-            SELECT sc.team_id, sc.score_totalscore AS goals
+            SELECT sc.team_id, sc.score_independentscore AS goals
             FROM tbl_score sc JOIN tbl_team t ON t.team_id = sc.team_id
             WHERE sc.match_id = $matchId AND t.category_id = ${_soccerCategoryId}
-            ORDER BY sc.score_totalscore DESC LIMIT 2
+            ORDER BY sc.score_independentscore DESC LIMIT 2
           """);
           if (scoreRows.rows.length < 2) continue;
           final rs = scoreRows.rows.map((r) => r.assoc()).toList();
@@ -1666,6 +1829,28 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     style: const TextStyle(color: Color(0xFF00FF88),
                         fontSize: 10, fontWeight: FontWeight.bold)),
               ),
+            // ── Reset & Re-seed button (always shown when groups are done) ──
+            if (groupsDone) ...[
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: _resetAndReseedKnockout,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withOpacity(0.10),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.orange.withOpacity(0.5)),
+                  ),
+                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.refresh, size: 11, color: Colors.orange),
+                    SizedBox(width: 4),
+                    Text('RESET BRACKET', style: TextStyle(
+                        color: Colors.orange, fontSize: 10,
+                        fontWeight: FontWeight.bold)),
+                  ]),
+                ),
+              ),
+            ],
           ],
         ]),
       ),
@@ -1909,7 +2094,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         // ── Info panel — shown when button is tapped ───────────────────
         if (_showBracketFlowInfo) ...[
           const SizedBox(height: 8),
-          _buildBracketInfoPanel(ng),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 320),
+            child: SingleChildScrollView(
+              child: _buildBracketInfoPanel(ng),
+            ),
+          ),
         ],
       ],
     );
@@ -1962,7 +2152,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       if (byes == 0) return '';
       switch (ng) {
         case 3:
-          return 'Group C has no opponent to cross-pair with (odd number of groups), so 1st and 2nd place of Group C both get BYEs directly into SF.';
+          return 'The top 2 teams by OVERALL standings (best points → goal difference → goals for across all groups) get BYEs directly into SF. The remaining 4 teams play 2 ELIM matches.';
         case 5:
           return 'Overall 1st and 2nd seeds (best records across all groups) get BYEs into QF. The remaining 8 teams play ELIM.';
         case 6:
@@ -1972,7 +2162,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         case 9:
           return 'Overall top 2 seeds get BYEs into R16. Remaining 16 teams play 2 ELIM matches.';
         default:
-          return 'Top $byes seed${byes > 1 ? 's' : ''} advance directly, skipping the first knockout round.';
+          return 'Top $byes seed${byes > 1 ? 's' : ''} (overall standings) advance directly, skipping the first knockout round.';
       }
     }
 
@@ -1990,15 +2180,16 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             '\nSF Losers → 3RD PLACE MATCH';
         case 3:
           return
-            'Group A (1st) ──┐\n'
-            '                ├── ELIM 1 ──┐\n'
-            'Group B (2nd) ──┘            ├── SF Match 1 ──┐\n'
-            'Group C (1st) ── BYE ────────┘                ├── FINAL\n'
-            'Group A (2nd) ──┐                             |\n'
-            '                ├── ELIM 2 ──┐                |\n'
-            'Group B (1st) ──┘            ├── SF Match 2 ──┘\n'
-            'Group C (2nd) ── BYE ────────┘\n'
-            '\nSF Losers → 3RD PLACE MATCH';
+            'Seed 3 (overall) ──┐\n'
+            '                   ├── ELIM 1 ──┐\n'
+            'Seed 4 (overall) ──┘            ├── SF Match 1 ──┐\n'
+            'Seed 1 (overall) ── BYE ────────┘                ├── FINAL\n'
+            'Seed 5 (overall) ──┐                             |\n'
+            '                   ├── ELIM 2 ──┐                |\n'
+            'Seed 6 (overall) ──┘            ├── SF Match 2 ──┘\n'
+            'Seed 2 (overall) ── BYE ────────┘\n'
+            '\nSF Losers → 3RD PLACE MATCH\n'
+            '\n★ BYEs = top 2 by PTS → Goal Diff → Goals For';
         case 4:
           return
             'Group A (1st) ──┐\n'
@@ -2403,15 +2594,16 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     if (activeRounds.isEmpty) return _bracketEmptyState();
 
     // ── Figure out expected match counts per round ────────────────────────────
-    // The first round tells us the bracket size
-    final int firstRoundMatches = byRound[activeRounds.first]!.length;
-    // Build expected counts: first=N, each next halves
+    // Use ACTUAL DB row counts per round — the halving formula breaks when BYEs
+    // inflate later rounds beyond what simple halving predicts (e.g. 3 groups:
+    // PLAY-IN=2 matches but SF=2 matches because 2 BYE teams also enter SF).
     final Map<String, int> expectedCount = {};
-    int cnt = firstRoundMatches;
     for (final rk in activeRounds) {
-      expectedCount[rk] = cnt;
-      cnt = (cnt / 2).ceil();
+      expectedCount[rk] = byRound[rk]!.length;
     }
+    // Canvas height is driven by the round with the MOST matches (usually first)
+    final int firstRoundMatches =
+        activeRounds.map((r) => expectedCount[r]!).reduce((a, b) => a > b ? a : b);
 
     // ── Card dimensions ───────────────────────────────────────────────────────
     const double cardW  = 196.0;
@@ -2420,7 +2612,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     const double slotH  = cardH + footH + 6.0; // total slot height per match
     const double gapH   = 52.0;
 
-    // Total canvas height = first round slots
+    // Total canvas height = round with most slots
     final double totalH  = firstRoundMatches * slotH;
     final double canvasW = activeRounds.length * (cardW + gapH);
 
@@ -5454,22 +5646,29 @@ class _FifaBracketLinePainter extends CustomPainter {
       final mx = x1 + gapH / 2;
 
       for (int ni = 0; ni < nextCount; ni++) {
-        final ia = ni * 2;
-        final ib = ni * 2 + 1;
-
-        final cy1 = ia * curSlotH + curSlotH / 2;
-        final cy2 = ib < curCount ? ib * curSlotH + curSlotH / 2 : cy1;
         final ny  = ni * nextSlotH + nextSlotH / 2;
 
-        // Line from card right edge to midpoint
-        canvas.drawLine(Offset(x1, cy1), Offset(mx, cy1), paint);
-        if (ib < curCount) {
-          canvas.drawLine(Offset(x1, cy2), Offset(mx, cy2), paint);
-          // Vertical merge
-          canvas.drawLine(Offset(mx, cy1), Offset(mx, cy2), paint);
+        if (curCount == nextCount) {
+          // 1-to-1: straight horizontal connector (BYE round feeding same-size next round)
+          final cy = ni * curSlotH + curSlotH / 2;
+          canvas.drawLine(Offset(x1, cy), Offset(mx, cy), paint);
+          canvas.drawLine(Offset(mx, cy), Offset(mx, ny), paint);
+          canvas.drawLine(Offset(mx, ny), Offset(x2, ny), paint);
+        } else {
+          // Merge: two current-round matches → one next-round match
+          final ia = ni * 2;
+          final ib = ni * 2 + 1;
+
+          final cy1 = ia * curSlotH + curSlotH / 2;
+          final cy2 = ib < curCount ? ib * curSlotH + curSlotH / 2 : cy1;
+
+          canvas.drawLine(Offset(x1, cy1), Offset(mx, cy1), paint);
+          if (ib < curCount) {
+            canvas.drawLine(Offset(x1, cy2), Offset(mx, cy2), paint);
+            canvas.drawLine(Offset(mx, cy1), Offset(mx, cy2), paint);
+          }
+          canvas.drawLine(Offset(mx, ny), Offset(x2, ny), paint);
         }
-        // Line from midpoint to next card
-        canvas.drawLine(Offset(mx, ny), Offset(x2, ny), paint);
       }
     }
   }

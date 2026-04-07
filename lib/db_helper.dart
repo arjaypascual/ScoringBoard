@@ -1466,110 +1466,113 @@ class DBHelper {
       print("ℹ️  Group ${entry.key}: ranked team IDs = ${entry.value}");
     }
 
-    // ── 4. Build seeds list — FIFA cross-group pairing ───────────────────────
+    // ── 4. Build seeds list — OVERALL STANDINGS seeding ─────────────────────
     //
-    // For N groups advancing 2 each, we have 2N teams going into the first KO.
-    // bracketSize = next power of 2 >= 2N.
-    // elimReal   = real play-in matches (2N - bracketSize/2).
-    // byeCount   = bracketSize/2 - elimReal (teams that skip ELIM into QF/R16).
+    // All advancing teams (top 2 per group) are ranked by OVERALL standings:
+    //   PTS → GD (goal difference) → GF (goals for)
+    // This means seed #1 (best overall) always gets the best bracket position.
     //
-    // Seeding strategy:
-    //   - Pair groups in adjacent pairs: (A,B), (C,D), …
-    //   - Each pair → 2 cross-ELIM matches: 1A vs 2B  AND  1B vs 2A
-    //   - For ODD group counts, the last group has no partner → BOTH 1st AND 2nd
-    //     place of that group get BYEs directly into the next round (QF/R16).
-    //     e.g. 3 groups: A+B → ELIM(2 matches), C → BYE(2 teams into QF)
-    //   - For even groups where elimCnt < allCross produced, excess 1st-placers
-    //     also get BYEs (handles 5-group and similar cases).
-    //   - BYE teams are seeded into the next KO round slots after ELIM seeding.
+    // Bracket size math:
+    //   advTeams = N * 2  (top 2 per group)
+    //   bracketSize = next power of 2 >= advTeams
+    //   halfB   = bracketSize / 2  (SF slots, or QF slots if larger)
+    //   elimCnt = advTeams - halfB  (real ELIM matches)
+    //   byeCnt  = halfB - elimCnt  (top seeds that skip ELIM entirely)
+    //
+    // Seeding order (overall rank):
+    //   Seeds 1..byeCnt         → BYE directly into next round (top tier)
+    //   Seeds byeCnt+1..advTeams → play in ELIM
+    //     ELIM pairings (standard bracket): seed N+1 vs seed advTeams,
+    //                                        seed N+2 vs seed advTeams-1, …
+    //   This ensures top overall seeds never meet in ELIM and face the
+    //   weakest possible ELIM survivor in the next round.
     //
     final labels = groupRanked.keys.toList()..sort();
     final n      = labels.length;
     final seeds  = <Map<String, dynamic>>[];   // real ELIM matchups
     final byeSeeds = <int>[];                   // team IDs that get BYEs
 
+    // Collect all advancing teams: top 2 from each group
+    final List<int> allAdvancing = [];
+    for (final label in labels) {
+      final ranked = groupRanked[label] ?? [];
+      if (ranked.isNotEmpty) allAdvancing.add(ranked[0]);
+      if (ranked.length > 1) allAdvancing.add(ranked[1]);
+    }
+
+    // Sort all advancing teams by OVERALL standings: PTS → GD → GF (desc)
+    allAdvancing.sort((a, b) {
+      final sa = teamStats[a] ?? {'pts': 0, 'gd': 0, 'gf': 0};
+      final sb = teamStats[b] ?? {'pts': 0, 'gd': 0, 'gf': 0};
+      if (sb['pts'] != sa['pts']) return sb['pts']!.compareTo(sa['pts']!);
+      if (sb['gd']  != sa['gd'])  return sb['gd']!.compareTo(sa['gd']!);
+      return sb['gf']!.compareTo(sa['gf']!);
+    });
+
+    // Log overall seeding for debugging
+    for (int i = 0; i < allAdvancing.length; i++) {
+      final tid = allAdvancing[i];
+      final s = teamStats[tid] ?? {'pts': 0, 'gd': 0, 'gf': 0};
+      print("ℹ️  Overall seed #${i+1}: teamId=$tid pts=${s['pts']} gd=${s['gd']} gf=${s['gf']}");
+    }
+
     if (n == 1) {
-      // Only 1 group — 1st vs 2nd (straight to SF, no ELIM)
-      final g = labels[0];
+      // Only 1 group — seed #1 vs seed #2 (straight to SF, no ELIM)
       seeds.add({
-        'home': groupRanked[g]!.isNotEmpty ? groupRanked[g]![0] : 0,
-        'away': groupRanked[g]!.length > 1  ? groupRanked[g]![1] : 0,
+        'home': allAdvancing.isNotEmpty ? allAdvancing[0] : 0,
+        'away': allAdvancing.length > 1  ? allAdvancing[1] : 0,
       });
     } else {
-      // Build matched pairs: (A,B), (C,D), (E,F), …
-      // Each pair → 1X vs 2Y  (cross: 1st of left group vs 2nd of right group)
-      //             This is ONE real ELIM match.
-      // The reciprocal seed (1Y vs 2X) also becomes a real ELIM match.
-      //
-      // For an odd number of groups the last label has no pair partner —
-      // its 1st team gets a BYE (auto-advance) and its 2nd plays no ELIM.
-      // For the "2 groups" case there is no ELIM at all (bracketSize/2 == N),
-      // so we skip seeding entirely and fall through to byeSeeds.
-
-      // How many real ELIM matches we expect
-      final int advTeams = n * 2;
+      final int advTeams = allAdvancing.length;
       int bSize = 1; while (bSize < advTeams) bSize <<= 1;
       final int halfB   = bSize ~/ 2;
-      final int elimCnt = advTeams - halfB; // real matches
-      final int byeCnt  = halfB - elimCnt;  // teams with BYEs into next round
+      final int elimCnt = advTeams - halfB; // real ELIM matches
+      // final int byeCnt  = halfB - elimCnt;  // teams with BYEs (unused variable)
 
       if (elimCnt == 0) {
         // 2 groups → 4 teams → direct to SF, no ELIM.
-        // Both pairs are real semi-final seeds.
-        final gA = labels[0], gB = labels[1];
+        // Standard seeding: #1 vs #4, #2 vs #3
+        // (top seed faces weakest, second seed faces third)
         seeds.add({
-          'home': groupRanked[gA]!.isNotEmpty ? groupRanked[gA]![0] : 0,
-          'away': groupRanked[gB]!.length > 1  ? groupRanked[gB]![1] : 0,
+          'home': allAdvancing.isNotEmpty       ? allAdvancing[0] : 0,
+          'away': allAdvancing.length > 3       ? allAdvancing[3] : 0,
         });
         seeds.add({
-          'home': groupRanked[gB]!.isNotEmpty ? groupRanked[gB]![0] : 0,
-          'away': groupRanked[gA]!.length > 1  ? groupRanked[gA]![1] : 0,
+          'home': allAdvancing.length > 1       ? allAdvancing[1] : 0,
+          'away': allAdvancing.length > 2       ? allAdvancing[2] : 0,
         });
       } else {
-        // Build forward + reverse cross-pairs from adjacent group pairs.
-        // Adjacent pairs: (A,B), (C,D), …
-        // Forward:  1A vs 2B  → real ELIM match
-        // Reverse:  1B vs 2A  → real ELIM match
-        // For each adjacent pair we add 2 ELIM seeds (both cross directions).
-        // If elimCnt is smaller than the number we'd produce, we only take
-        // the first [elimCnt] seeds; excess 1st-place teams get BYEs.
+        // Top [halfB - elimCnt] seeds get BYEs; the rest play ELIM.
+        //
+        // byeSeeds: overall seeds #1, #2, … up to byeCnt
+        // ELIM teams: the remaining seeds, paired as:
+        //   lowest seed (last) vs next-to-lowest, working inward.
+        // This is the standard "protect top seeds" bracket design.
 
-        final List<Map<String, dynamic>> allCross = [];
-        final List<int> allBye = [];
+        final int byeCount = halfB - elimCnt;
 
-        for (int i = 0; i + 1 < n; i += 2) {
-          final gA = labels[i];
-          final gB = labels[i + 1];
-          allCross.add({
-            'home': groupRanked[gA]!.isNotEmpty ? groupRanked[gA]![0] : 0,
-            'away': groupRanked[gB]!.length > 1  ? groupRanked[gB]![1] : 0,
+        // Top seeds → BYEs
+        for (int i = 0; i < byeCount && i < allAdvancing.length; i++) {
+          byeSeeds.add(allAdvancing[i]);
+        }
+
+        // Remaining teams → ELIM, paired: highest remaining seed vs lowest
+        final List<int> elimTeams = allAdvancing.sublist(byeCount);
+        // Standard bracket pairing: seed[0] vs seed[last], seed[1] vs seed[last-1]
+        int lo = 0, hi = elimTeams.length - 1;
+        while (lo < hi) {
+          seeds.add({
+            'home': elimTeams[lo],
+            'away': elimTeams[hi],
           });
-          allCross.add({
-            'home': groupRanked[gB]!.isNotEmpty ? groupRanked[gB]![0] : 0,
-            'away': groupRanked[gA]!.length > 1  ? groupRanked[gA]![1] : 0,
-          });
+          lo++;
+          hi--;
         }
-        // Odd group left over → BOTH 1st AND 2nd place get BYEs.
-        // e.g. 3 groups: A+B produce 2 ELIM matches, C has no opponent → 1C and 2C both advance to QF.
-        if (n % 2 == 1) {
-          final gLast = labels.last;
-          final last1st = groupRanked[gLast]!.isNotEmpty ? groupRanked[gLast]![0] : 0;
-          final last2nd = groupRanked[gLast]!.length > 1  ? groupRanked[gLast]![1] : 0;
-          if (last1st > 0) allBye.add(last1st);
-          if (last2nd > 0) allBye.add(last2nd);
+        // If odd number of ELIM teams (shouldn't happen in normal brackets),
+        // the middle team also gets a BYE.
+        if (lo == hi) {
+          byeSeeds.add(elimTeams[lo]);
         }
-
-        // Take only [elimCnt] real matches; remaining 1st-placers get BYEs
-        for (int i = 0; i < allCross.length; i++) {
-          if (i < elimCnt) {
-            seeds.add(allCross[i]);
-          } else {
-            // This "home" (1st placer) gets a BYE instead
-            final tid = allCross[i]['home'] as int;
-            if (tid > 0) allBye.add(tid);
-          }
-        }
-        byeSeeds.addAll(allBye);
       }
     }
 
@@ -1679,16 +1682,16 @@ class DBHelper {
     }
 
     // ── 8. Seed BYE teams directly into the CORRECT next KO round ───────────
-    // BYE teams skip ELIM and go straight to SF (3 groups) or QF (5,6,7 groups).
+    // BYE teams are the TOP overall seeds — they skip ELIM entirely.
+    //   3 groups  → 6 advancing → top 2 overall get BYEs into SF
+    //   5+ groups → top N overall get BYEs into QF
     //
-    // IMPORTANT: We must NOT rely on what rounds exist in tbl_match to find the
-    // "next" round — because for 3 groups the DB may contain quarter-finals slots
-    // (generated but unused), and the schedule-time ordering would wrongly pick
-    // quarter-finals as the next round after elimination.
+    // byeSeeds is already in overall rank order (best seed first) from step 4.
+    // We insert them into SF/QF slots in order, so the best overall seed
+    // goes into the first SF/QF slot (= easiest projected path).
     //
-    // Instead we derive the correct round from the advancing team count:
-    //   3 groups  → 6 advancing → ELIM → SF  (QF skipped)
-    //   5+ groups → ELIM → QF
+    // IMPORTANT: Derive the correct round from group count, not DB query,
+    // to avoid picking a wrong round when unused slots exist in tbl_match.
     if (byeSeeds.isNotEmpty) {
       final int advTeams = n * 2;
       final String nextRound;
@@ -1725,6 +1728,47 @@ class DBHelper {
     }
 
     print("✅ Knockout seeding complete: ${seeds.length} ELIM matches, ${byeSeeds.length} BYEs.");
+  }
+
+  // ── RESET KNOCKOUT SEEDING ────────────────────────────────────────────────
+  // Clears ALL tbl_teamschedule rows for knockout matches of this category,
+  // also clears tbl_score for those matches, so advanceToKnockout can
+  // re-run cleanly with the correct seeding.
+  static Future<void> resetKnockoutSeeding(int categoryId) async {
+    final conn = await getConnection();
+    const koTypes = [
+      'elimination','round-of-32','round-of-16','round-of-8',
+      'quarter-finals','semi-finals','third-place','final',
+    ];
+    final inClause = koTypes.map((t) => "'$t'").join(',');
+
+    // Get all KO match IDs for this category
+    final matchResult = await conn.execute("""
+      SELECT DISTINCT m.match_id
+      FROM tbl_match m
+      WHERE m.bracket_type IN ($inClause)
+    """);
+    final matchIds = matchResult.rows
+        .map((r) => r.assoc()['match_id']?.toString() ?? '0')
+        .where((id) => id != '0')
+        .toList();
+
+    if (matchIds.isEmpty) {
+      print("ℹ️  No KO matches found to reset.");
+      return;
+    }
+
+    final idList = matchIds.join(',');
+
+    // Delete scores for KO matches
+    await conn.execute(
+      "DELETE FROM tbl_score WHERE match_id IN ($idList)",
+    );
+    // Delete teamschedule rows for KO matches
+    await conn.execute(
+      "DELETE FROM tbl_teamschedule WHERE match_id IN ($idList)",
+    );
+    print("✅ Knockout seeding reset: cleared ${matchIds.length} KO match slots.");
   }
 
   // ── ADVANCE KNOCKOUT WINNER ───────────────────────────────────────────────

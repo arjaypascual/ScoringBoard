@@ -337,6 +337,42 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
         }
       }
 
+      // ── Column header validation (row index 3 = row 4 in spreadsheet) ──────
+      // Expected headers at row 4 (0-indexed row 3), columns A–I
+      const expectedHeaders = [
+        'team name',
+        'category',
+        'school',
+        'mentor name',
+        'mentor contact',
+        'player 1 name',
+        'player 1 birthdate',
+        'player 2 name',
+        'player 2 birthdate',
+      ];
+      if (sheet.maxRows >= 4) {
+        final headerRow = sheet.rows[3];
+        final missingCols = <String>[];
+        for (int i = 0; i < expectedHeaders.length; i++) {
+          final actual = extractCell(headerRow, i).toLowerCase();
+          // Partial match — header must contain the key word(s)
+          final expected = expectedHeaders[i];
+          final keyWord  = expected.split(' ').last; // e.g. 'name', 'category'
+          if (!actual.contains(keyWord) && !actual.contains(expected)) {
+            missingCols.add('Col ${String.fromCharCode(65 + i)}: expected "${expectedHeaders[i]}", got "${extractCell(headerRow, i).isEmpty ? "(empty)" : extractCell(headerRow, i)}"');
+          }
+        }
+        if (missingCols.isNotEmpty) {
+          throw Exception(
+            'Column headers do not match the expected format.\n\n'
+            'Issues found:\n${missingCols.join("\n")}\n\n'
+            'Please check that row 4 contains the correct headers:\n'
+            'Team Name | Category | School | Mentor Name | Mentor Contact | '
+            'Player 1 Name | Player 1 Birthdate | Player 2 Name | Player 2 Birthdate',
+          );
+        }
+      }
+
       final parsed = <_ImportRow>[];
       for (int r = 4; r < sheet.maxRows; r++) {
         try {
@@ -641,6 +677,97 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
       }
       debugPrint('=== IMPORT DONE: imported=$_importedCount '
           'skipped=$_skippedCount errors=$_errorCount ===');
+
+      // ── Show summary dialog ──────────────────────────────────────────────
+      if (mounted) {
+        final skippedRows = _rows.where((r) => r.isSkipped).toList();
+        final errorRows   = _rows.where((r) => r.hasError).toList();
+        await showDialog(
+          context: context,
+          builder: (_) => AlertDialog(
+            backgroundColor: const Color(0xFF130840),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: Color(0xFF00CFFF), width: 1.5),
+            ),
+            title: const Row(children: [
+              Icon(Icons.summarize_rounded, color: Color(0xFF00CFFF), size: 22),
+              SizedBox(width: 10),
+              Text('Import Summary',
+                  style: TextStyle(color: Colors.white,
+                      fontWeight: FontWeight.w900, fontSize: 18)),
+            ]),
+            content: SizedBox(
+              width: 420,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // ── Counts row ──────────────────────────────────────
+                    Row(children: [
+                      _summaryBadge('✅ Imported', _importedCount, Colors.greenAccent),
+                      const SizedBox(width: 12),
+                      _summaryBadge('⏭ Skipped', _skippedCount, Colors.orangeAccent),
+                      const SizedBox(width: 12),
+                      _summaryBadge('❌ Errors', _errorCount, Colors.redAccent),
+                    ]),
+                    if (skippedRows.isNotEmpty) ...[
+                      const SizedBox(height: 16),
+                      const Text('SKIPPED ROWS',
+                          style: TextStyle(color: Colors.orangeAccent,
+                              fontSize: 11, fontWeight: FontWeight.w800,
+                              letterSpacing: 1.2)),
+                      const SizedBox(height: 6),
+                      ...skippedRows.map((r) => Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text('Row ${r.rowNum}: ',
+                              style: const TextStyle(color: Colors.white70,
+                                  fontSize: 11, fontWeight: FontWeight.bold)),
+                          Expanded(child: Text('${r.teamName} — ${r.message}',
+                              style: const TextStyle(color: Colors.orangeAccent,
+                                  fontSize: 11))),
+                        ]),
+                      )),
+                    ],
+                    if (errorRows.isNotEmpty) ...[
+                      const SizedBox(height: 16),
+                      const Text('ERROR ROWS',
+                          style: TextStyle(color: Colors.redAccent,
+                              fontSize: 11, fontWeight: FontWeight.w800,
+                              letterSpacing: 1.2)),
+                      const SizedBox(height: 6),
+                      ...errorRows.map((r) => Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text('Row ${r.rowNum}: ',
+                              style: const TextStyle(color: Colors.white70,
+                                  fontSize: 11, fontWeight: FontWeight.bold)),
+                          Expanded(child: Text('${r.teamName.isEmpty ? "(empty)" : r.teamName} — ${r.message}',
+                              style: const TextStyle(color: Colors.redAccent,
+                                  fontSize: 11))),
+                        ]),
+                      )),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              ElevatedButton(
+                onPressed: () => Navigator.of(context).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00CFFF),
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -657,6 +784,28 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
       }
     }
   }
+
+  // ── Summary badge widget ──────────────────────────────────────────────────
+  Widget _summaryBadge(String label, int count, Color color) => Expanded(
+    child: Container(
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.4)),
+      ),
+      child: Column(children: [
+        Text(count.toString(),
+            style: TextStyle(color: color, fontSize: 22,
+                fontWeight: FontWeight.w900)),
+        const SizedBox(height: 2),
+        Text(label,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: color.withOpacity(0.8),
+                fontSize: 10, fontWeight: FontWeight.bold)),
+      ]),
+    ),
+  );
 
   // ── Build ─────────────────────────────────────────────────────────────────
   @override

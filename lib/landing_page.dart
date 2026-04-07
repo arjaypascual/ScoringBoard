@@ -202,128 +202,219 @@ class _LandingPageState extends State<LandingPage>
           SafeArea(
             child: Column(
               children: [
-                // ── Sponsor logos ──────────────────────────────────────
-                Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+                // ── Header bar ─────────────────────────────────────────
+                Container(
+                  margin: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.04),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: Colors.white.withOpacity(0.08),
+                      width: 1.0,
+                    ),
+                  ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Image.asset('assets/images/RoboventureLogo.png',
-                          height: 44, fit: BoxFit.contain),
-                      Image.asset('assets/images/CreotecLogo.png',
-                          height: 44, fit: BoxFit.contain),
+                      // Roboventure logo container
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE8F0FA),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: const Color(0xFF00CFFF).withOpacity(0.50),
+                            width: 1.5,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF00CFFF).withOpacity(0.30),
+                              blurRadius: 20,
+                              spreadRadius: 2,
+                            ),
+                            BoxShadow(
+                              color: const Color(0xFF7B2FFF).withOpacity(0.25),
+                              blurRadius: 28,
+                              spreadRadius: 1,
+                            ),
+                          ],
+                        ),
+                        child: Image.asset(
+                          'assets/images/RoboventureLogo.png',
+                          height: 36,
+                          fit: BoxFit.contain,
+                        ),
+                      ),
+                      // Center divider label
+                      Text(
+                        'PHILIPPINE ROBOTICS CUP 2026',
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(0.20),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 2.0,
+                        ),
+                      ),
+                      // Creotec logo container
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE8F0FA),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: const Color(0xFF00CFFF).withOpacity(0.50),
+                            width: 1.5,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF00CFFF).withOpacity(0.30),
+                              blurRadius: 20,
+                              spreadRadius: 2,
+                            ),
+                            BoxShadow(
+                              color: const Color(0xFF7B2FFF).withOpacity(0.25),
+                              blurRadius: 28,
+                              spreadRadius: 1,
+                            ),
+                          ],
+                        ),
+                        child: Image.asset(
+                          'assets/images/CreotecLogo.png',
+                          height: 36,
+                          fit: BoxFit.contain,
+                        ),
+                      ),
                     ],
                   ),
                 ),
 
                 Expanded(
-                  child: Center(
+                  child: SingleChildScrollView(
+                    physics: const NeverScrollableScrollPhysics(),
                     child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 540),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const SizedBox(height: 12),
+                      constraints: BoxConstraints(
+                        minHeight: size.height -
+                            MediaQuery.of(context).padding.top -
+                            MediaQuery.of(context).padding.bottom -
+                            80, // header + footer approx
+                      ),
+                      child: IntrinsicHeight(
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 540),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 20),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const SizedBox(height: 8),
 
-                          // ── Logo ──────────────────────────────────────
-                          AnimatedBuilder(
-                            animation: _logoController,
-                            builder: (_, __) => Opacity(
-                              opacity: _logoOpacity.value,
-                              child: Transform.scale(
-                                scale: _logoScale.value,
-                                child: _buildLogo(),
+                                  // ── Logo ──────────────────────────────────────
+                                  AnimatedBuilder(
+                                    animation: _logoController,
+                                    builder: (_, __) => Opacity(
+                                      opacity: _logoOpacity.value,
+                                      child: Transform.scale(
+                                        scale: _logoScale.value,
+                                        child: _buildLogo(),
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 20),
+
+                                  // ── Buttons ───────────────────────────────────
+                                  AnimatedBuilder(
+                                    animation: _buttonsController,
+                                    builder: (_, __) => Column(
+                                      children: [
+
+                                        // 1 ── REGISTRATION (primary)
+                                        _animBtn(
+                                          offset:  _btn1Offset.value,
+                                          opacity: _btn1Opacity.value,
+                                          child: _NavButton(
+                                            label:     'REGISTRATION',
+                                            subtitle:  'Register teams, mentors & players',
+                                            icon:      Icons.app_registration_rounded,
+                                            color:     const Color(0xFF00CFFF),
+                                            isPrimary: true,
+                                            onTap:     _goToRegistration,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 10),
+
+                                        // 2 ── SCHEDULE + STANDINGS
+                                        _animBtn(
+                                          offset:  _btn2Offset.value,
+                                          opacity: _btn2Opacity.value,
+                                          child: Row(children: [
+                                            Expanded(
+                                              child: _NavButton(
+                                                label:    'SCHEDULE',
+                                                subtitle: 'View match schedule',
+                                                icon:     Icons.calendar_month_rounded,
+                                                color:    const Color(0xFF967BB6),
+                                                onTap:    _goToSchedule,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 10),
+                                            Expanded(
+                                              child: _NavButton(
+                                                label:    'STANDINGS',
+                                                subtitle: 'View leaderboard',
+                                                icon:     Icons.emoji_events_rounded,
+                                                color:    const Color(0xFFFFD700),
+                                                onTap:    _goToStandings,
+                                              ),
+                                            ),
+                                          ]),
+                                        ),
+                                        const SizedBox(height: 10),
+
+                                        // 3 ── GENERATE SCHEDULE
+                                        _animBtn(
+                                          offset:  _btn3Offset.value,
+                                          opacity: _btn3Opacity.value,
+                                          child: _NavButton(
+                                            label:    'GENERATE SCHEDULE',
+                                            subtitle: 'Auto-generate match brackets',
+                                            icon:     Icons.auto_awesome_rounded,
+                                            color:    const Color(0xFF00E5A0),
+                                            onTap:    _goToGenerateSchedule,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 14),
+
+                                        // 4 ── Teams & Players + Dashboard row
+                                        _animBtn(
+                                          offset:  _btn4Offset.value,
+                                          opacity: _btn4Opacity.value,
+                                          child: Row(children: [
+                                            Expanded(child: _TeamsLink(
+                                              icon: Icons.groups_rounded,
+                                              label: 'View Teams & Players',
+                                              onTap: _goToTeamsPlayers,
+                                            )),
+                                            const SizedBox(width: 10),
+                                            Expanded(child: _TeamsLink(
+                                              icon: Icons.dashboard_rounded,
+                                              label: 'Dashboard',
+                                              onTap: _goToDashboard,
+                                            )),
+                                          ]),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                ],
                               ),
                             ),
                           ),
-                          const SizedBox(height: 28),
-
-                          // ── Buttons ───────────────────────────────────
-                          AnimatedBuilder(
-                            animation: _buttonsController,
-                            builder: (_, __) => Column(
-                              children: [
-
-                                // 1 ── REGISTRATION (primary)
-                                _animBtn(
-                                  offset:  _btn1Offset.value,
-                                  opacity: _btn1Opacity.value,
-                                  child: _NavButton(
-                                    label:     'REGISTRATION',
-                                    subtitle:  'Register teams, mentors & players',
-                                    icon:      Icons.app_registration_rounded,
-                                    color:     const Color(0xFF00CFFF),
-                                    isPrimary: true,
-                                    onTap:     _goToRegistration,
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-
-                                // 2 ── SCHEDULE + STANDINGS
-                                _animBtn(
-                                  offset:  _btn2Offset.value,
-                                  opacity: _btn2Opacity.value,
-                                  child: Row(children: [
-                                    Expanded(
-                                      child: _NavButton(
-                                        label:    'SCHEDULE',
-                                        subtitle: 'View match schedule',
-                                        icon:     Icons.calendar_month_rounded,
-                                        color:    const Color(0xFF967BB6),
-                                        onTap:    _goToSchedule,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: _NavButton(
-                                        label:    'STANDINGS',
-                                        subtitle: 'View leaderboard',
-                                        icon:     Icons.emoji_events_rounded,
-                                        color:    const Color(0xFFFFD700),
-                                        onTap:    _goToStandings,
-                                      ),
-                                    ),
-                                  ]),
-                                ),
-                                const SizedBox(height: 12),
-
-                                // 3 ── GENERATE SCHEDULE
-                                _animBtn(
-                                  offset:  _btn3Offset.value,
-                                  opacity: _btn3Opacity.value,
-                                  child: _NavButton(
-                                    label:    'GENERATE SCHEDULE',
-                                    subtitle: 'Auto-generate match brackets',
-                                    icon:     Icons.auto_awesome_rounded,
-                                    color:    const Color(0xFF00E5A0),
-                                    onTap:    _goToGenerateSchedule,
-                                  ),
-                                ),
-                                const SizedBox(height: 20),
-
-                                // 4 ── Teams & Players + Dashboard row
-                                _animBtn(
-                                  offset:  _btn4Offset.value,
-                                  opacity: _btn4Opacity.value,
-                                  child: Row(children: [
-                                    Expanded(child: _TeamsLink(
-                                      icon: Icons.groups_rounded,
-                                      label: 'View Teams & Players',
-                                      onTap: _goToTeamsPlayers,
-                                    )),
-                                    const SizedBox(width: 12),
-                                    Expanded(child: _TeamsLink(
-                                      icon: Icons.dashboard_rounded,
-                                      label: 'Dashboard',
-                                      onTap: _goToDashboard,
-                                    )),
-                                  ]),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
                     ),
                   ),
@@ -343,17 +434,51 @@ class _LandingPageState extends State<LandingPage>
       width: size.width,
       height: size.height,
       decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF0A0520), Color(0xFF1A0A4A), Color(0xFF0D1535)],
-          stops: [0.0, 0.5, 1.0],
+        gradient: RadialGradient(
+          center: Alignment(0.0, -0.2),
+          radius: 1.4,
+          colors: [
+            Color(0xFF1E0B50),
+            Color(0xFF0D0A2E),
+            Color(0xFF060412),
+          ],
+          stops: [0.0, 0.55, 1.0],
         ),
       ),
-      child: AnimatedBuilder(
-        animation: _bgController,
-        builder: (_, __) =>
-            CustomPaint(painter: _OrbitPainter(_bgController.value)),
+      child: Stack(
+        children: [
+          CustomPaint(
+            size: Size(size.width, size.height),
+            painter: _GridPainter(),
+          ),
+          AnimatedBuilder(
+            animation: _bgController,
+            builder: (_, __) =>
+                CustomPaint(painter: _OrbitPainter(_bgController.value)),
+          ),
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.center,
+                colors: [Color(0x55000010), Colors.transparent],
+              ),
+            ),
+          ),
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Container(
+              height: size.height * 0.3,
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
+                  colors: [Color(0xAA060412), Colors.transparent],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -363,30 +488,103 @@ class _LandingPageState extends State<LandingPage>
   }
 
   Widget _buildLogo() {
-    return Container(
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        boxShadow: [
-          BoxShadow(
-              color: const Color(0xFF7B2FFF).withOpacity(0.45),
-              blurRadius: 80, spreadRadius: 25),
-          BoxShadow(
-              color: const Color(0xFF00CFFF).withOpacity(0.25),
-              blurRadius: 50, spreadRadius: 10),
-        ],
-      ),
-      child: Image.asset('assets/images/CenterLogo.png',
-          width: 220, height: 220, fit: BoxFit.contain),
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        // Outer glow ring
+        Container(
+          width: 210,
+          height: 210,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: const Color(0xFF7B2FFF).withOpacity(0.20),
+              width: 1.0,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF7B2FFF).withOpacity(0.45),
+                blurRadius: 80,
+                spreadRadius: 25,
+              ),
+              BoxShadow(
+                color: const Color(0xFF00CFFF).withOpacity(0.25),
+                blurRadius: 50,
+                spreadRadius: 10,
+              ),
+            ],
+          ),
+        ),
+        // Inner subtle ring
+        Container(
+          width: 198,
+          height: 198,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: const Color(0xFF00CFFF).withOpacity(0.12),
+              width: 1.0,
+            ),
+          ),
+        ),
+        Image.asset('assets/images/CenterLogo.png',
+            width: 185, height: 185, fit: BoxFit.contain),
+      ],
     );
   }
 
   Widget _buildFooter() {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Text('© 2026 RoboVenture • Powered by Creotec',
-          style: TextStyle(
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.03),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withOpacity(0.06)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 6, height: 6,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              color: Color(0xFF00CFFF),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            '© 2026 RoboVenture',
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.35),
+              fontSize: 11,
+              letterSpacing: 1.2,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Container(width: 1, height: 12,
+              color: Colors.white.withOpacity(0.15)),
+          ),
+          Text(
+            'Powered by Creotec Philippines, Inc.',
+            style: TextStyle(
               color: Colors.white.withOpacity(0.25),
-              fontSize: 11, letterSpacing: 1)),
+              fontSize: 11,
+              letterSpacing: 0.8,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Container(
+            width: 6, height: 6,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              color: Color(0xFF7B2FFF),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -588,33 +786,42 @@ class _TeamsLinkState extends State<_TeamsLink> {
         onTap: widget.onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           decoration: BoxDecoration(
             color: _hovered
-                ? Colors.white.withOpacity(0.05)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(10),
+                ? const Color(0xFF7B2FFF).withOpacity(0.12)
+                : Colors.white.withOpacity(0.04),
+            borderRadius: BorderRadius.circular(12),
             border: Border.all(
               color: _hovered
-                  ? Colors.white.withOpacity(0.12)
-                  : Colors.white.withOpacity(0.06),
+                  ? const Color(0xFF7B2FFF).withOpacity(0.40)
+                  : Colors.white.withOpacity(0.08),
+              width: 1.0,
             ),
+            boxShadow: _hovered
+                ? [
+                    BoxShadow(
+                      color: const Color(0xFF7B2FFF).withOpacity(0.15),
+                      blurRadius: 12, spreadRadius: 1,
+                    )
+                  ]
+                : [],
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(widget.icon,
-                  size: 14,
-                  color: Colors.white.withOpacity(_hovered ? 0.55 : 0.30)),
-              const SizedBox(width: 7),
+                  size: 16,
+                  color: Colors.white.withOpacity(_hovered ? 0.75 : 0.40)),
+              const SizedBox(width: 8),
               Text(
                 widget.label,
                 style: TextStyle(
-                  color: Colors.white.withOpacity(_hovered ? 0.55 : 0.30),
-                  fontSize: 11,
-                  letterSpacing: 1,
-                  fontWeight: FontWeight.w500,
+                  color: Colors.white.withOpacity(_hovered ? 0.75 : 0.40),
+                  fontSize: 12,
+                  letterSpacing: 0.8,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ],
@@ -623,6 +830,36 @@ class _TeamsLinkState extends State<_TeamsLink> {
       ),
     );
   }
+}
+
+// ── Grid mesh painter ─────────────────────────────────────────────────────────
+class _GridPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = const Color(0xFF7B2FFF).withOpacity(0.06)
+      ..strokeWidth = 0.6
+      ..style = PaintingStyle.stroke;
+    const spacing = 48.0;
+    for (double x = 0; x < size.width; x += spacing) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+    for (double y = 0; y < size.height; y += spacing) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+    }
+    // Dot intersections
+    final dotPaint = Paint()
+      ..color = const Color(0xFF7B2FFF).withOpacity(0.12)
+      ..style = PaintingStyle.fill;
+    for (double x = 0; x < size.width; x += spacing) {
+      for (double y = 0; y < size.height; y += spacing) {
+        canvas.drawCircle(Offset(x, y), 1.2, dotPaint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_GridPainter old) => false;
 }
 
 // ── Orbit painter ─────────────────────────────────────────────────────────────

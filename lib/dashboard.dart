@@ -151,10 +151,11 @@ class _DashboardState extends State<Dashboard>
       });
       if (!silent) _fadeCtrl.forward(from: 0);
     } catch (e) {
+      debugPrint('Dashboard DB error: $e');
       setState(() => _isLoading = false);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('❌ Failed to load dashboard: $e'),
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('❌ Failed to load dashboard. Please check your connection.'),
             backgroundColor: Colors.red));
       }
     }
