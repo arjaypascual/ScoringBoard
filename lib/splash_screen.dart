@@ -182,21 +182,6 @@ class _SplashScreenState extends State<SplashScreen>
           SafeArea(
             child: Column(
               children: [
-                // ── Top logos (same layout as LandingPage) ───────────
-                Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Image.asset('assets/images/RoboventureLogo.png',
-                          height: 44, fit: BoxFit.contain),
-                      Image.asset('assets/images/CreotecLogo.png',
-                          height: 44, fit: BoxFit.contain),
-                    ],
-                  ),
-                ),
-
                 // ── Center: logo + loading card ───────────────────────
                 Expanded(
                   child: Center(
@@ -272,8 +257,8 @@ class _SplashScreenState extends State<SplashScreen>
         ),
         child: Image.asset(
           'assets/images/CenterLogo.png',
-          width: 200,
-          height: 200,
+          width: 260,
+          height: 260,
           fit: BoxFit.contain,
         ),
       ),

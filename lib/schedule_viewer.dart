@@ -110,9 +110,10 @@ BracketTeam _bye(int n) =>
 // Main widget
 // ════════════════════════════════════════════════════════════════════════════
 class ScheduleViewer extends StatefulWidget {
+  final VoidCallback? onBack;
   final VoidCallback? onRegister;
   final VoidCallback? onStandings;
-  const ScheduleViewer({super.key, this.onRegister, this.onStandings});
+  const ScheduleViewer({super.key, this.onBack, this.onRegister, this.onStandings});
   @override
   State<ScheduleViewer> createState() => _ScheduleViewerState();
 }
@@ -4614,24 +4615,44 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       decoration: const BoxDecoration(
         gradient: LinearGradient(colors: [Color(0xFF2D0E7A), Color(0xFF1A0850)],
             begin: Alignment.centerLeft, end: Alignment.centerRight),
+        border: Border(bottom: BorderSide(color: Color(0xFF3D1E88), width: 1)),
       ),
-      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 28),
-      child: Row(children: [
-        const Text('ROBOVENTURE',
-            style: TextStyle(color: Colors.white30, fontSize: 14,
-                fontWeight: FontWeight.bold, letterSpacing: 2)),
-        const Spacer(),
-        Text(title, style: const TextStyle(color: Colors.white, fontSize: 26,
-            fontWeight: FontWeight.w900, letterSpacing: 3)),
-        const Spacer(),
-        _buildLiveIndicator(),
-        IconButton(tooltip: 'View Standings',
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // ── Left: ROBOVENTURE label ──────────────────────────────
+          const Text('ROBOVENTURE',
+              style: TextStyle(color: Colors.white30, fontSize: 13,
+                  fontWeight: FontWeight.bold, letterSpacing: 2)),
+          // ── Center: Category title ───────────────────────────────
+          Expanded(
+            child: Center(
+              child: Text(title,
+                  style: const TextStyle(color: Colors.white, fontSize: 24,
+                      fontWeight: FontWeight.w900, letterSpacing: 3)),
+            ),
+          ),
+          // ── Right: LIVE + Standings + Back ───────────────────────
+          _buildLiveIndicator(),
+          const SizedBox(width: 4),
+          IconButton(
+            tooltip: 'View Standings',
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
             icon: const Icon(Icons.emoji_events, color: Color(0xFFFFD700), size: 22),
-            onPressed: widget.onStandings),
-        IconButton(tooltip: 'Register',
-            icon: const Icon(Icons.app_registration, color: Color(0xFF00CFFF), size: 22),
-            onPressed: widget.onRegister),
-      ]),
+            onPressed: widget.onStandings,
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            tooltip: 'Back to Home',
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF00CFFF), size: 22),
+            onPressed: widget.onBack,
+          ),
+        ],
+      ),
     );
   }
 
@@ -4771,25 +4792,71 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         boxShadow: [BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.12),
             blurRadius: 16, offset: const Offset(0, 4))],
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        crossAxisAlignment: CrossAxisAlignment.center,
+      child: Column(
         children: [
-          SizedBox(height: 44, width: 160,
-              child: Image.asset('assets/images/RoboventureLogo.png',
-                  fit: BoxFit.contain, alignment: Alignment.centerLeft)),
-          Container(
-            decoration: BoxDecoration(shape: BoxShape.circle, boxShadow: [
-              BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.35),
-                  blurRadius: 24, spreadRadius: 4),
-            ]),
-            child: Image.asset('assets/images/CenterLogo.png',
-                height: 70, fit: BoxFit.contain),
+          // ── Logo pill bar ────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 32, 20, 0),
+            child: Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.topCenter,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.04),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.white.withOpacity(0.08), width: 1.0),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE8F0FA),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                          boxShadow: [
+                            BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                            BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                          ],
+                        ),
+                        child: Image.asset('assets/images/RoboventureLogo.png', height: 36, fit: BoxFit.contain),
+                      ),
+                      const SizedBox(width: 80),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE8F0FA),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                          boxShadow: [
+                            BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                            BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                          ],
+                        ),
+                        child: Image.asset('assets/images/CreotecLogo.png', height: 36, fit: BoxFit.contain),
+                      ),
+                    ],
+                  ),
+                ),
+                // ── Floating CenterLogo ───────────────────────────
+                Positioned(
+                  top: -30,
+                  left: 0, right: 0,
+                  child: Center(
+                    child: Image.asset(
+                      'assets/images/CenterLogo.png',
+                      height: 80,
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-          SizedBox(height: 44, width: 160,
-              child: Image.asset('assets/images/CreotecLogo.png',
-                  fit: BoxFit.contain, alignment: Alignment.centerRight)),
+          const SizedBox(height: 8),
         ],
       ),
     );

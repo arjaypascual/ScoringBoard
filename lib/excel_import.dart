@@ -72,9 +72,10 @@ class _ImportRow {
 
 // ── Main widget ───────────────────────────────────────────────────────────────
 class ExcelImportPage extends StatefulWidget {
+  final VoidCallback? onBack;
   final VoidCallback? onDone;
 
-  const ExcelImportPage({super.key, this.onDone});
+  const ExcelImportPage({super.key, this.onBack, this.onDone});
 
   @override
   State<ExcelImportPage> createState() => _ExcelImportPageState();
@@ -814,7 +815,7 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
       backgroundColor: const Color(0xFF0E0630),
       body: Column(
         children: [
-          const RegistrationHeader(),
+          _buildHeader(),
           Expanded(
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -823,6 +824,100 @@ class _ExcelImportPageState extends State<ExcelImportPage> {
                 Expanded(child: _buildPreviewPanel()),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft, end: Alignment.bottomRight,
+          colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF1A0A4A)],
+        ),
+        border: const Border(bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5)),
+      ),
+      child: Column(
+        children: [
+          // ── Logo pill bar ────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 32, 20, 0),
+            child: Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.topCenter,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.04),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.white.withOpacity(0.08), width: 1.0),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE8F0FA),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                          boxShadow: [
+                            BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                            BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                          ],
+                        ),
+                        child: Image.asset('assets/images/RoboventureLogo.png', height: 36, fit: BoxFit.contain),
+                      ),
+                      const SizedBox(width: 80),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE8F0FA),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                          boxShadow: [
+                            BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                            BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                          ],
+                        ),
+                        child: Image.asset('assets/images/CreotecLogo.png', height: 36, fit: BoxFit.contain),
+                      ),
+                    ],
+                  ),
+                ),
+                // ── Floating CenterLogo ───────────────────
+                Positioned(
+                  top: -30,
+                  left: 0, right: 0,
+                  child: Center(
+                    child: Image.asset('assets/images/CenterLogo.png',
+                        height: 80, fit: BoxFit.contain),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // ── Back nav row ─────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 6, 16, 8),
+            child: Row(children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios_new,
+                    color: Color(0xFF00CFFF), size: 18),
+                onPressed: widget.onBack,
+              ),
+              const SizedBox(width: 4),
+              const Text('EXCEL IMPORT',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 3)),
+            ]),
           ),
         ],
       ),

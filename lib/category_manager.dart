@@ -225,8 +225,71 @@ class _CategoryManagerState extends State<CategoryManager>
         border: Border(bottom: BorderSide(color: Color(0xFF3D1F9A), width: 1)),
       ),
       child: Column(children: [
+        // ── Landing-page style logo row ──────────────────────────────
+        Container(
+          margin: const EdgeInsets.fromLTRB(20, 32, 20, 0),
+          child: Stack(
+            clipBehavior: Clip.none,
+            alignment: Alignment.topCenter,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.04),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.white.withOpacity(0.08), width: 1.0),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE8F0FA),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                  boxShadow: [
+                    BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                    BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                  ],
+                ),
+                child: Image.asset('assets/images/RoboventureLogo.png', height: 36, fit: BoxFit.contain),
+              ),
+                  const SizedBox(width: 80),  // space for center logo
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE8F0FA),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                  boxShadow: [
+                    BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                    BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                  ],
+                ),
+                child: Image.asset('assets/images/CreotecLogo.png', height: 36, fit: BoxFit.contain),
+              ),
+                  ],
+                ),
+              ),
+              // ── Floating CenterLogo ───────────────────────────
+              Positioned(
+                top: -30,
+                left: 0, right: 0,
+                child: Center(
+                  child: Image.asset(
+                    'assets/images/CenterLogo.png',
+                    height: 80,
+                    fit: BoxFit.contain,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        // ── Nav + stats row ──────────────────────────────────────────
         Padding(
-          padding: const EdgeInsets.fromLTRB(8, 12, 16, 0),
+          padding: const EdgeInsets.fromLTRB(8, 10, 16, 0),
           child: Row(children: [
             IconButton(
               icon: const Icon(Icons.arrow_back_ios_new_rounded,
@@ -572,4 +635,4 @@ class _CategoryManagerState extends State<CategoryManager>
           child: Icon(icon, color: color, size: 16),
         ),
       );
-} 
+}

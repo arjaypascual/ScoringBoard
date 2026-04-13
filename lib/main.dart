@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'db_helper.dart';
 import 'landing_page.dart';
 import 'splash_screen.dart';
 import 'step1_school.dart';
@@ -12,6 +11,7 @@ import 'standings.dart';
 import 'excel_import.dart';
 import 'referee_registration.dart';
 import 'category_manager.dart';
+import 'teams_players.dart';
 
 
 void main() async {
@@ -71,6 +71,7 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
       // ── Step -1: Excel Bulk Import ────────────────────────────────────
       case -1:
         return ExcelImportPage(
+          onBack: () => _goToStep(0),
           onDone: () => _goToStep(5),
         );
 
@@ -119,30 +120,41 @@ class _RegistrationFlowState extends State<RegistrationFlow> {
       // ── Step 4: Players ───────────────────────────────────────────────
       case 4:
         return Step4Player(
-          teamId: _teamId,
-          onDone: () => _goToStep(5),
-          onBack: () => _goToStep(3),
-          onSkip: () => _goToStep(5),
+          teamId:            _teamId,
+          onDone:            () => _goToStep(5), // skip → go to Teams & Players
+          onBack:            () => _goToStep(3),
+          onSkip:            () => _goToStep(5),
+          onViewTeams:       () => _goToStep(5), // view attendance first
+          onRegisterAnother: () => _goToStep(1), // restart from Step 1
         );
 
-      // ── Step 5: Generate Schedule ─────────────────────────────────────
+      // ── Step 5: Teams & Players (Attendance Review) ───────────────────
       case 5:
-        return GenerateSchedule(
-          onBack:      () => _goToStep(4),
-          onGenerated: () => _goToStep(6),
+        return TeamsPlayers(
+          onBack:             () => _goToStep(4),
+          onGenerate:         () => _goToStep(6),
+          onRegisterAnother:  () => _goToStep(1),
         );
 
-      // ── Step 6: Schedule Viewer ───────────────────────────────────────
+      // ── Step 6: Generate Schedule ─────────────────────────────────────
       case 6:
-        return ScheduleViewer(
-          onRegister:  () => _goToStep(0),
-          onStandings: () => _goToStep(7),
+        return GenerateSchedule(
+          onBack:      () => _goToStep(5),
+          onGenerated: () => _goToStep(7),
         );
 
-      // ── Step 7: Standings ─────────────────────────────────────────────
+      // ── Step 7: Schedule Viewer ───────────────────────────────────────
       case 7:
+        return ScheduleViewer(
+          onBack:      () => _goToStep(6),
+          onRegister:  () => _goToStep(0),
+          onStandings: () => _goToStep(8),
+        );
+
+      // ── Step 8: Standings ─────────────────────────────────────────────
+      case 8:
         return Standings(
-          onBack: () => _goToStep(6),
+          onBack: () => _goToStep(7),
         );
 
       default:

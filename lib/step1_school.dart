@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'registration_shared.dart';
 import 'package:flutter/services.dart';
 import 'db_helper.dart';
 
@@ -453,80 +454,7 @@ class _Step1SchoolState extends State<Step1School> {
   // Matches screenshot: dark navy bg, logos flush (no containers/borders),
   // CenterLogo kept in the middle with its glow.
   Widget _buildHeader() {
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF1A0A4A)],
-        ),
-        border: const Border(
-          bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF00CFFF).withOpacity(0.10),
-            blurRadius: 12,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-
-          // ── Left: Makeblock — fixed size to match CREOTEC ────────
-          SizedBox(
-            height: 44,
-            width: 160,
-            child: Image.asset(
-              'assets/images/RoboventureLogo.png',
-              fit: BoxFit.contain,
-              alignment: Alignment.centerLeft,
-            ),
-          ),
-
-          // ── Center: CenterLogo with subtle glow ───────────────────
-          Container(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF7B2FFF).withOpacity(0.35),
-                  blurRadius: 24,
-                  spreadRadius: 4,
-                ),
-                BoxShadow(
-                  color: const Color(0xFF00CFFF).withOpacity(0.15),
-                  blurRadius: 16,
-                  spreadRadius: 2,
-                ),
-              ],
-            ),
-            child: Image.asset(
-              'assets/images/CenterLogo.png',
-              height: 70,
-              fit: BoxFit.contain,
-            ),
-          ),
-
-          // ── Right: CREOTEC — fixed size to match Makeblock ───────
-          SizedBox(
-            height: 44,
-            width: 160,
-            child: Image.asset(
-              'assets/images/CreotecLogo.png',
-              fit: BoxFit.contain,
-              alignment: Alignment.centerRight,
-            ),
-          ),
-
-        ],
-      ),
-    );
+    return const RegistrationHeader();
   }
 
   // ── STEP INDICATOR ──────────────────────────────────────────────────────────

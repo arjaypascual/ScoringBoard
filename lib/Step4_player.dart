@@ -7,6 +7,8 @@ class Step4Player extends StatefulWidget {
   final VoidCallback? onDone;
   final VoidCallback? onBack;
   final VoidCallback? onSkip;
+  final VoidCallback? onViewTeams;       // ← go to Teams & Players page
+  final VoidCallback? onRegisterAnother; // ← restart from Step 1
 
   const Step4Player({
     super.key,
@@ -14,6 +16,8 @@ class Step4Player extends StatefulWidget {
     this.onDone,
     this.onBack,
     this.onSkip,
+    this.onViewTeams,
+    this.onRegisterAnother,
   });
 
   @override
@@ -23,10 +27,10 @@ class Step4Player extends StatefulWidget {
 class _Step4PlayerState extends State<Step4Player> {
   static const _accent = Color(0xFF00E5A0);
 
-  final _p1NameCtrl = TextEditingController();
-  final _p2NameCtrl = TextEditingController();
-  final _p1BirthCtrl     = TextEditingController();
-  final _p2BirthCtrl     = TextEditingController();
+  final _p1NameCtrl  = TextEditingController();
+  final _p2NameCtrl  = TextEditingController();
+  final _p1BirthCtrl = TextEditingController();
+  final _p2BirthCtrl = TextEditingController();
 
   DateTime? _p1Birthdate;
   DateTime? _p2Birthdate;
@@ -34,9 +38,9 @@ class _Step4PlayerState extends State<Step4Player> {
   bool? _p2Present;
 
   int? _selectedTeamId;
-  List<Map<String, dynamic>> _teams         = [];
+  List<Map<String, dynamic>> _teams = [];
   // team_id → existing player count
-  Map<int, int> _playerCountByTeam          = {};
+  Map<int, int> _playerCountByTeam  = {};
   bool _isLoading     = false;
   bool _isLoadingData = true;
 
@@ -94,7 +98,8 @@ class _Step4PlayerState extends State<Step4Player> {
       setState(() => _isLoadingData = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('❌ Failed to load data: $e'),
+          SnackBar(
+              content: Text('❌ Failed to load data: $e'),
               backgroundColor: Colors.red));
       }
     }
@@ -102,13 +107,18 @@ class _Step4PlayerState extends State<Step4Player> {
 
   bool _isValidDate(String value) {
     if (!RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) return false;
-    try { DateTime.parse(value); return true; } catch (_) { return false; }
+    try {
+      DateTime.parse(value);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   // ── Register ─────────────────────────────────────────────────────────────
   Future<void> _register() async {
-    final p1Name = _p1NameCtrl.text.trim();
-    final p2Name = _p2NameCtrl.text.trim();
+    final p1Name  = _p1NameCtrl.text.trim();
+    final p2Name  = _p2NameCtrl.text.trim();
     final p1Birth = _p1BirthCtrl.text.trim();
     final p2Birth = _p2BirthCtrl.text.trim();
 
@@ -143,10 +153,10 @@ class _Step4PlayerState extends State<Step4Player> {
         {"teamId": _selectedTeamId},
       );
       final existingCount = int.tryParse(
-              checkResult.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
+              checkResult.rows.first.assoc()['cnt']?.toString() ?? '0') ??
+          0;
 
       if (existingCount >= 2) {
-        // Refresh local count so UI updates immediately
         setState(() {
           _playerCountByTeam[_selectedTeamId!] = existingCount;
           _isLoading = false;
@@ -163,12 +173,12 @@ class _Step4PlayerState extends State<Step4Player> {
       // ── Insert both players ──────────────────────────────────────────
       for (final p in [
         {
-          "name":     p1Name,
+          "name":      p1Name,
           "birthdate": p1Birth,
           "present":   _p1Present! ? 1 : 0,
         },
         {
-          "name":     p2Name,
+          "name":      p2Name,
           "birthdate": p2Birth,
           "present":   _p2Present! ? 1 : 0,
         },
@@ -183,8 +193,7 @@ class _Step4PlayerState extends State<Step4Player> {
 
       // Update local count
       setState(() {
-        _playerCountByTeam[_selectedTeamId!] =
-            existingCount + 2;
+        _playerCountByTeam[_selectedTeamId!] = existingCount + 2;
       });
 
       if (mounted) {
@@ -196,13 +205,15 @@ class _Step4PlayerState extends State<Step4Player> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('❌ Error: $e'), backgroundColor: Colors.red));
+          SnackBar(
+              content: Text('❌ Error: $e'), backgroundColor: Colors.red));
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
+  // ── Success Dialog ────────────────────────────────────────────────────────
   void _showSuccessDialog() {
     showDialog(
       context: context,
@@ -210,75 +221,199 @@ class _Step4PlayerState extends State<Step4Player> {
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,
         child: Container(
+          width: 420,
           padding: const EdgeInsets.all(32),
           decoration: BoxDecoration(
             gradient: const LinearGradient(
-              begin: Alignment.topLeft, end: Alignment.bottomRight,
-              colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFF1A0550), Color(0xFF2D0E7A)],
             ),
             borderRadius: BorderRadius.circular(24),
             border: Border.all(
-                color: const Color(0xFF00E5A0).withOpacity(0.4), width: 1.5),
+                color: const Color(0xFF00E5A0).withOpacity(0.45), width: 1.5),
             boxShadow: [
-              BoxShadow(color: const Color(0xFF00E5A0).withOpacity(0.15),
-                  blurRadius: 40, spreadRadius: 4),
+              BoxShadow(
+                  color: const Color(0xFF00E5A0).withOpacity(0.15),
+                  blurRadius: 40,
+                  spreadRadius: 4),
             ],
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+
+              // ── Check icon ───────────────────────────────────────────
               Container(
-                width: 64, height: 64,
+                width: 68,
+                height: 68,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   gradient: const LinearGradient(
                       colors: [Color(0xFF00E5A0), Color(0xFF00BFA5)]),
-                  boxShadow: [BoxShadow(
-                      color: const Color(0xFF00E5A0).withOpacity(0.5),
-                      blurRadius: 20, spreadRadius: 4)],
+                  boxShadow: [
+                    BoxShadow(
+                        color: const Color(0xFF00E5A0).withOpacity(0.45),
+                        blurRadius: 24,
+                        spreadRadius: 4)
+                  ],
                 ),
                 child: const Icon(Icons.check_rounded,
-                    color: Colors.white, size: 36),
+                    color: Colors.white, size: 38),
               ),
               const SizedBox(height: 20),
-              const Text('Registration Complete!',
-                  style: TextStyle(color: Colors.white, fontSize: 20,
-                      fontWeight: FontWeight.w800, letterSpacing: 1)),
+
+              // ── Title ────────────────────────────────────────────────
+              const Text(
+                'Registration Complete!',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1),
+              ),
               const SizedBox(height: 8),
-              Text('Both players have been successfully registered.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: Colors.white.withOpacity(0.6), fontSize: 13,
-                      height: 1.5)),
-              const SizedBox(height: 28),
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  widget.onDone?.call();
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.transparent,
-                  shadowColor: Colors.transparent,
-                  padding: EdgeInsets.zero,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10)),
+              Text(
+                'Both players have been successfully registered.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: Colors.white.withOpacity(0.55),
+                    fontSize: 13,
+                    height: 1.5),
+              ),
+              const SizedBox(height: 10),
+
+              // ── Divider ──────────────────────────────────────────────
+              Container(
+                height: 1,
+                margin: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                    gradient: LinearGradient(colors: [
+                  Colors.transparent,
+                  const Color(0xFF00E5A0).withOpacity(0.3),
+                  Colors.transparent,
+                ])),
+              ),
+
+              Text(
+                'What would you like to do next?',
+                style: TextStyle(
+                    color: Colors.white.withOpacity(0.4),
+                    fontSize: 12,
+                    letterSpacing: 0.5),
+              ),
+              const SizedBox(height: 20),
+
+              // ── Button 1: Register Another Team ──────────────────────
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.transparent,
+                    shadowColor: Colors.transparent,
+                    padding: EdgeInsets.zero,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    widget.onRegisterAnother?.call();
+                  },
+                  child: Ink(
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                          colors: [Color(0xFF3D1A8C), Color(0xFF5A2DB0)]),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                          color: const Color(0xFF00CFFF).withOpacity(0.4)),
+                    ),
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 14),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.add_circle_outline_rounded,
+                              size: 18, color: Colors.white),
+                          SizedBox(width: 8),
+                          Text('REGISTER ANOTHER TEAM',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                  letterSpacing: 1,
+                                  color: Colors.white)),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
-                child: Ink(
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                        colors: [Color(0xFF00E5A0), Color(0xFF00BFA5)]),
-                    borderRadius: BorderRadius.circular(10),
-                    boxShadow: [BoxShadow(
-                        color: const Color(0xFF00E5A0).withOpacity(0.4),
-                        blurRadius: 16, spreadRadius: 1)],
+              ),
+              const SizedBox(height: 10),
+
+              // ── Button 2: View Teams & Players (Attendance) ───────────
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.transparent,
+                    shadowColor: Colors.transparent,
+                    padding: EdgeInsets.zero,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 48, vertical: 14),
-                    child: Text('DONE',
-                        style: TextStyle(color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 2, fontSize: 14)),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    widget.onViewTeams?.call();
+                  },
+                  child: Ink(
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                          colors: [Color(0xFF00BFA5), Color(0xFF00E5A0)]),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 14),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.groups_rounded,
+                              size: 18, color: Colors.black),
+                          SizedBox(width: 8),
+                          Text('VIEW TEAMS & ATTENDANCE',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                  letterSpacing: 1,
+                                  color: Colors.black)),
+                        ],
+                      ),
+                    ),
                   ),
+                ),
+              ),
+              const SizedBox(height: 10),
+
+              // ── Button 3: Skip to Generate Schedule ──────────────────
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: Icon(Icons.skip_next_rounded,
+                      size: 18, color: Colors.white.withOpacity(0.45)),
+                  label: Text('SKIP TO GENERATE SCHEDULE',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                          letterSpacing: 0.8,
+                          color: Colors.white.withOpacity(0.45))),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    side: BorderSide(color: Colors.white.withOpacity(0.15)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    widget.onDone?.call();
+                  },
                 ),
               ),
             ],
@@ -288,6 +423,7 @@ class _Step4PlayerState extends State<Step4Player> {
     );
   }
 
+  // ── Date picker ───────────────────────────────────────────────────────────
   Future<void> _pickDate({
     required DateTime? current,
     required void Function(DateTime) onPicked,
@@ -322,7 +458,8 @@ class _Step4PlayerState extends State<Step4Player> {
   void dispose() {
     _p1NameCtrl.dispose();
     _p2NameCtrl.dispose();
-    _p1BirthCtrl.dispose();     _p2BirthCtrl.dispose();
+    _p1BirthCtrl.dispose();
+    _p2BirthCtrl.dispose();
     super.dispose();
   }
 
@@ -351,14 +488,18 @@ class _Step4PlayerState extends State<Step4Player> {
                             const StepIndicator(activeStep: 4),
                             const SizedBox(height: 10),
                             const Text('PLAYER REGISTRATION',
-                                style: TextStyle(color: Colors.white,
-                                    fontSize: 18, fontWeight: FontWeight.w800,
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w800,
                                     letterSpacing: 2)),
                             const SizedBox(height: 4),
-                            Text('Register both players for the team',
-                                style: TextStyle(
-                                    color: Colors.white.withOpacity(0.4),
-                                    fontSize: 12)),
+                            Text(
+                              'Register both players for the team',
+                              style: TextStyle(
+                                  color: Colors.white.withOpacity(0.4),
+                                  fontSize: 12),
+                            ),
                             const SizedBox(height: 24),
                             buildDivider(_accent),
                             const SizedBox(height: 20),
@@ -377,7 +518,6 @@ class _Step4PlayerState extends State<Step4Player> {
                             const SizedBox(height: 16),
 
                             // Two-column player forms
-                            // Dim both forms when team is full
                             Opacity(
                               opacity: _selectedTeamFull ? 0.35 : 1.0,
                               child: IgnorePointer(
@@ -385,32 +525,41 @@ class _Step4PlayerState extends State<Step4Player> {
                                 child: Row(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Expanded(child: _buildPlayerCard(
-                                      playerNum:        1,
-                                      nameCtrl:         _p1NameCtrl,
-                                      birthCtrl:        _p1BirthCtrl,
-                                      birthdate:        _p1Birthdate,
-                                      onDatePicked:     (d) => setState(() => _p1Birthdate = d),
-                                      isPresent:        _p1Present,
-                                      onPresentChanged: (v) => setState(() => _p1Present = v),
-                                    )),
+                                    Expanded(
+                                      child: _buildPlayerCard(
+                                        playerNum: 1,
+                                        nameCtrl: _p1NameCtrl,
+                                        birthCtrl: _p1BirthCtrl,
+                                        birthdate: _p1Birthdate,
+                                        onDatePicked: (d) =>
+                                            setState(() => _p1Birthdate = d),
+                                        isPresent: _p1Present,
+                                        onPresentChanged: (v) =>
+                                            setState(() => _p1Present = v),
+                                      ),
+                                    ),
                                     const SizedBox(width: 20),
-                                    Expanded(child: _buildPlayerCard(
-                                      playerNum:        2,
-                                      nameCtrl:         _p2NameCtrl,
-                                      birthCtrl:        _p2BirthCtrl,
-                                      birthdate:        _p2Birthdate,
-                                      onDatePicked:     (d) => setState(() => _p2Birthdate = d),
-                                      isPresent:        _p2Present,
-                                      onPresentChanged: (v) => setState(() => _p2Present = v),
-                                    )),
+                                    Expanded(
+                                      child: _buildPlayerCard(
+                                        playerNum: 2,
+                                        nameCtrl: _p2NameCtrl,
+                                        birthCtrl: _p2BirthCtrl,
+                                        birthdate: _p2Birthdate,
+                                        onDatePicked: (d) =>
+                                            setState(() => _p2Birthdate = d),
+                                        isPresent: _p2Present,
+                                        onPresentChanged: (v) =>
+                                            setState(() => _p2Present = v),
+                                      ),
+                                    ),
                                   ],
                                 ),
                               ),
                             ),
                             const SizedBox(height: 20),
 
-                            buildInfoNote('SKIP will go directly to Generate Schedule.'),
+                            buildInfoNote(
+                                'SKIP will go directly to Generate Schedule.'),
                             const SizedBox(height: 28),
 
                             buildButtonRow(
@@ -424,18 +573,22 @@ class _Step4PlayerState extends State<Step4Player> {
                         ),
                       ),
                       Positioned(
-                        top: 12, left: 12,
+                        top: 12,
+                        left: 12,
                         child: IconButton(
                           icon: const Icon(Icons.arrow_back_ios_new,
                               color: _accent, size: 18),
-                          onPressed: widget.onBack),
+                          onPressed: widget.onBack,
+                        ),
                       ),
                       Positioned(
-                        top: 12, right: 12,
+                        top: 12,
+                        right: 12,
                         child: IconButton(
                           icon: Icon(Icons.close,
                               color: Colors.white.withOpacity(0.35), size: 20),
-                          onPressed: () => Navigator.of(context).maybePop()),
+                          onPressed: () => Navigator.of(context).maybePop(),
+                        ),
                       ),
                     ],
                   ),
@@ -529,10 +682,14 @@ class _Step4PlayerState extends State<Step4Player> {
       children: [
         Row(children: [
           const Text('TEAM',
-              style: TextStyle(color: Colors.white,
-                  fontWeight: FontWeight.w700, fontSize: 12, letterSpacing: 1)),
+              style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12,
+                  letterSpacing: 1)),
           const Text(' *',
-              style: TextStyle(color: _accent, fontWeight: FontWeight.bold)),
+              style:
+                  TextStyle(color: _accent, fontWeight: FontWeight.bold)),
         ]),
         const SizedBox(height: 8),
         _isLoadingData
@@ -541,10 +698,12 @@ class _Step4PlayerState extends State<Step4Player> {
                 decoration: BoxDecoration(
                   color: Colors.white.withOpacity(0.05),
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.white.withOpacity(0.15)),
+                  border:
+                      Border.all(color: Colors.white.withOpacity(0.15)),
                 ),
-                child: const Center(child: CircularProgressIndicator(
-                    strokeWidth: 2, color: _accent)),
+                child: const Center(
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: _accent)),
               )
             : DropdownButtonFormField<int>(
                 value: _selectedTeamId,
@@ -552,7 +711,8 @@ class _Step4PlayerState extends State<Step4Player> {
                 style: const TextStyle(color: Colors.white, fontSize: 13),
                 hint: Text('Select team',
                     style: TextStyle(
-                        color: Colors.white.withOpacity(0.25), fontSize: 13)),
+                        color: Colors.white.withOpacity(0.25),
+                        fontSize: 13)),
                 icon: const Icon(Icons.keyboard_arrow_down_rounded,
                     color: _accent),
                 isExpanded: true,
@@ -569,9 +729,8 @@ class _Step4PlayerState extends State<Step4Player> {
                           child: Text(
                             t['team_name'] ?? '',
                             style: TextStyle(
-                              color: isFull
-                                  ? Colors.white38
-                                  : Colors.white,
+                              color:
+                                  isFull ? Colors.white38 : Colors.white,
                               fontSize: 13,
                             ),
                             overflow: TextOverflow.ellipsis,
@@ -613,8 +772,8 @@ class _Step4PlayerState extends State<Step4Player> {
                 decoration: InputDecoration(
                   prefixIcon: Icon(Icons.groups_rounded,
                       color: _accent.withOpacity(0.7), size: 20),
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 14),
                   filled: true,
                   fillColor: Colors.white.withOpacity(0.05),
                   enabledBorder: OutlineInputBorder(
@@ -656,22 +815,31 @@ class _Step4PlayerState extends State<Step4Player> {
           // Player header
           Row(children: [
             Container(
-              width: 32, height: 32,
+              width: 32,
+              height: 32,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: const LinearGradient(
                     colors: [Color(0xFF00E5A0), Color(0xFF00BFA5)]),
-                boxShadow: [BoxShadow(
-                    color: _accent.withOpacity(0.4), blurRadius: 10)],
+                boxShadow: [
+                  BoxShadow(
+                      color: _accent.withOpacity(0.4), blurRadius: 10)
+                ],
               ),
-              child: Center(child: Text('$playerNum',
-                  style: const TextStyle(color: Colors.black,
-                      fontWeight: FontWeight.bold, fontSize: 14))),
+              child: Center(
+                  child: Text('$playerNum',
+                      style: const TextStyle(
+                          color: Colors.black,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14))),
             ),
             const SizedBox(width: 10),
             Text('PLAYER $playerNum',
-                style: const TextStyle(color: _accent, fontSize: 14,
-                    fontWeight: FontWeight.w800, letterSpacing: 1.5)),
+                style: const TextStyle(
+                    color: _accent,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.5)),
           ]),
           const SizedBox(height: 16),
 
@@ -711,8 +879,8 @@ class _Step4PlayerState extends State<Step4Player> {
                 Text(
                   birthdate != null
                       ? '${birthdate.year}-'
-                        '${birthdate.month.toString().padLeft(2, '0')}-'
-                        '${birthdate.day.toString().padLeft(2, '0')}'
+                          '${birthdate.month.toString().padLeft(2, '0')}-'
+                          '${birthdate.day.toString().padLeft(2, '0')}'
                       : 'Select birthdate',
                   style: TextStyle(
                     color: birthdate != null
@@ -746,8 +914,11 @@ class _Step4PlayerState extends State<Step4Player> {
   }
 
   Widget _playerLabel(String text) => Text(text,
-      style: const TextStyle(color: Colors.white,
-          fontWeight: FontWeight.w700, fontSize: 11, letterSpacing: 1));
+      style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w700,
+          fontSize: 11,
+          letterSpacing: 1));
 
   Widget _playerField({
     required String label,
@@ -767,8 +938,8 @@ class _Step4PlayerState extends State<Step4Player> {
             hintText: hint,
             hintStyle: TextStyle(
                 color: Colors.white.withOpacity(0.25), fontSize: 12),
-            prefixIcon: Icon(icon,
-                color: _accent.withOpacity(0.7), size: 18),
+            prefixIcon:
+                Icon(icon, color: _accent.withOpacity(0.7), size: 18),
             contentPadding:
                 const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
             filled: true,
@@ -797,8 +968,7 @@ class _Step4PlayerState extends State<Step4Player> {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        padding:
-            const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
         decoration: BoxDecoration(
           gradient: selected
               ? const LinearGradient(
@@ -807,22 +977,21 @@ class _Step4PlayerState extends State<Step4Player> {
           color: selected ? null : Colors.white.withOpacity(0.05),
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-            color: selected
-                ? _accent
-                : Colors.white.withOpacity(0.15),
+            color: selected ? _accent : Colors.white.withOpacity(0.15),
             width: selected ? 2 : 1,
           ),
           boxShadow: selected
-              ? [BoxShadow(
-                  color: _accent.withOpacity(0.35),
-                  blurRadius: 10, spreadRadius: 1)]
+              ? [
+                  BoxShadow(
+                      color: _accent.withOpacity(0.35),
+                      blurRadius: 10,
+                      spreadRadius: 1)
+                ]
               : [],
         ),
         child: Text(label,
             style: TextStyle(
-              color: selected
-                  ? Colors.black
-                  : Colors.white.withOpacity(0.4),
+              color: selected ? Colors.black : Colors.white.withOpacity(0.4),
               fontWeight: FontWeight.bold,
               fontSize: 12,
               letterSpacing: 1,

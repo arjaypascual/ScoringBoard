@@ -137,7 +137,10 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       for (final c in nonSoccer) {
         final id    = int.tryParse(c['category_id'].toString()) ?? 0;
         final teams = await DBHelper.getTeamsByCategory(id);
-        teamCounts[id] = teams.length;
+        teamCounts[id] = teams.where((t) {
+          final val = t['team_ispresent']?.toString() ?? '1';
+          return val == '1' || val.toLowerCase() == 'true';
+        }).length;
       }
 
       for (final c in nonSoccer) {
@@ -260,8 +263,8 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       final inProgressCount =
           int.tryParse(lockResult.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
       if (inProgressCount > 0) {
-        await _showLockedDialog(inProgressCount);
-        return;
+        final proceed = await _showLockedDialog(inProgressCount);
+        if (!proceed) return;
       }
     } catch (e) {
       _snack('Could not verify match status: $e', Colors.orange);
@@ -305,7 +308,10 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   // ── Generate EVERYTHING ────────────────────────────────────────────────────
   Future<void> _generateEverything() async {
     final activeCats = _categories.where(_isActive).toList();
-    final tc         = _soccerTeams.length;
+    final tc         = _soccerTeams.where((t) {
+      final val = t['team_ispresent']?.toString() ?? '1';
+      return val == '1' || val.toLowerCase() == 'true';
+    }).length;
     final hasSoccer  = _soccerCatId != null && tc >= 4;
     if (activeCats.isEmpty && !hasSoccer) {
       _snack('Nothing to generate.', Colors.orange); return;
@@ -370,8 +376,8 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       final inProgressCount =
           int.tryParse(lockResult.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
       if (inProgressCount > 0) {
-        await _showLockedDialog(inProgressCount);
-        return;
+        final proceed = await _showLockedDialog(inProgressCount);
+        if (!proceed) return;
       }
     } catch (e) {
       _snack('Could not verify match status: $e', Colors.orange);
@@ -417,7 +423,12 @@ class _GenerateScheduleState extends State<GenerateSchedule>
         final sm     = _soccerStartTime.minute.toString().padLeft(2, '0');
         final stStr  = '$sh:$sm';
         final interval = int.tryParse(_soccerMatchBreakCtrl.text.trim()) ?? 5;
-        final shuffled = List<Map<String, dynamic>>.from(_soccerTeams)..shuffle();
+        // ── Only include PRESENT teams in the soccer bracket ───────────────
+        final presentSoccerTeams = _soccerTeams.where((t) {
+          final val = t['team_ispresent']?.toString() ?? '1';
+          return val == '1' || val.toLowerCase() == 'true';
+        }).toList();
+        final shuffled = List<Map<String, dynamic>>.from(presentSoccerTeams)..shuffle();
         const tpg = 4;
         final ng  = (shuffled.length / tpg).ceil().clamp(1, 8);
         final bs  = shuffled.length ~/ ng;
@@ -453,7 +464,10 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   }
 
   Future<void> _generateBracket() async {
-    final tc = _soccerTeams.length;
+    final tc = _soccerTeams.where((t) {
+      final val = t['team_ispresent']?.toString() ?? '1';
+      return val == '1' || val.toLowerCase() == 'true';
+    }).length;
     if (tc < 4) { _snack('Need at least 4 Soccer teams (have $tc).', Colors.red); return; }
     final durVal = int.tryParse(_soccerDurationCtrl.text.trim()) ?? 10;
     if (durVal <= 0) { _snack('Soccer match duration must be greater than 0 minutes.', Colors.red); return; }
@@ -485,8 +499,8 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       final inProgressCount =
           int.tryParse(lockResult.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0;
       if (inProgressCount > 0) {
-        await _showLockedDialog(inProgressCount);
-        return;
+        final proceed = await _showLockedDialog(inProgressCount);
+        if (!proceed) return;
       }
     } catch (e) {
       _snack('Could not verify match status: $e', Colors.orange);
@@ -501,7 +515,12 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       final interval = int.tryParse(_soccerMatchBreakCtrl.text.trim()) ?? 5;
 
       // Build balanced groups of 4
-      final shuffled = List<Map<String, dynamic>>.from(_soccerTeams)..shuffle();
+      // ── Only include PRESENT teams in the soccer bracket ─────────────────
+      final presentSoccerTeams = _soccerTeams.where((t) {
+        final val = t['team_ispresent']?.toString() ?? '1';
+        return val == '1' || val.toLowerCase() == 'true';
+      }).toList();
+      final shuffled = List<Map<String, dynamic>>.from(presentSoccerTeams)..shuffle();
       const teamsPerGroup = 4;
       final numGroups   = (shuffled.length / teamsPerGroup).ceil().clamp(1, 8);
       final baseSize    = shuffled.length ~/ numGroups;
@@ -813,62 +832,99 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       });
 
   // ── Locked dialog (shown when matches are in progress) ────────────────────
-  Future<void> _showLockedDialog(int count) => showDialog<void>(
-    context: context,
-    builder: (ctx) => Dialog(
-      backgroundColor: Colors.transparent,
-      child: Container(
-        width: 380, padding: const EdgeInsets.all(28),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-              begin: Alignment.topLeft, end: Alignment.bottomRight,
-              colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)]),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.redAccent.withOpacity(0.45), width: 1.5)),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(width: 58, height: 58,
-            decoration: BoxDecoration(shape: BoxShape.circle,
-                color: Colors.red.withOpacity(0.15),
-                border: Border.all(color: Colors.redAccent.withOpacity(0.5))),
-            child: const Icon(Icons.lock_rounded,
-                color: Colors.redAccent, size: 28)),
-          const SizedBox(height: 16),
-          const Text('Cannot Regenerate',
-              style: TextStyle(color: Colors.white, fontSize: 17,
-                  fontWeight: FontWeight.w800)),
-          const SizedBox(height: 10),
-          Text(
-            '$count match${count > 1 ? "es have" : " has"} already been '
-            'scored.\n\nRegenerating would permanently delete all recorded '
-            'scores and standings. Please reset scores first if you really '
-            'need to regenerate.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white.withOpacity(0.55),
-                fontSize: 13, height: 1.6)),
-          const SizedBox(height: 24),
-          SizedBox(width: double.infinity,
-            child: ElevatedButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.transparent,
-                shadowColor: Colors.transparent,
-                padding: EdgeInsets.zero,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10))),
-              child: Ink(
-                decoration: BoxDecoration(
-                  color: Colors.redAccent.withOpacity(0.15),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.redAccent.withOpacity(0.4))),
-                child: const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 13),
-                  child: Center(child: Text('UNDERSTOOD',
-                      style: TextStyle(color: Colors.redAccent,
-                          fontWeight: FontWeight.bold, letterSpacing: 1))))))),
-        ]),
+  // ── Scored-matches warning dialog ─────────────────────────────────────────
+  // Returns true  → user chose to proceed (scores will be wiped)
+  // Returns false → user cancelled
+  Future<bool> _showLockedDialog(int count) async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          width: 420, padding: const EdgeInsets.all(28),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+                begin: Alignment.topLeft, end: Alignment.bottomRight,
+                colors: [Color(0xFF2D0E7A), Color(0xFF1E0A5A)]),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.orange.withOpacity(0.55), width: 1.5),
+            boxShadow: [BoxShadow(
+                color: Colors.orange.withOpacity(0.12), blurRadius: 28)]),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 60, height: 60,
+              decoration: BoxDecoration(shape: BoxShape.circle,
+                  color: Colors.orange.withOpacity(0.15),
+                  border: Border.all(color: Colors.orange.withOpacity(0.5))),
+              child: const Icon(Icons.warning_amber_rounded,
+                  color: Colors.orange, size: 30)),
+            const SizedBox(height: 16),
+            const Text('Scores Already Recorded',
+                style: TextStyle(color: Colors.white, fontSize: 17,
+                    fontWeight: FontWeight.w800)),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.orange.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.orange.withOpacity(0.35))),
+              child: Text(
+                '$count match${count > 1 ? "es have" : " has"} already been scored.',
+                style: const TextStyle(color: Colors.orange,
+                    fontWeight: FontWeight.bold, fontSize: 13)),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              'Regenerating will permanently DELETE all recorded\n'
+              'scores and standings for this schedule.\n\n'
+              'Make sure to back up the database first if you\n'
+              'need to keep the existing data.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white.withOpacity(0.6),
+                  fontSize: 12, height: 1.6)),
+            const SizedBox(height: 22),
+            Row(children: [
+              Expanded(child: OutlinedButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                style: OutlinedButton.styleFrom(
+                  side: BorderSide(color: Colors.white.withOpacity(0.2)),
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10))),
+                child: Text('CANCEL', style: TextStyle(
+                    color: Colors.white.withOpacity(0.45),
+                    fontWeight: FontWeight.bold)),
+              )),
+              const SizedBox(width: 10),
+              Expanded(child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.transparent,
+                  shadowColor: Colors.transparent,
+                  padding: EdgeInsets.zero,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10))),
+                child: Ink(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(colors: [
+                      Colors.orange.shade700, Colors.deepOrange.shade800,
+                    ]),
+                    borderRadius: BorderRadius.circular(10)),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 13),
+                    child: Center(child: Text('PROCEED & WIPE SCORES',
+                        style: TextStyle(color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12, letterSpacing: 0.8))))),
+              )),
+            ]),
+          ]),
+        ),
       ),
-    ),
-  );
+    );
+    return result == true;
+  }
 
   // ══════════════════════════════════════════════════════════════════════════
   // BUILD
@@ -1519,7 +1575,10 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   }
 
   Widget _buildSoccerCard() {
-    final tc          = _soccerTeams.length;
+    final tc          = _soccerTeams.where((t) {
+      final val = t['team_ispresent']?.toString() ?? '1';
+      return val == '1' || val.toLowerCase() == 'true';
+    }).length;
     final canGenerate = tc >= 4;
     const accent      = _soccerAccent;
 

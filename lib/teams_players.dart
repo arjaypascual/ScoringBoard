@@ -26,7 +26,14 @@ String _fmtTeamId(String rawId) {
 // ─────────────────────────────────────────────────────────────────────────────
 class TeamsPlayers extends StatefulWidget {
   final VoidCallback? onBack;
-  const TeamsPlayers({super.key, this.onBack});
+  final VoidCallback? onGenerate;
+  final VoidCallback? onRegisterAnother;
+  const TeamsPlayers({
+    super.key,
+    this.onBack,
+    this.onGenerate,
+    this.onRegisterAnother,
+  });
 
   @override
   State<TeamsPlayers> createState() => _TeamsPlayersState();
@@ -65,7 +72,11 @@ class _TeamsPlayersState extends State<TeamsPlayers>
   Future<void> _loadData({bool silent = false}) async {
     if (!silent) setState(() => _isLoading = true);
     try {
-      final categories = await DBHelper.getCategories();
+      final allCategories = await DBHelper.getCategories();
+      // ── Only show categories that are active ──────────────────────────
+      final categories = allCategories
+          .where((c) => c['status']?.toString().toLowerCase() == 'active')
+          .toList();
       final conn       = await DBHelper.getConnection();
 
       // Load all teams with mentor info
@@ -181,9 +192,176 @@ class _TeamsPlayersState extends State<TeamsPlayers>
 
   // ── Build ─────────────────────────────────────────────────────────────────
   @override
+  // ── What's next dialog ───────────────────────────────────────────────────
+  void _showWhatsNextDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          width: 400,
+          padding: const EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft, end: Alignment.bottomRight,
+              colors: [Color(0xFF1A0550), Color(0xFF2D0E7A)],
+            ),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+                color: const Color(0xFF00CFFF).withOpacity(0.4), width: 1.5),
+            boxShadow: [BoxShadow(
+                color: const Color(0xFF00CFFF).withOpacity(0.12),
+                blurRadius: 40, spreadRadius: 4)],
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+
+            // Icon
+            Container(
+              width: 64, height: 64,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: const Color(0xFF00CFFF).withOpacity(0.12),
+                border: Border.all(
+                    color: const Color(0xFF00CFFF).withOpacity(0.4)),
+              ),
+              child: const Icon(Icons.check_circle_rounded,
+                  color: Color(0xFF00CFFF), size: 34)),
+            const SizedBox(height: 18),
+
+            const Text('Attendance Checked!',
+                style: TextStyle(color: Colors.white, fontSize: 20,
+                    fontWeight: FontWeight.w800, letterSpacing: 1)),
+            const SizedBox(height: 8),
+            Text('What would you like to do next?',
+                style: TextStyle(
+                    color: Colors.white.withOpacity(0.5), fontSize: 13)),
+            const SizedBox(height: 24),
+
+            // Button 1: Generate Schedule
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.transparent,
+                  shadowColor: Colors.transparent,
+                  padding: EdgeInsets.zero,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: () {
+                  Navigator.of(ctx).pop();
+                  widget.onGenerate?.call();
+                },
+                child: Ink(
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                        colors: [Color(0xFF00CFFF), Color(0xFF0099CC)]),
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [BoxShadow(
+                        color: const Color(0xFF00CFFF).withOpacity(0.35),
+                        blurRadius: 16)],
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 14),
+                    child: Row(mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.auto_awesome_rounded,
+                            size: 18, color: Colors.black),
+                        SizedBox(width: 8),
+                        Text('GENERATE SCHEDULE',
+                            style: TextStyle(fontWeight: FontWeight.bold,
+                                fontSize: 13, letterSpacing: 1,
+                                color: Colors.black)),
+                      ]),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+
+            // Button 2: Register Another Team
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.transparent,
+                  shadowColor: Colors.transparent,
+                  padding: EdgeInsets.zero,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: () {
+                  Navigator.of(ctx).pop();
+                  widget.onRegisterAnother?.call();
+                },
+                child: Ink(
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                        colors: [Color(0xFF3D1A8C), Color(0xFF5A2DB0)]),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                        color: const Color(0xFF00CFFF).withOpacity(0.35)),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 14),
+                    child: Row(mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.add_circle_outline_rounded,
+                            size: 18, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text('REGISTER ANOTHER TEAM',
+                            style: TextStyle(fontWeight: FontWeight.bold,
+                                fontSize: 13, letterSpacing: 1,
+                                color: Colors.white)),
+                      ]),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+
+            // Button 3: Stay here
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: Icon(Icons.close_rounded,
+                    size: 16, color: Colors.white.withOpacity(0.4)),
+                label: Text('STAY ON THIS PAGE',
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.4),
+                        fontWeight: FontWeight.bold, fontSize: 12)),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  side: BorderSide(color: Colors.white.withOpacity(0.12)),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: () => Navigator.of(ctx).pop(),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
   Widget build(BuildContext context) {
+    final hasActions = widget.onGenerate != null || widget.onRegisterAnother != null;
     return Scaffold(
       backgroundColor: const Color(0xFF0D0720),
+      // ── What's Next FAB ─────────────────────────────────────────────────
+      floatingActionButton: hasActions
+          ? FloatingActionButton.extended(
+              onPressed: _showWhatsNextDialog,
+              backgroundColor: const Color(0xFF00CFFF),
+              foregroundColor: Colors.black,
+              icon: const Icon(Icons.arrow_forward_rounded),
+              label: const Text('What''s Next?',
+                  style: TextStyle(fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5)),
+            )
+          : null,
       body: Column(
         children: [
           _buildHeader(),
@@ -317,44 +495,69 @@ class _TeamsPlayersState extends State<TeamsPlayers>
           begin: Alignment.topLeft, end: Alignment.bottomRight,
           colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF1A0A4A)],
         ),
-        border: const Border(
-            bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5)),
+        border: const Border(bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5)),
         boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF00CFFF).withOpacity(0.12),
-            blurRadius: 16,
-            offset: const Offset(0, 4),
-          ),
+          BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.12),
+              blurRadius: 16, offset: const Offset(0, 4)),
         ],
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        crossAxisAlignment: CrossAxisAlignment.center,
+      padding: const EdgeInsets.fromLTRB(20, 32, 20, 10),
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.topCenter,
         children: [
-          SizedBox(
-            height: 44, width: 160,
-            child: Image.asset('assets/images/RoboventureLogo.png',
-                fit: BoxFit.contain, alignment: Alignment.centerLeft),
-          ),
           Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF7B2FFF).withOpacity(0.35),
-                  blurRadius: 24,
-                  spreadRadius: 4,
-                ),
+              color: Colors.white.withOpacity(0.04),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.white.withOpacity(0.08), width: 1.0),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE8F0FA),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                boxShadow: [
+                  BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                  BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                ],
+              ),
+              child: Image.asset('assets/images/RoboventureLogo.png', height: 36, fit: BoxFit.contain),
+            ),
+              const SizedBox(width: 80),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE8F0FA),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                boxShadow: [
+                  BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                  BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                ],
+              ),
+              child: Image.asset('assets/images/CreotecLogo.png', height: 36, fit: BoxFit.contain),
+            ),
               ],
             ),
-            child: Image.asset('assets/images/CenterLogo.png',
-                height: 70, fit: BoxFit.contain),
           ),
-          SizedBox(
-            height: 44, width: 160,
-            child: Image.asset('assets/images/CreotecLogo.png',
-                fit: BoxFit.contain, alignment: Alignment.centerRight),
+          // ── Floating CenterLogo ─────────────────────────────
+          Positioned(
+            top: -30,
+            left: 0, right: 0,
+            child: Center(
+              child: Image.asset(
+                'assets/images/CenterLogo.png',
+                height: 80,
+                fit: BoxFit.contain,
+              ),
+            ),
           ),
         ],
       ),

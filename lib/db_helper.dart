@@ -733,7 +733,12 @@ class DBHelper {
       final categoryId = entry.key;
       final runs       = entry.value;
       final arenas     = (arenasPerCategory[categoryId] ?? 1).clamp(1, 99);
-      final teams      = await getTeamsByCategory(categoryId);
+      final allTeams   = await getTeamsByCategory(categoryId);
+      // ── Only include PRESENT teams in the schedule ───────────────────────
+      final teams      = allTeams.where((t) {
+        final val = t['team_ispresent']?.toString() ?? '1';
+        return val == '1' || val.toLowerCase() == 'true';
+      }).toList();
       if (teams.isEmpty) continue;
 
       final n          = teams.length;

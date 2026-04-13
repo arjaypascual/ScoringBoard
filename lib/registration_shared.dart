@@ -403,50 +403,74 @@ class RegistrationHeader extends StatelessWidget {
       width: double.infinity,
       decoration: BoxDecoration(
         gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
+          begin: Alignment.topLeft, end: Alignment.bottomRight,
           colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF1A0A4A)],
         ),
-        border: const Border(
-            bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5)),
-        boxShadow: [
-          BoxShadow(
-              color: const Color(0xFF00CFFF).withOpacity(0.12),
-              blurRadius: 16,
-              offset: const Offset(0, 4)),
-        ],
+        border: const Border(bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5)),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          SizedBox(
-            height: 44, width: 160,
-            child: Image.asset('assets/images/RoboventureLogo.png',
-                fit: BoxFit.contain, alignment: Alignment.centerLeft),
-          ),
-          Container(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                    color: const Color(0xFF7B2FFF).withOpacity(0.35),
-                    blurRadius: 24, spreadRadius: 4),
-                BoxShadow(
-                    color: const Color(0xFF00CFFF).withOpacity(0.15),
-                    blurRadius: 16, spreadRadius: 2),
-              ],
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 32, 20, 10),
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.topCenter,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.04),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.white.withOpacity(0.08), width: 1.0),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  // ── Left: RoboVenture logo ──────────────────────────────────
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE8F0FA),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                      boxShadow: [
+                        BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                        BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                      ],
+                    ),
+                    child: Image.asset('assets/images/RoboventureLogo.png', height: 36, fit: BoxFit.contain),
+                  ),
+                  const SizedBox(width: 80), // space for floating CenterLogo
+                  // ── Right: Creotec logo ────────────────────────────────────
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE8F0FA),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                      boxShadow: [
+                        BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                        BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                      ],
+                    ),
+                    child: Image.asset('assets/images/CreotecLogo.png', height: 36, fit: BoxFit.contain),
+                  ),
+                ],
+              ),
             ),
-            child: Image.asset('assets/images/CenterLogo.png',
-                height: 70, fit: BoxFit.contain),
-          ),
-          SizedBox(
-            height: 44, width: 160,
-            child: Image.asset('assets/images/CreotecLogo.png',
-                fit: BoxFit.contain, alignment: Alignment.centerRight),
-          ),
-        ],
+            // ── Floating CenterLogo ────────────────────────────────────────
+            Positioned(
+              top: -30,
+              left: 0, right: 0,
+              child: Center(
+                child: Image.asset(
+                  'assets/images/CenterLogo.png',
+                  height: 80,
+                  fit: BoxFit.contain,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

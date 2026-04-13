@@ -125,9 +125,9 @@ class _LandingPageState extends State<LandingPage>
   void _goToSchedule() {
     Navigator.of(context).push(
       _buildRoute(ScheduleViewer(
+        onBack: () => Navigator.of(context).pop(),
         onRegister: () => Navigator.of(context).pop(),
         onStandings: () {
-          Navigator.of(context).pop();
           Navigator.of(context).push(
             _buildRoute(Standings(onBack: () => Navigator.of(context).pop())),
           );
@@ -409,7 +409,7 @@ class _LandingPageState extends State<LandingPage>
                                       ],
                                     ),
                                   ),
-                                  const SizedBox(height: 8),
+                                  const SizedBox(height: 28),
                                 ],
                               ),
                             ),
