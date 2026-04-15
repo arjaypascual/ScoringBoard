@@ -184,45 +184,94 @@ class _RegistrationChooser extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0E0630),
+      backgroundColor: const Color(0xFF07051A),
       body: Column(
         children: [
           // ── Header ────────────────────────────────────────────────────
           Container(
-            width: double.infinity,
             decoration: const BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF1A0A4A)],
+                colors: [Color(0xFF1A0550), Color(0xFF2D0E7A), Color(0xFF180A4A)],
               ),
-              border: Border(
-                bottom: BorderSide(color: Color(0xFF00CFFF), width: 1.5),
-              ),
+              border: Border(bottom: BorderSide(color: Color(0xFF3D1F9A), width: 1)),
             ),
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-            child: Row(children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_back_ios_new,
-                    color: Color(0xFF00CFFF), size: 18),
-                onPressed: onBack,
+            child: Column(children: [
+              // ── Logo row ──────────────────────────────────────────────
+              Container(
+                margin: const EdgeInsets.fromLTRB(20, 32, 20, 0),
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  alignment: Alignment.topCenter,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.04),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.white.withOpacity(0.08), width: 1.0),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFE8F0FA),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                              boxShadow: [
+                                BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                                BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                              ],
+                            ),
+                            child: Image.asset('assets/images/RoboventureLogo.png', height: 36, fit: BoxFit.contain),
+                          ),
+                          const SizedBox(width: 80),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFE8F0FA),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.50), width: 1.5),
+                              boxShadow: [
+                                BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.30), blurRadius: 20, spreadRadius: 2),
+                                BoxShadow(color: const Color(0xFF7B2FFF).withOpacity(0.25), blurRadius: 28, spreadRadius: 1),
+                              ],
+                            ),
+                            child: Image.asset('assets/images/CreotecLogo.png', height: 36, fit: BoxFit.contain),
+                          ),
+                        ],
+                      ),
+                    ),
+                    // ── Floating CenterLogo ────────────────────────────
+                    Positioned(
+                      top: -30,
+                      left: 0, right: 0,
+                      child: Center(
+                        child: Image.asset(
+                          'assets/images/CenterLogo.png',
+                          height: 80,
+                          fit: BoxFit.contain,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              const SizedBox(width: 8),
-              const Text('REGISTRATION',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 3)),
+              const SizedBox(height: 16),
             ]),
           ),
 
           // ── Body ──────────────────────────────────────────────────────
           Expanded(
-            child: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
+            child: Stack(
+              children: [
+                Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
                   const Text('HOW WOULD YOU LIKE TO REGISTER?',
                       style: TextStyle(
                           color: Colors.white54,
@@ -271,8 +320,88 @@ class _RegistrationChooser extends StatelessWidget {
                 ],
               ),
             ),
+
+                // ── Floating back button — bottom-left ─────────────────
+                Positioned(
+                  left: 32,
+                  bottom: 32,
+                  child: _FloatingBackButton(onTap: onBack),
+                ),
+              ],
+            ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Floating back button ──────────────────────────────────────────────────────
+class _FloatingBackButton extends StatefulWidget {
+  final VoidCallback onTap;
+  const _FloatingBackButton({required this.onTap});
+
+  @override
+  State<_FloatingBackButton> createState() => _FloatingBackButtonState();
+}
+
+class _FloatingBackButtonState extends State<_FloatingBackButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit:  (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            color: _hovered
+                ? const Color(0xFF00CFFF).withOpacity(0.12)
+                : Colors.white.withOpacity(0.04),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: _hovered
+                  ? const Color(0xFF00CFFF).withOpacity(0.6)
+                  : Colors.white.withOpacity(0.1),
+              width: 1.5,
+            ),
+            boxShadow: _hovered
+                ? [BoxShadow(
+                    color: const Color(0xFF00CFFF).withOpacity(0.15),
+                    blurRadius: 20, spreadRadius: 2)]
+                : [],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                transform: Matrix4.translationValues(_hovered ? -3 : 0, 0, 0),
+                child: Icon(
+                  Icons.arrow_back_ios_new_rounded,
+                  color: _hovered
+                      ? const Color(0xFF00CFFF)
+                      : Colors.white38,
+                  size: 14,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'BACK',
+                style: TextStyle(
+                  color: _hovered ? const Color(0xFF00CFFF) : Colors.white38,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 2,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

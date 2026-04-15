@@ -180,6 +180,26 @@ class DBHelper {
       print("ℹ️  Migration 10: $e");
     }
 
+     // Migration 11: tbl_attendance — shared with the on-site attendance app.
+    // Stores present/absent per team (and optionally referee/mentor) so both
+    // apps read and write the same source of truth.
+    try {
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS tbl_attendance (
+          attendance_id INT AUTO_INCREMENT PRIMARY KEY,
+          entity_type   ENUM('team','referee','mentor') NOT NULL,
+          entity_id     INT NOT NULL,
+          is_present    TINYINT(1) NOT NULL DEFAULT 0,
+          updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+                        ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_entity (entity_type, entity_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      ''');
+      print('✅ Migration 11: tbl_attendance created.');
+    } catch (_) {
+      print('ℹ️  Migration 11: tbl_attendance already present.');
+    }
+
     print("✅ Migrations complete.");
   }
   // Generates a random 6-char uppercase alphanumeric code, e.g. "A3F9KX"
@@ -411,26 +431,33 @@ class DBHelper {
   static Future<List<Map<String, dynamic>>> getTeams() async {
     final conn   = await getConnection();
     final result = await conn.execute("""
-      SELECT t.team_id, t.team_name, t.team_ispresent,
+      SELECT t.team_id, t.team_name,
+             COALESCE(a.is_present, 1) AS team_ispresent,
              c.category_type, m.mentor_name
       FROM tbl_team t
       JOIN tbl_category c ON t.category_id = c.category_id
       JOIN tbl_mentor   m ON t.mentor_id   = m.mentor_id
+      LEFT JOIN tbl_attendance a
+             ON a.entity_type = 'team' AND a.entity_id = t.team_id
       ORDER BY t.team_id
     """);
     return result.rows.map((r) => r.assoc()).toList();
   }
 
   static Future<List<Map<String, dynamic>>> getTeamsByCategory(
-      int categoryId) async {
+      int categoryId, {bool presentOnly = false}) async {
     final conn   = await getConnection();
     final result = await conn.execute("""
-      SELECT t.team_id, t.team_name, t.team_ispresent,
+      SELECT t.team_id, t.team_name,
+             COALESCE(a.is_present, 1) AS team_ispresent,
              c.category_type, m.mentor_name
       FROM tbl_team t
       JOIN tbl_category c ON t.category_id = c.category_id
       JOIN tbl_mentor   m ON t.mentor_id   = m.mentor_id
+      LEFT JOIN tbl_attendance a
+             ON a.entity_type = 'team' AND a.entity_id = t.team_id
       WHERE t.category_id = :categoryId
+        ${presentOnly ? "AND COALESCE(a.is_present, 1) = 1" : ""}
       ORDER BY t.team_id
     """, {"categoryId": categoryId});
     return result.rows.map((r) => r.assoc()).toList();
@@ -733,12 +760,8 @@ class DBHelper {
       final categoryId = entry.key;
       final runs       = entry.value;
       final arenas     = (arenasPerCategory[categoryId] ?? 1).clamp(1, 99);
-      final allTeams   = await getTeamsByCategory(categoryId);
       // ── Only include PRESENT teams in the schedule ───────────────────────
-      final teams      = allTeams.where((t) {
-        final val = t['team_ispresent']?.toString() ?? '1';
-        return val == '1' || val.toLowerCase() == 'true';
-      }).toList();
+      final teams = await getTeamsByCategory(categoryId, presentOnly: true);
       if (teams.isEmpty) continue;
 
       final n          = teams.length;

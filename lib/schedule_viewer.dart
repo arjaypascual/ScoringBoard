@@ -157,7 +157,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     super.initState();
     _runMigrationsAndLoad();
     _autoRefreshTimer = Timer.periodic(
-        const Duration(seconds: 2), (_) => _silentRefresh());
+        const Duration(seconds: 5), (_) => _silentRefresh());
   }
 
   Future<void> _runMigrationsAndLoad() async {
@@ -220,6 +220,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         JOIN tbl_category c ON t.category_id = c.category_id
         JOIN tbl_match m    ON ts.match_id   = m.match_id
         JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
+        WHERE t.team_ispresent = 1
         ORDER BY c.category_id, s.schedule_start, ts.match_id
       """);
       final rows      = result.rows.map((r) => r.assoc()).toList();
@@ -294,6 +295,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         JOIN tbl_schedule s ON m.schedule_id = s.schedule_id
         JOIN tbl_round r    ON ts.round_id   = r.round_id
         WHERE c.status = 'active'
+          AND t.team_ispresent = 1
         ORDER BY c.category_id, s.schedule_start, ts.match_id, ts.arena_number
       """);
 
@@ -371,7 +373,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
       List<Map<String, dynamic>> soccerTeams = [];
       if (soccerCatId != null) {
-        soccerTeams = await DBHelper.getTeamsByCategory(soccerCatId);
+        soccerTeams = await DBHelper.getTeamsByCategory(soccerCatId, presentOnly: true);
       }
 
       final prevIdx = _tabController?.index ?? 0;
@@ -522,9 +524,15 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           (int.tryParse(check.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0) > 0;
       if (!tableExists) return;
 
-      final result = await conn.execute(
-        "SELECT group_label, team_id, team_name FROM tbl_soccer_groups WHERE category_id = ${_soccerCategoryId} ORDER BY group_label, id",
-      );
+      // Only load teams that are currently marked present
+      final result = await conn.execute("""
+        SELECT sg.group_label, sg.team_id, sg.team_name
+        FROM tbl_soccer_groups sg
+        JOIN tbl_team t ON t.team_id = sg.team_id
+        WHERE sg.category_id = ${_soccerCategoryId}
+          AND t.team_ispresent = 1
+        ORDER BY sg.group_label, sg.id
+      """);
       final rows = result.rows.map((r) => r.assoc()).toList();
       if (rows.isEmpty) return;
 
@@ -1333,6 +1341,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   bool _isKoChecking       = false; // prevents overlapping KO advance calls
   String _lastAdvancedRound = '';   // prevents repeated snackbar for same round
   bool _showBracketFlowInfo = false; // toggles "how does this work" panel
+  bool _isLoadingData = false;
 
   // ── Auto-advance: fires once when groups finish and KO slots are ready ────
   void _checkAndAutoAdvance() {

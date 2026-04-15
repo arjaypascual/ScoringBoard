@@ -127,7 +127,8 @@ class _GenerateScheduleState extends State<GenerateSchedule>
         final name = (c['category_type'] ?? '').toString().toLowerCase();
         if (name.contains('soccer')) {
           soccerCatId = id;
-          soccerTeams = await DBHelper.getTeamsByCategory(id);
+          // Only load present teams for soccer bracket
+          soccerTeams = await DBHelper.getTeamsByCategory(id, presentOnly: true);
         } else {
           nonSoccer.add(c);
         }
@@ -136,11 +137,9 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       final Map<int, int> teamCounts = {};
       for (final c in nonSoccer) {
         final id    = int.tryParse(c['category_id'].toString()) ?? 0;
-        final teams = await DBHelper.getTeamsByCategory(id);
-        teamCounts[id] = teams.where((t) {
-          final val = t['team_ispresent']?.toString() ?? '1';
-          return val == '1' || val.toLowerCase() == 'true';
-        }).length;
+        // Only count present teams
+        final teams = await DBHelper.getTeamsByCategory(id, presentOnly: true);
+        teamCounts[id] = teams.length;
       }
 
       for (final c in nonSoccer) {
