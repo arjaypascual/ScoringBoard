@@ -680,7 +680,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           t.team_id,
           t.team_name,
           ts.teamschedule_id,
-          COALESCE(sg.group_label, '?') AS group_label
+          COALESCE(sg.group_label, '?') AS group_label,
+          (SELECT COUNT(*) FROM tbl_score sc2 WHERE sc2.match_id = m.match_id) AS score_count
         FROM tbl_match m
         JOIN tbl_schedule     s  ON s.schedule_id  = m.schedule_id
         JOIN tbl_teamschedule ts ON ts.match_id    = m.match_id
@@ -720,7 +721,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       // the ELIM/QF/SF columns immediately after schedule generation — before
       // any teams are seeded — instead of waiting until teams appear (which
       // could be never if the early-return fires every tick).
-      final sig = (rows + emptyKoRows).map((r) => r.toString()).join('|');
+      final sig = (rows + emptyKoRows)
+          .map((r) => '${r['match_id']}_${r['score_count'] ?? 0}')
+          .join('|');
       if (sig == _lastScheduleSig) return;
       _lastScheduleSig = sig;
 
@@ -750,6 +753,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           'arena':       arenaNum,
           'bracketType': bracketType,
           '_labels':     <String>[],  // collect both teams' labels
+          'scoreCount':  int.tryParse(row['score_count']?.toString() ?? '0') ?? 0,
         });
 
         final entry  = byMatch[matchId]!;
@@ -1030,8 +1034,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       // 4 groups → 8 teams → QF directly
       rounds.add('quarter-finals');
     } else if (advancing == 16) {
-      // 8 groups → 16 teams → QF directly
-      rounds.add('quarter-finals');
+      // 8 groups → 16 teams → R16 → QF
+      rounds.add('round-of-16'); 
+      rounds.add('quarter-finals');   
     } else {
       // 5,6,7 groups → ELIM(top 2 BYE) → QF(4)
       rounds.add('elimination');
@@ -1359,13 +1364,15 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
     if (koRows.isNotEmpty && !koHasTeams) {
       _hasAutoAdvanced = true;
-      _advanceToKnockout();
+      _advanceToKnockout().catchError((_) {
+        _hasAutoAdvanced = false; // retry on next refresh if it failed
+      });
     } else if (koRows.isEmpty) {
       // KO slots not loaded yet — try again on next refresh
       // (slots appear once the schedule has been generated)
     }
   }
-
+  
   // ── Reset knockout seeding and re-run with correct rankings ─────────────
   Future<void> _resetAndReseedKnockout() async {
     if (_soccerCategoryId == null) return;
@@ -3362,7 +3369,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       }
                       if (gm != null) break;
                     }
-                    final isDone = gm?.isDone ?? false;
+                    final scoreCount = (row['scoreCount'] as int?) ?? 0;
+                    final isDone = scoreCount >= 2 || (gm?.isDone ?? false);
                     final t1Wins = isDone && gm?.winner == gm?.team1;
                     final t2Wins = isDone && gm?.winner == gm?.team2;
 
@@ -4574,7 +4582,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
               child: ElevatedButton(
-                onPressed: () {
+                onPressed: () async {
                   final s1 = int.tryParse(c1.text.trim());
                   final s2 = int.tryParse(c2.text.trim());
                   if (s1 == null || s2 == null || s1 == s2) {

@@ -1213,33 +1213,48 @@ class _StandingsState extends State<Standings>
           style: TextStyle(color: Colors.white54, fontSize: 14)));
     }
 
-    final allTeams = <Map<String, dynamic>>[];
-    for (final g in _soccerGroups) {
-      for (final t in g.teams) {
-        allTeams.add({
-          'teamName':     t.teamName,
-          'group':        g.label,
-          'wins':         t.wins,
-          'losses':       t.losses,
-          'draws':        t.draws,
-          'points':       t.points,
-          'goalsFor':     t.goalsFor,
-          'goalsAgainst': t.goalsAgainst,
-          'goalDiff':     t.goalDiff,
-          'fouls':        t.fouls,
-          'matchesPlayed':t.matchesPlayed,
-          'winPct':       t.winPct,
-          'groupColor':   _groupColor(g.label),
-        });
-      }
-    }
-    allTeams.sort((a, b) {
+    // ── Sort comparator ────────────────────────────────────────────────────
+    int _cmp(Map<String, dynamic> a, Map<String, dynamic> b) {
       if (b['points']   != a['points'])   return (b['points']   as int).compareTo(a['points']   as int);
       if (b['goalDiff'] != a['goalDiff']) return (b['goalDiff'] as int).compareTo(a['goalDiff'] as int);
       if (b['goalsFor'] != a['goalsFor']) return (b['goalsFor'] as int).compareTo(a['goalsFor'] as int);
       if (b['wins']     != a['wins'])     return (b['wins']     as int).compareTo(a['wins']     as int);
       return (a['teamName'] as String).compareTo(b['teamName'] as String);
-    });
+    }
+
+    // ── Build per-group team lists, pick top 2 vs eliminated ──────────────
+    final qualifiers  = <Map<String, dynamic>>[];  // top 2 per group
+    final eliminated  = <Map<String, dynamic>>[];  // rest
+
+    for (final g in _soccerGroups) {
+      final groupTeams = g.teams.map((t) => {
+        'teamName':     t.teamName,
+        'group':        g.label,
+        'wins':         t.wins,
+        'losses':       t.losses,
+        'draws':        t.draws,
+        'points':       t.points,
+        'goalsFor':     t.goalsFor,
+        'goalsAgainst': t.goalsAgainst,
+        'goalDiff':     t.goalDiff,
+        'fouls':        t.fouls,
+        'matchesPlayed':t.matchesPlayed,
+        'winPct':       t.winPct,
+        'groupColor':   _groupColor(g.label),
+      }).toList()..sort(_cmp);
+
+      for (int gi = 0; gi < groupTeams.length; gi++) {
+        if (gi < 2) {
+          qualifiers.add(groupTeams[gi]);
+        } else {
+          eliminated.add(groupTeams[gi]);
+        }
+      }
+    }
+
+    // Sort qualifiers and eliminated independently by points/goal diff etc.
+    qualifiers.sort(_cmp);
+    eliminated.sort(_cmp);
 
     // ── Header ─────────────────────────────────────────────────────────────
     Widget hdr(String t, {int flex = 1, bool right = false, Color? color}) =>
@@ -1250,17 +1265,250 @@ class _StandingsState extends State<Standings>
                 fontSize: 14, fontWeight: FontWeight.w900,
                 letterSpacing: 0.5)));
 
+    // ── Build a single row widget ──────────────────────────────────────────
+    Widget _buildRow(Map<String, dynamic> team, int rank, bool isEliminated) {
+      final isEven    = rank % 2 == 0;
+      final gc        = team['groupColor']    as Color;
+      final name      = team['teamName']      as String;
+      final group     = team['group']         as String;
+      final mp        = team['matchesPlayed'] as int;
+      final w         = team['wins']          as int;
+      final d         = team['draws']         as int;
+      final l         = team['losses']        as int;
+      final pts       = team['points']        as int;
+      final gf        = team['goalsFor']      as int;
+      final ga        = team['goalsAgainst']  as int;
+      final gd        = team['goalDiff']      as int;
+
+      final rankColor = isEliminated ? Colors.white24 : _rankColor(rank);
+      final isTop2    = !isEliminated && rank <= 2;
+      final gdStr     = gd > 0 ? '+$gd' : '$gd';
+      final gdColor   = isEliminated
+          ? Colors.white24
+          : gd > 0
+              ? const Color(0xFF00FF88)
+              : gd < 0 ? Colors.redAccent : Colors.white38;
+
+      // Eliminated row: dark/dimmed styling
+      final eliminatedBg   = isEven
+          ? const Color(0xFF0A0518)
+          : const Color(0xFF080415);
+
+      Widget cell(String v, {int flex = 1, Color? color, bool bold = false}) =>
+          Expanded(flex: flex, child: Text(v,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  color: color ?? (isEliminated ? Colors.white24 : Colors.white70),
+                  fontSize: 16,
+                  fontWeight: bold ? FontWeight.w900 : FontWeight.w600)));
+
+      return Container(
+        decoration: BoxDecoration(
+          gradient: isTop2
+              ? LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: [
+                    rankColor.withOpacity(rank == 1 ? 0.12 : 0.07),
+                    (isEven ? const Color(0xFF100838) : const Color(0xFF0C0628)),
+                  ],
+                )
+              : null,
+          color: isTop2 ? null : isEliminated
+              ? eliminatedBg
+              : isEven
+                  ? const Color(0xFF100838)
+                  : const Color(0xFF0C0628),
+          border: isTop2
+              ? Border(left: BorderSide(color: rankColor.withOpacity(0.7), width: 3))
+              : isEliminated
+                  ? const Border(left: BorderSide(color: Color(0xFF3A1A1A), width: 3))
+                  : null,
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+        child: Row(children: [
+          // Rank / skull
+          SizedBox(width: 36, child: isEliminated
+              ? Container(
+                  width: 32, height: 32,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.red.withOpacity(0.07),
+                    border: Border.all(color: Colors.red.withOpacity(0.25), width: 1),
+                  ),
+                  child: const Center(child: Text('💀',
+                      style: TextStyle(fontSize: 14))),
+                )
+              : isTop2
+                  ? Container(
+                      width: 32, height: 32,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: RadialGradient(colors: [
+                          rankColor.withOpacity(0.3),
+                          rankColor.withOpacity(0.06),
+                        ]),
+                        border: Border.all(color: rankColor.withOpacity(0.7), width: 1.5),
+                        boxShadow: [BoxShadow(color: rankColor.withOpacity(0.35), blurRadius: 7)],
+                      ),
+                      child: Center(child: Text(
+                          rank == 1 ? '🥇' : '🥈',
+                          style: const TextStyle(fontSize: 16))),
+                    )
+                  : Container(
+                      width: 36, height: 36,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white.withOpacity(0.05),
+                        border: Border.all(color: Colors.white24, width: 1),
+                      ),
+                      child: Center(child: Text('$rank',
+                          style: const TextStyle(color: Colors.white70,
+                              fontSize: 18, fontWeight: FontWeight.w900))))),
+
+          // Group badge + Team name
+          Expanded(flex: 5, child: Row(children: [
+            Container(
+              width: 24, height: 24,
+              margin: const EdgeInsets.only(right: 8),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: (isEliminated ? gc.withOpacity(0.06) : gc.withOpacity(0.15)),
+                border: Border.all(
+                    color: isEliminated ? gc.withOpacity(0.2) : gc.withOpacity(0.6),
+                    width: 1),
+              ),
+              child: Center(child: Text(group,
+                  style: TextStyle(
+                      color: isEliminated ? gc.withOpacity(0.3) : gc,
+                      fontSize: 10, fontWeight: FontWeight.w900))),
+            ),
+            Expanded(child: Text(name,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    color: isEliminated
+                        ? Colors.white24
+                        : isTop2 ? Colors.white : Colors.white70,
+                    fontSize: isTop2 ? 15 : 14,
+                    fontWeight: isTop2 ? FontWeight.w900 : FontWeight.w700,
+                    decoration: isEliminated ? TextDecoration.lineThrough : null,
+                    decorationColor: Colors.white24))),
+            if (isEliminated)
+              Container(
+                margin: const EdgeInsets.only(left: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.10),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Colors.red.withOpacity(0.25), width: 1),
+                ),
+                child: const Text('OUT',
+                    style: TextStyle(
+                        color: Colors.redAccent,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1)),
+              ),
+          ])),
+
+          // M. (matches played)
+          cell('$mp', flex: 1, color: isEliminated ? Colors.white24 : Colors.white54),
+
+          // W
+          cell('$w', flex: 1,
+              color: isEliminated ? Colors.white24 : (w > 0 ? const Color(0xFF00FF88) : Colors.white24),
+              bold: w > 0 && !isEliminated),
+
+          // D
+          cell('$d', flex: 1,
+              color: isEliminated ? Colors.white24 : (d > 0 ? Colors.orange : Colors.white24)),
+
+          // L
+          cell('$l', flex: 1,
+              color: isEliminated ? Colors.red.withOpacity(0.35) : (l > 0 ? Colors.redAccent : Colors.white24)),
+
+          // Goals GF:GA
+          Expanded(flex: 2, child: Text('$gf:$ga',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  color: isEliminated ? Colors.white24 : Colors.white70,
+                  fontSize: 16, fontWeight: FontWeight.w600,
+                  letterSpacing: 0.5))),
+
+          // Dif
+          cell(gdStr, flex: 1, color: gdColor, bold: gd != 0 && !isEliminated),
+
+          // Pt.
+          Expanded(flex: 1, child: Container(
+            height: 30,
+            decoration: BoxDecoration(
+              color: isEliminated
+                  ? Colors.transparent
+                  : pts > 0
+                      ? const Color(0xFFFFD700).withOpacity(0.12)
+                      : Colors.transparent,
+              borderRadius: BorderRadius.circular(5),
+              border: (!isEliminated && pts > 0)
+                  ? Border.all(color: const Color(0xFFFFD700).withOpacity(0.3))
+                  : null,
+            ),
+            child: Center(child: Text('$pts',
+                style: TextStyle(
+                    color: isEliminated
+                        ? Colors.white24
+                        : pts > 0
+                            ? const Color(0xFFFFD700)
+                            : Colors.white24,
+                    fontSize: 16, fontWeight: FontWeight.w900))),
+          )),
+        ]),
+      );
+    }
+
+    // ── Divider between qualifiers and eliminated ──────────────────────────
+    Widget _eliminatedDivider() => Container(
+      color: const Color(0xFF0D0420),
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+      child: Row(children: [
+        Expanded(child: Container(height: 1,
+            color: Colors.red.withOpacity(0.25))),
+        Container(
+          margin: const EdgeInsets.symmetric(horizontal: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.red.withOpacity(0.10),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.red.withOpacity(0.30), width: 1),
+          ),
+          child: const Row(mainAxisSize: MainAxisSize.min, children: [
+            Text('💀', style: TextStyle(fontSize: 11)),
+            SizedBox(width: 6),
+            Text('ELIMINATED',
+                style: TextStyle(
+                    color: Colors.redAccent,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.5)),
+          ]),
+        ),
+        Expanded(child: Container(height: 1,
+            color: Colors.red.withOpacity(0.25))),
+      ]),
+    );
+
+    // ── Build the full item list ───────────────────────────────────────────
+    // Items: qualifiers rows + divider + eliminated rows
+    final totalItems = qualifiers.length + 1 + eliminated.length;
+
     return Column(children: [
-      // ── Column header row ─────────────────────────────────────────────
+      // Column header row
       Container(
         color: const Color(0xFF1A0A4A),
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
         child: Row(children: [
-          // #
           const SizedBox(width: 36,
               child: Text('#', style: TextStyle(color: Colors.white54,
                   fontSize: 14, fontWeight: FontWeight.w900))),
-          // Team
           const Expanded(flex: 5, child: Text('TEAM',
               style: TextStyle(color: Colors.white54, fontSize: 14,
                   fontWeight: FontWeight.w900, letterSpacing: 0.5))),
@@ -1275,159 +1523,21 @@ class _StandingsState extends State<Standings>
       ),
       const Divider(height: 1, color: Color(0xFF2A1A6A)),
 
-      // ── Rows ─────────────────────────────────────────────────────────
+      // Rows
       Expanded(child: ListView.builder(
-        itemCount: allTeams.length,
+        itemCount: totalItems,
         itemBuilder: (_, i) {
-          final team   = allTeams[i];
-          final rank   = i + 1;
-          final isEven = i % 2 == 0;
-          final gc     = team['groupColor']   as Color;
-          final name   = team['teamName']     as String;
-          final group  = team['group']        as String;
-          final mp     = team['matchesPlayed']as int;
-          final w      = team['wins']         as int;
-          final d      = team['draws']        as int;
-          final l      = team['losses']       as int;
-          final pts    = team['points']       as int;
-          final gf     = team['goalsFor']     as int;
-          final ga     = team['goalsAgainst'] as int;
-          final gd     = team['goalDiff']     as int;
-
-          final rankColor = _rankColor(rank);
-          final isTop3    = rank <= 3;
-          final gdStr = gd > 0 ? '+$gd' : '$gd';
-          final gdColor = gd > 0
-              ? const Color(0xFF00FF88)
-              : gd < 0 ? Colors.redAccent : Colors.white38;
-
-          Widget cell(String v, {int flex=1, Color? color, bool bold=false}) =>
-              Expanded(flex: flex, child: Text(v,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: color ?? Colors.white70,
-                      fontSize: 16,
-                      fontWeight: bold ? FontWeight.w900 : FontWeight.w600)));
-
-          return Container(
-            decoration: BoxDecoration(
-              gradient: isTop3
-                  ? LinearGradient(
-                      begin: Alignment.centerLeft,
-                      end: Alignment.centerRight,
-                      colors: [
-                        rankColor.withOpacity(rank == 1 ? 0.12 : rank == 2 ? 0.07 : 0.05),
-                        (isEven ? const Color(0xFF100838) : const Color(0xFF0C0628)),
-                      ],
-                    )
-                  : null,
-              color: isTop3 ? null : isEven
-                  ? const Color(0xFF100838)
-                  : const Color(0xFF0C0628),
-              border: isTop3
-                  ? Border(left: BorderSide(color: rankColor.withOpacity(0.7), width: 3))
-                  : null,
-            ),
-            padding: const EdgeInsets.symmetric(
-                horizontal: 24, vertical: 14),
-            child: Row(children: [
-              // Rank
-              SizedBox(width: 36, child: isTop3
-                  ? Container(
-                      width: 32, height: 32,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: RadialGradient(colors: [
-                          rankColor.withOpacity(0.3),
-                          rankColor.withOpacity(0.06),
-                        ]),
-                        border: Border.all(color: rankColor.withOpacity(0.7), width: 1.5),
-                        boxShadow: [BoxShadow(color: rankColor.withOpacity(0.35), blurRadius: 7)],
-                      ),
-                      child: Center(child: Text(
-                          rank == 1 ? '🥇' : rank == 2 ? '🥈' : '🥉',
-                          style: const TextStyle(fontSize: 16))),
-                    )
-                  : Container(
-                      width: 36, height: 36,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Colors.white.withOpacity(0.05),
-                        border: Border.all(color: Colors.white24, width: 1),
-                      ),
-                      child: Center(child: Text('$rank',
-                          style: const TextStyle(color: Colors.white70,
-                              fontSize: 18, fontWeight: FontWeight.w900))))),
-
-              // Group badge + Team name
-              Expanded(flex: 5, child: Row(children: [
-                Container(
-                  width: 24, height: 24,
-                  margin: const EdgeInsets.only(right: 8),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: gc.withOpacity(0.15),
-                    border: Border.all(color: gc.withOpacity(0.6), width: 1),
-                  ),
-                  child: Center(child: Text(group,
-                      style: TextStyle(color: gc,
-                          fontSize: 10, fontWeight: FontWeight.w900))),
-                ),
-                Expanded(child: Text(name,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                        color: isTop3 ? Colors.white : Colors.white70,
-                        fontSize: isTop3 ? 15 : 14,
-                        fontWeight: isTop3 ? FontWeight.w900 : FontWeight.w700))),
-              ])),
-
-              // M. (matches played)
-              cell('$mp', flex: 1, color: Colors.white54),
-
-              // W
-              cell('$w', flex: 1,
-                  color: w > 0 ? const Color(0xFF00FF88) : Colors.white24,
-                  bold: w > 0),
-
-              // D
-              cell('$d', flex: 1,
-                  color: d > 0 ? Colors.orange : Colors.white24),
-
-              // L
-              cell('$l', flex: 1,
-                  color: l > 0 ? Colors.redAccent : Colors.white24),
-
-              // Goals GF:GA
-              Expanded(flex: 2, child: Text('$gf:$ga',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white70,
-                      fontSize: 16, fontWeight: FontWeight.w600,
-                      letterSpacing: 0.5))),
-
-              // Dif
-              cell(gdStr, flex: 1, color: gdColor, bold: gd != 0),
-
-              // Pt.
-              Expanded(flex: 1, child: Container(
-                height: 30,
-                decoration: BoxDecoration(
-                  color: pts > 0
-                      ? const Color(0xFFFFD700).withOpacity(0.12)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(5),
-                  border: pts > 0
-                      ? Border.all(color: const Color(0xFFFFD700).withOpacity(0.3))
-                      : null,
-                ),
-                child: Center(child: Text('$pts',
-                    style: TextStyle(
-                        color: pts > 0
-                            ? const Color(0xFFFFD700)
-                            : Colors.white24,
-                        fontSize: 16, fontWeight: FontWeight.w900))),
-              )),
-            ]),
-          );
+          // Qualifier rows
+          if (i < qualifiers.length) {
+            return _buildRow(qualifiers[i], i + 1, false);
+          }
+          // Eliminated divider
+          if (i == qualifiers.length) {
+            return _eliminatedDivider();
+          }
+          // Eliminated rows
+          final elimIndex = i - qualifiers.length - 1;
+          return _buildRow(eliminated[elimIndex], elimIndex + 1, true);
         },
       )),
     ]);

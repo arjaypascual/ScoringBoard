@@ -201,6 +201,17 @@ class DBHelper {
     }
 
     print("✅ Migrations complete.");
+
+    // Migration X: category_id column on tbl_match
+    try {
+      await conn.execute("""
+        ALTER TABLE tbl_match
+        ADD COLUMN category_id INT NOT NULL DEFAULT 0
+      """);
+      print("✅ Migration X: category_id column added to tbl_match.");
+    } catch (_) {
+      print("ℹ️  Migration X: category_id already present.");
+    }
   }
   // Generates a random 6-char uppercase alphanumeric code, e.g. "A3F9KX"
   // Uses Random.secure() so codes are cryptographically unpredictable and
@@ -629,12 +640,12 @@ class DBHelper {
   }
 
   static Future<int> insertMatch(int scheduleId,
-      {String bracketType = 'run'}) async {
+      {String bracketType = 'run', int? categoryId}) async {
     final conn   = await getConnection();
     final result = await conn.execute("""
-      INSERT INTO tbl_match (schedule_id, bracket_type)
-      VALUES (:scheduleId, :bracketType)
-    """, {"scheduleId": scheduleId, "bracketType": bracketType});
+      INSERT INTO tbl_match (schedule_id, bracket_type, category_id)
+      VALUES (:scheduleId, :bracketType, :catId)
+    """, {"scheduleId": scheduleId, "bracketType": bracketType, "catId": categoryId ?? 0});
     return result.lastInsertID.toInt();
   }
 
@@ -1252,7 +1263,7 @@ class DBHelper {
 
         final schedId = await insertSchedule(
             startTime: fmt(t), endTime: fmt(t + durationMinutes));
-        final matchId = await insertMatch(schedId, bracketType: 'group');
+        final matchId = await insertMatch(schedId, bracketType: 'group', categoryId: categoryId);
         await insertTeamSchedule(
             matchId: matchId, roundId: round,
             teamId: int.parse(id1),
@@ -1383,7 +1394,7 @@ class DBHelper {
         for (int a = 0; a < matchesInSlot; a++) {
           final schedId = await insertSchedule(
               startTime: fmt(t), endTime: fmt(t + durationMinutes));
-          await insertMatch(schedId, bracketType: bracketType);
+          await insertMatch(schedId, bracketType: bracketType, categoryId: categoryId);
         }
         timeCursor = skipLunch(timeCursor + durationMinutes + intervalMinutes);
         print("✅ $bracketType slot ${s+1}/$slotsNeeded @ ${fmt(t)} ($matchesInSlot matches)");
@@ -1426,9 +1437,9 @@ class DBHelper {
     final scoreResult = await conn.execute("""
       SELECT
         ts.team_id,
-        COALESCE(SUM(sc.score_totalscore), 0) AS goals_for,
+        COALESCE(SUM(sc.score_independentscore), 0) AS goals_for,
         COALESCE(SUM(
-          (SELECT sc_opp.score_totalscore
+          (SELECT sc_opp.score_independentscore
            FROM tbl_teamschedule ts_opp
            LEFT JOIN tbl_score sc_opp
              ON sc_opp.match_id = ts_opp.match_id
@@ -1438,16 +1449,16 @@ class DBHelper {
            LIMIT 1)
         ), 0) AS goals_against,
         COALESCE(SUM(CASE
-          WHEN sc.score_totalscore IS NULL THEN 0
-          WHEN sc.score_totalscore > COALESCE(
-            (SELECT sc2.score_totalscore
+          WHEN sc.score_independentscore IS NULL THEN 0
+          WHEN sc.score_independentscore > COALESCE(
+            (SELECT sc2.score_independentscore
              FROM tbl_teamschedule ts2
              LEFT JOIN tbl_score sc2
                ON sc2.match_id = ts2.match_id AND sc2.team_id = ts2.team_id
              WHERE ts2.match_id = ts.match_id AND ts2.team_id != ts.team_id
              LIMIT 1), -1) THEN 3
-          WHEN sc.score_totalscore = COALESCE(
-            (SELECT sc2.score_totalscore
+          WHEN sc.score_independentscore = COALESCE(
+            (SELECT sc2.score_independentscore
              FROM tbl_teamschedule ts2
              LEFT JOIN tbl_score sc2
                ON sc2.match_id = ts2.match_id AND sc2.team_id = ts2.team_id
@@ -1622,8 +1633,9 @@ class DBHelper {
         'round-of-32','elimination','round-of-16','round-of-8',
         'quarter-finals','semi-finals','third-place','final'
       )
+      AND m.category_id = :catId
       ORDER BY s.schedule_start ASC, m.match_id ASC
-    """);
+    """, {"catId": categoryId});
     final allKoMatches = allKoResult.rows.map((r) => r.assoc()).toList();
 
     // Find which round is the first (earliest) KO round
