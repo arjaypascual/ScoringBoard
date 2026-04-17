@@ -183,17 +183,6 @@ class _TeamsPlayersState extends State<TeamsPlayers>
     final next    = !current;                // flip
     setState(() => _attMap[teamId] = next);
     await _saveAttendance(teamId, next);
-    if (mounted) {
-      final label = next ? 'Present ✅' : 'Absent ❌';
-      final color = next ? const Color(0xFF1A5C2A) : const Color(0xFF5C1A1A);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Team marked as $label'),
-        backgroundColor: color,
-        duration: const Duration(seconds: 2),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
-    }
   }
 
   // ── Mark all teams in a category ──────────────────────────────────────────

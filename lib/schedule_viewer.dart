@@ -524,13 +524,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           (int.tryParse(check.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0) > 0;
       if (!tableExists) return;
 
-      // Only load teams that are currently marked present
+      // Load all teams saved in groups (no presence filter — same as standings)
       final result = await conn.execute("""
         SELECT sg.group_label, sg.team_id, sg.team_name
         FROM tbl_soccer_groups sg
-        JOIN tbl_team t ON t.team_id = sg.team_id
         WHERE sg.category_id = ${_soccerCategoryId}
-          AND t.team_ispresent = 1
         ORDER BY sg.group_label, sg.id
       """);
       final rows = result.rows.map((r) => r.assoc()).toList();
@@ -2199,11 +2197,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           return
             'Seed 3 (overall) ──┐\n'
             '                   ├── ELIM 1 ──┐\n'
-            'Seed 4 (overall) ──┘            ├── SF Match 1 ──┐\n'
+            'Seed 6 (overall) ──┘            ├── SF Match 1 ──┐\n'
             'Seed 1 (overall) ── BYE ────────┘                ├── FINAL\n'
-            'Seed 5 (overall) ──┐                             |\n'
+            'Seed 4 (overall) ──┐                             |\n'
             '                   ├── ELIM 2 ──┐                |\n'
-            'Seed 6 (overall) ──┘            ├── SF Match 2 ──┘\n'
+            'Seed 5 (overall) ──┘            ├── SF Match 2 ──┘\n'
             'Seed 2 (overall) ── BYE ────────┘\n'
             '\nSF Losers → 3RD PLACE MATCH\n'
             '\n★ BYEs = top 2 by PTS → Goal Diff → Goals For';
@@ -4444,24 +4442,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             ]),
           );
         }),
-        // ── Footer ────────────────────────────────────────────────────────────
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.02),
-            borderRadius: const BorderRadius.vertical(bottom: Radius.circular(11)),
-            border: Border(top: BorderSide(color: groupCol.withOpacity(0.12), width: 1)),
-          ),
-          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Icon(Icons.leaderboard,
-                color: const Color(0xFF00FF88).withOpacity(0.5), size: 10),
-            const SizedBox(width: 4),
-            Text('See Standings for W/L/PTS',
-                style: TextStyle(
-                    color: const Color(0xFF00FF88).withOpacity(0.5),
-                    fontSize: 9, fontWeight: FontWeight.bold)),
-          ]),
-        ),
+
       ]),
     );
   }
