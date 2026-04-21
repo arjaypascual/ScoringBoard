@@ -1120,6 +1120,55 @@ class _StandingsState extends State<Standings>
       }
 
       if (mounted) setState(() => _finalRanking = ranking);
+
+      // ── Append group-stage eliminated teams (rank 3+ per group) ─────────
+      // Only add if the knockout ranking already has at least 1 entry (tournament started)
+      if (ranking.isNotEmpty && _soccerGroups.isNotEmpty) {
+        // Collect all teams that already appear in the ranking (qualified to KO)
+        final rankedIds = ranking.map((e) => e.teamId).toSet();
+
+        // Sort comparator matching group stage standings logic
+        int cmpGroup(_SoccerTeamStat a, _SoccerTeamStat b) {
+          if (b.points   != a.points)   return b.points.compareTo(a.points);
+          if (b.goalDiff != a.goalDiff) return b.goalDiff.compareTo(a.goalDiff);
+          if (b.goalsFor != a.goalsFor) return b.goalsFor.compareTo(a.goalsFor);
+          if (b.wins     != a.wins)     return b.wins.compareTo(a.wins);
+          return a.teamName.compareTo(b.teamName);
+        }
+
+        // Gather eliminated (rank 3+) from every group
+        final List<_SoccerTeamStat> eliminatedTeams = [];
+        for (final g in _soccerGroups) {
+          final sorted = List<_SoccerTeamStat>.from(g.teams)..sort(cmpGroup);
+          for (int i = 2; i < sorted.length; i++) {
+            if (!rankedIds.contains(sorted[i].teamId)) {
+              eliminatedTeams.add(sorted[i]);
+            }
+          }
+        }
+
+        // Sort the eliminated pool by overall performance
+        eliminatedTeams.sort((a, b) {
+          if (b.points   != a.points)   return b.points.compareTo(a.points);
+          if (b.goalDiff != a.goalDiff) return b.goalDiff.compareTo(a.goalDiff);
+          if (b.goalsFor != a.goalsFor) return b.goalsFor.compareTo(a.goalsFor);
+          if (b.wins     != a.wins)     return b.wins.compareTo(a.wins);
+          return a.teamName.compareTo(b.teamName);
+        });
+
+        final List<_FinalRankEntry> full = List.from(ranking);
+        int nextRank = (ranking.map((e) => e.rank).fold(0, (a, b) => a > b ? a : b)) + 1;
+        for (final t in eliminatedTeams) {
+          full.add(_FinalRankEntry(
+            rank:        nextRank++,
+            teamId:      t.teamId,
+            teamName:    t.teamName,
+            goals:       -1,
+            isEliminated: true,
+          ));
+        }
+        if (mounted) setState(() => _finalRanking = full);
+      }
     } catch (e) {
       print('_loadFinalRanking error: $e');
     }
@@ -1607,8 +1656,9 @@ class _StandingsState extends State<Standings>
     final sorted = List<_FinalRankEntry>.from(_finalRanking)
       ..sort((a, b) => a.rank.compareTo(b.rank));
 
-    final top3   = sorted.where((e) => e.rank <= 3).toList();
-    final others = sorted.where((e) => e.rank >  3).toList();
+    final top3      = sorted.where((e) => e.rank <= 3 && !e.isEliminated).toList();
+    final others    = sorted.where((e) => e.rank >  3 && !e.isEliminated).toList();
+    final eliminated = sorted.where((e) => e.isEliminated).toList();
 
     // Colors per rank
     Color _rc(int rank) {
@@ -1757,6 +1807,41 @@ class _StandingsState extends State<Standings>
             ),
             const SizedBox(height: 12),
             ...others.map((e) => _buildSlimRankCard(e, _rc(e.rank), _emoji(e.rank), _rlabel(e.rank))),
+          ],
+
+          // ══════════════════════════════════════════════════════════════════
+          // ELIMINATED — group stage losers with dimmed styling
+          // ══════════════════════════════════════════════════════════════════
+          if (eliminated.isNotEmpty) ...[
+            const SizedBox(height: 28),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Row(children: [
+                Expanded(child: Divider(color: Colors.red.withOpacity(0.25))),
+                Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 12),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withOpacity(0.10),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.red.withOpacity(0.30), width: 1),
+                  ),
+                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                    Text('💀', style: TextStyle(fontSize: 11)),
+                    SizedBox(width: 6),
+                    Text('ELIMINATED',
+                        style: TextStyle(
+                            color: Colors.redAccent,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 1.5)),
+                  ]),
+                ),
+                Expanded(child: Divider(color: Colors.red.withOpacity(0.25))),
+              ]),
+            ),
+            const SizedBox(height: 12),
+            ...eliminated.map((e) => _buildEliminatedRankCard(e)),
           ],
 
           // ── Footer note ──────────────────────────────────────────────────
@@ -1971,6 +2056,72 @@ class _StandingsState extends State<Standings>
     );
   }
 
+  // ── Eliminated rank card — dimmed styling ────────────────────────────────
+  Widget _buildEliminatedRankCard(_FinalRankEntry entry) {
+    String ordinal;
+    switch (entry.rank) {
+      case 1:  ordinal = 'CHAMPION';   break;
+      case 2:  ordinal = 'RUNNER-UP';  break;
+      case 3:  ordinal = '3RD PLACE';  break;
+      case 4:  ordinal = '4TH PLACE';  break;
+      default: ordinal = '${entry.rank}TH PLACE';
+    }
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF080518),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.red.withOpacity(0.18), width: 1),
+      ),
+      child: Row(children: [
+        Container(
+          width: 36, height: 36,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.red.withOpacity(0.07),
+            border: Border.all(color: Colors.red.withOpacity(0.25), width: 1),
+          ),
+          child: Center(child: Text(
+            "${entry.rank}",
+            style: const TextStyle(
+                color: Colors.redAccent,
+                fontSize: 13, fontWeight: FontWeight.w900),
+          )),
+        ),
+        const SizedBox(width: 12),
+        Expanded(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(ordinal,
+                style: TextStyle(
+                    color: Colors.red.withOpacity(0.4),
+                    fontSize: 9, fontWeight: FontWeight.w900,
+                    letterSpacing: 1)),
+            const SizedBox(height: 2),
+            Text(entry.teamName,
+                style: const TextStyle(
+                    color: Colors.white30,
+                    fontSize: 16, fontWeight: FontWeight.w700)),
+          ],
+        )),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: Colors.red.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(5),
+            border: Border.all(color: Colors.red.withOpacity(0.2)),
+          ),
+          child: const Text('OUT',
+              style: TextStyle(
+                  color: Colors.redAccent,
+                  fontSize: 9, fontWeight: FontWeight.w900,
+                  letterSpacing: 1)),
+        ),
+      ]),
+    );
+  }
+
   // ── Sparkle dot helper ────────────────────────────────────────────────────
   Widget _sparkle() => Container(
     width: 4, height: 4,
@@ -2056,16 +2207,21 @@ class _StandingsState extends State<Standings>
       rows.add(_soccerGroups.sublist(i, (i + cols).clamp(0, _soccerGroups.length)));
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: rows.map((rowGroups) => Padding(
-        padding: const EdgeInsets.only(bottom: 12),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start,
-          children: rowGroups.map((g) => Expanded(
+      children: rows.map((rowGroups) {
+        final filledChildren = <Widget>[
+          ...rowGroups.map((g) => Expanded(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 5),
               child: _buildGroupStandingCard(g),
             ),
-          )).toList()),
-      )).toList(),
+          )),
+          ...List.generate(cols - rowGroups.length, (_) => const Expanded(child: SizedBox())),
+        ];
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: filledChildren),
+        );
+      }).toList(),
     );
   }
 
@@ -2740,12 +2896,14 @@ class _FinalRankEntry {
   final int    rank;
   final int    teamId;
   final String teamName;
-  final int    goals;   // -1 = pending/not yet played
+  final int    goals;        // -1 = pending/not yet played
+  final bool   isEliminated; // true = eliminated at group stage
   const _FinalRankEntry({
     required this.rank,
     required this.teamId,
     required this.teamName,
     required this.goals,
+    this.isEliminated = false,
   });
 }
 

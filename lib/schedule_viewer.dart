@@ -848,6 +848,19 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
   }
 
+  void _rebuildSoccerTabCtrl() {
+    if (!mounted) return;
+    final tabCount = 3;
+    if ((_soccerTabCtrl?.length ?? 0) != tabCount) {
+      final prev = _soccerTabCtrl?.index ?? 0;
+      _soccerTabCtrl?.dispose();
+      _soccerTabCtrl = TabController(
+          length: tabCount, vsync: this,
+          initialIndex: prev.clamp(0, tabCount - 1));
+      setState(() {});
+    }
+  }
+
   void _setGroupMatchResult(GroupMatch match, GroupTeam winner, int s1, int s2) {
     final wasLoser1 = !match.isDone
         ? null
@@ -1047,40 +1060,40 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     return rounds;
   }
 
-  // Real ELIM match count (matches actually played, excluding BYEs).
-  //   3 grp: 6 advancing, 2 BYEs → 4 play ELIM → 2 matches → 2 winners to SF
-  //   5 grp: 10 advancing, 2 BYEs → 8 play ELIM → need 4 for QF → 2 ELIM matches
-  //   6 grp: 12 advancing, 2 BYEs → 10 play ELIM → need 4 for QF → 4 ELIM matches
-  //   7 grp: 14 advancing, 2 BYEs → 12 play ELIM → need 4 for QF → 6 ELIM matches
+  // Real ELIM match count — must exactly match db_helper.dart advanceToKnockout math.
+  // DB formula:
+  //   advTeams = numGroups * 2
+  //   bSize    = nextPow2(advTeams)
+  //   halfB    = bSize / 2
+  //   elimCnt  = advTeams - halfB   (real ELIM matches)
+  //   byeCnt   = halfB - elimCnt    (teams that get BYEs)
+  //
+  //  2 grp →  4 adv → bSize=4  halfB=2 elim=2  byes=0
+  //  3 grp →  6 adv → bSize=8  halfB=4 elim=2  byes=2
+  //  4 grp →  8 adv → bSize=8  halfB=4 elim=4  byes=0
+  //  5 grp → 10 adv → bSize=16 halfB=8 elim=2  byes=6
+  //  6 grp → 12 adv → bSize=16 halfB=8 elim=4  byes=4
+  //  7 grp → 14 adv → bSize=16 halfB=8 elim=6  byes=2
+  //  8 grp → 16 adv → bSize=16 halfB=8 elim=8  byes=0
   static int realElimMatches(int numGroups) {
-    final advancing = numGroups * 2;
-    if (advancing <= 4)  return 0; // SF direct
-    if (advancing == 6)  return 2; // 3 grp: 4 teams play → 2 matches → 2 to SF
-    if (advancing == 8)  return 0; // QF direct
-    if (advancing == 16) return 0; // QF direct
-    // 5,6,7 groups: top 2 BYE to QF; rest play ELIM to fill remaining QF slots
-    // QF has 4 slots; 2 taken by BYEs; 2 winners needed from ELIM
-    // ELIM matches = (advancing - 2) / 2 ... but we need exactly 2 QF spots
-    // So ELIM real = (advancing - 2) - 2 = advancing - 4
-    // i.e. the non-bye teams (advancing-2) play each other; winners (half) go to QF
-    return (advancing - 2) ~/ 2; // winners = half of non-bye teams
+    final adv = numGroups * 2;
+    int bSize = 1; while (bSize < adv) bSize <<= 1;
+    final halfB = bSize ~/ 2;
+    return adv - halfB;
   }
 
-  // BYE count = always 2 (top 2 seeds) whenever an ELIM round exists.
+  // BYE count — teams that skip ELIM and go directly to the next round.
   static int byeCount(int numGroups) {
-    final advancing = numGroups * 2;
-    if (advancing <= 4)  return 0; // SF direct, no ELIM
-    if (advancing == 8)  return 0; // QF direct, no ELIM
-    if (advancing == 16) return 0; // QF direct, no ELIM
-    return 2; // top 2 seeds always BYE past ELIM
+    final adv = numGroups * 2;
+    int bSize = 1; while (bSize < adv) bSize <<= 1;
+    final halfB = bSize ~/ 2;
+    final elim  = adv - halfB;
+    return halfB - elim;
   }
 
   // Total ELIM slot count (real + bye) — kept for legacy callers.
   static int eliminationMatchCount(int advancing) {
     final ng = advancing ~/ 2;
-    if (advancing <= 4)  return 0;
-    if (advancing == 8)  return 0;
-    if (advancing == 16) return 0;
     return realElimMatches(ng) + byeCount(ng);
   }
 
@@ -1252,12 +1265,18 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       Map<String, dynamic> category, int catId,
       List<Map<String, dynamic>> matches) {
     final groupsDone = _allGroupMatchesDone() && _groupsGenerated;
+    final tabCount = 3;
+    // Keep tab controller in sync with tab count
+    if ((_soccerTabCtrl?.length ?? 0) != tabCount) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _rebuildSoccerTabCtrl());
+    }
     return Column(children: [
       _buildCategoryTitleBar(category, 'SOCCER', matches),
       Container(
         color: const Color(0xFF130742),
         child: TabBar(
           controller: _soccerTabCtrl,
+          isScrollable: true,
           indicatorColor: const Color(0xFF00FF88),
           indicatorWeight: 3,
           labelColor: const Color(0xFF00FF88),
@@ -1300,7 +1319,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 _phaseBadge('PREVIEW', Colors.white24)
               else if (!groupsDone)
                 _phaseBadge('PREVIEW', const Color(0xFF00CFFF))
-
               else
                 _phaseBadge('LIVE', const Color(0xFF00FF88)),
             ])),
@@ -1313,7 +1331,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           children: [
             _buildGroupsTab(),
             _buildSoccerScheduleTab(catId, matches),
-            _buildBracketTab(),   // Always rendered — preview or live
+            _buildBracketTab(),
           ],
         ),
       ),
@@ -2169,9 +2187,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         case 3:
           return 'The top 2 teams by OVERALL standings (best points → goal difference → goals for across all groups) get BYEs directly into SF. The remaining 4 teams play 2 ELIM matches.';
         case 5:
-          return 'Overall 1st and 2nd seeds (best records across all groups) get BYEs into QF. The remaining 8 teams play ELIM.';
+          return 'Overall top 6 seeds get BYEs directly into QF (slots 1-3 top, slots 2-4 bottom). The remaining 4 teams (Seeds 7-10) play 2 ELIM matches → winners fill QF outer slots.';
         case 6:
-          return 'Overall top 2 seeds get BYEs into QF. Remaining 10 teams play 4 ELIM matches.';
+          return 'Overall top 4 seeds get BYEs directly into QF (slots 1 & 4 outer, 2 & 3 inner). The remaining 8 teams (Seeds 5-12) play 4 ELIM matches → winners fill the remaining QF slots.';
         case 7:
           return 'Overall top 2 seeds get BYEs into QF. Remaining 12 teams play 6 ELIM matches.';
         case 9:
@@ -2222,43 +2240,81 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             '\nSF Losers → 3RD PLACE MATCH';
         case 5:
           return
-            '── BYE ──────────────────────────────── QF slot 1\n'
-            '(Overall 1st seed skips ELIM)\n'
-            '── BYE ──────────────────────────────── QF slot 2\n'
-            '(Overall 2nd seed skips ELIM)\n\n'
-            'Remaining 8 teams play 2 ELIM matches:\n'
-            'Team 3 ──┐\n'
-            '         ├── ELIM 1 ──── QF slot 3\n'
-            'Team 4 ──┘\n'
-            'Team 5 ──┐\n'
-            '         ├── ELIM 2 ──── QF slot 4\n'
-            'Team 6 ──┘\n'
-            '\nQF → SF → 3RD / FINAL';
+            'Seed 1 ── BYE ─────────────────────────────── QF slot 1 (outer top)\n'
+            'Seed 7  ──┐\n'
+            '          ├── ELIM 1 ────── winner fills QF slot 1\n'
+            'Seed 10 ──┘\n'
+            '\n'
+            'Seed 3 ── BYE ─────────────────────────────── QF slot 2 (inner)\n'
+            'Seed 6 ── BYE ─────────────────────────────── QF slot 2 (inner)\n'
+            '\n'
+            'Seed 4 ── BYE ─────────────────────────────── QF slot 3 (inner)\n'
+            'Seed 5 ── BYE ─────────────────────────────── QF slot 3 (inner)\n'
+            '\n'
+            'Seed 8  ──┐\n'
+            '          ├── ELIM 2 ────── winner fills QF slot 4\n'
+            'Seed 9  ──┘\n'
+            'Seed 2 ── BYE ─────────────────────────────── QF slot 4 (outer bottom)\n'
+            '\n6 BYE seeds (Seeds 1–6) skip ELIM → go directly to QF\n'
+            '2 ELIM matches: Seed 7 vs 10,  Seed 8 vs 9\n'
+            '\nQF → SF → 3RD PLACE / FINAL\n'
+            '\n★ Seeds ranked by overall: PTS → Goal Diff → Goals For';
         case 6:
           return
-            '── BYE ──────────────────────────────── QF slot 1\n'
-            '── BYE ──────────────────────────────── QF slot 2\n\n'
-            'Remaining 10 teams play 4 ELIM matches:\n'
-            'Team 3 ──┐\n'
-            '         ├── ELIM 1 ──── QF slot 3\n'
-            'Team 4 ──┘\n'
-            'Team 5 ──┐\n'
-            '         ├── ELIM 2 ──── QF slot 4\n'
-            'Team 6 ──┘\n'
-            'Team 7 ──┐\n'
-            '         ├── ELIM 3 (extra, feeds QF)\n'
-            'Team 8 ──┘\n'
-            'Team 9 ──┐\n'
-            '         ├── ELIM 4 (extra, feeds QF)\n'
-            'Team 10 ─┘\n'
-            '\nQF → SF → 3RD / FINAL';
+            'Seed 1 ── BYE ─────────────────────────────── QF slot 1 (outer top)\n'
+            'Seed 5  ──┐\n'
+            '          ├── ELIM 1 ────── winner fills QF slot 1\n'
+            'Seed 12 ──┘\n'
+            '\n'
+            'Seed 3 ── BYE ─────────────────────────────── QF slot 2 (inner)\n'
+            'Seed 6  ──┐\n'
+            '          ├── ELIM 2 ────── winner fills QF slot 2\n'
+            'Seed 11 ──┘\n'
+            '\n'
+            'Seed 4 ── BYE ─────────────────────────────── QF slot 3 (inner)\n'
+            'Seed 7  ──┐\n'
+            '          ├── ELIM 3 ────── winner fills QF slot 3\n'
+            'Seed 10 ──┘\n'
+            '\n'
+            'Seed 8  ──┐\n'
+            '          ├── ELIM 4 ────── winner fills QF slot 4\n'
+            'Seed 9  ──┘\n'
+            'Seed 2 ── BYE ─────────────────────────────── QF slot 4 (outer bottom)\n'
+            '\n4 BYE seeds (Seeds 1–4) skip ELIM → go directly to QF\n'
+            '4 ELIM matches: 5v12, 6v11, 7v10, 8v9\n'
+            '\nQF → SF → 3RD PLACE / FINAL\n'
+            '\n★ Seeds ranked by overall: PTS → Goal Diff → Goals For';
         case 7:
           return
-            '── BYE ──────────────────────────────── QF slot 1\n'
-            '── BYE ──────────────────────────────── QF slot 2\n\n'
-            'Remaining 12 teams play 6 ELIM matches → 6 winners\n'
-            '(6 winners + 2 BYEs = 8 → fills QF)\n'
-            '\nQF → SF → 3RD / FINAL';
+            'Seed 1 ── BYE ─────────────────────────────── QF slot 1 (outer top)\n'
+            'Seed 5  ──┐\n'
+            '          ├── ELIM 1 ────── winner fills QF slot 1\n'
+            'Seed 14 ──┘\n'
+            '\n'
+            'Seed 3  ──┐\n'
+            '          ├── ELIM 2 ────── winner fills QF slot 2\n'
+            'Seed 12 ──┘\n'
+            '\n'
+            'Seed 4  ──┐\n'
+            '          ├── ELIM 3 ────── winner fills QF slot 3\n'
+            'Seed 11 ──┘\n'
+            '\n'
+            'Seed 6  ──┐\n'
+            '          ├── ELIM 4 ────── winner fills QF slot 4\n'
+            'Seed 9  ──┘\n'
+            '\n'
+            'Seed 7  ──┐\n'
+            '          ├── ELIM 5 ────── winner fills QF\n'
+            'Seed 8  ──┘\n'
+            '\n'
+            'Seed 13 ──┐\n'
+            '          ├── ELIM 6 ────── winner fills QF\n'
+            'Seed 10 ──┘\n'
+            'Seed 2 ── BYE ─────────────────────────────── QF slot 4 (outer bottom)\n'
+            '\n2 BYE seeds (Seeds 1 & 2) skip ELIM → go directly to QF\n'
+            '6 ELIM matches: 12 teams battle for remaining 6 QF spots\n'
+            '\nQF → SF → 3RD PLACE / FINAL\n'
+            '\n★ Seeds ranked by overall: PTS → Goal Diff → Goals For';
         case 8:
           return
             'Group A (1st) ──┐\n'
@@ -2864,21 +2920,21 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     : isWin  ? const Color(0xFF00FF88)
                     : isLose ? Colors.white24
                     : Colors.white70,
-                fontSize: 11,
-                fontWeight: isWin ? FontWeight.w700 : FontWeight.w400,
+                fontSize: 15,
+                fontWeight: isWin ? FontWeight.w800 : FontWeight.w500,
               ),
             )),
             // Arrow for winner (non-final)
             if (isWin && !isFinal)
               const Icon(Icons.arrow_forward_ios_rounded,
-                  color: Color(0xFF00FF88), size: 10),
+                  color: Color(0xFF00FF88), size: 13),
             // Trophy for final winner
             if (isFinal && isWin)
               const Icon(Icons.emoji_events,
-                  color: Color(0xFFFFD700), size: 13),
+                  color: Color(0xFFFFD700), size: 17),
             // Score
             Container(
-              width: 24, height: 20,
+              width: 30, height: 24,
               alignment: Alignment.center,
               margin: const EdgeInsets.only(left: 4),
               decoration: BoxDecoration(
@@ -2902,10 +2958,10 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                           color: isWin
                               ? const Color(0xFF00FF88)
                               : Colors.white30,
-                          fontSize: 11, fontWeight: FontWeight.bold))
+                          fontSize: 14, fontWeight: FontWeight.bold))
                   : Icon(hasTeams ? Icons.touch_app : Icons.remove,
                       color: color.withOpacity(hasTeams ? 0.4 : 0.15),
-                      size: 9),
+                      size: 11),
             ),
           ]),
         ),
@@ -3220,7 +3276,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           children: [
             _buildGroupScheduleView(groupRows, arenaCount, useSingleColumn),
             if (koRows.isNotEmpty)
-              _buildKnockoutView(koRows),
+              _buildKnockoutView(koRows, arenaCount: arenaCount),
           ],
         )),
       ]),
@@ -3404,66 +3460,114 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                     fontSize: 11,
                                     fontWeight: FontWeight.w900))),
                           ),
+                          // ── Team names row — always visible ───────────────
                           Padding(
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 8, vertical: 8),
-                            child: isDone
-                                ? const Center(child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(Icons.check_circle,
-                                          color: Colors.green, size: 14),
-                                      SizedBox(width: 6),
-                                      Text('DONE', style: TextStyle(
-                                          color: Colors.green,
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w900,
-                                          letterSpacing: 1)),
-                                    ]))
-                                : Row(children: [
-                                    Expanded(child: Text(
-                                        team1.isNotEmpty ? team1 : '—',
-                                        textAlign: TextAlign.right,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 12,
-                                            fontWeight:
-                                                FontWeight.w600))),
-                                    Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 6),
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 5, vertical: 3),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFF00CFFF)
-                                              .withOpacity(0.1),
-                                          borderRadius:
-                                              BorderRadius.circular(4),
-                                          border: Border.all(
-                                              color:
-                                                  const Color(0xFF00CFFF)
-                                                      .withOpacity(0.3)),
-                                        ),
-                                        child: const Text('vs',
-                                            style: TextStyle(
-                                                color: Color(0xFF00CFFF),
-                                                fontSize: 10,
-                                                fontWeight:
-                                                    FontWeight.bold))),
+                            child: Row(children: [
+                              Expanded(child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    team1.isNotEmpty ? team1 : '—',
+                                    textAlign: TextAlign.center,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: isDone
+                                          ? (t1Wins
+                                              ? Colors.white.withOpacity(0.55)
+                                              : Colors.white.withOpacity(0.25))
+                                          : Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: t1Wins
+                                          ? FontWeight.w900
+                                          : FontWeight.w600,
                                     ),
-                                    Expanded(child: Text(
-                                        team2.isNotEmpty ? team2 : '—',
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 12,
-                                            fontWeight:
-                                                FontWeight.w600))),
-                                  ]),
+                                  ),
+                                  if (isDone && t1Wins) ...[
+                                    const SizedBox(height: 3),
+                                    Row(mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                      const Icon(Icons.emoji_events,
+                                          color: Color(0xFFFFD700), size: 10),
+                                      const SizedBox(width: 3),
+                                      Text('Winner',
+                                          style: TextStyle(
+                                              color: const Color(0xFFFFD700)
+                                                  .withOpacity(0.8),
+                                              fontSize: 9,
+                                              fontWeight: FontWeight.bold)),
+                                    ]),
+                                  ],
+                                ],
+                              )),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 5, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: isDone
+                                        ? Colors.white.withOpacity(0.04)
+                                        : const Color(0xFF00CFFF)
+                                            .withOpacity(0.1),
+                                    borderRadius:
+                                        BorderRadius.circular(4),
+                                    border: Border.all(
+                                        color: isDone
+                                            ? Colors.white.withOpacity(0.1)
+                                            : const Color(0xFF00CFFF)
+                                                .withOpacity(0.3)),
+                                  ),
+                                  child: Text('VS',
+                                      style: TextStyle(
+                                          color: isDone
+                                              ? Colors.white.withOpacity(0.2)
+                                              : const Color(0xFF00CFFF),
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w900,
+                                          letterSpacing: 1))),
+                              ),
+                              Expanded(child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    team2.isNotEmpty ? team2 : '—',
+                                    textAlign: TextAlign.center,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: isDone
+                                          ? (t2Wins
+                                              ? Colors.white.withOpacity(0.55)
+                                              : Colors.white.withOpacity(0.25))
+                                          : Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: t2Wins
+                                          ? FontWeight.w900
+                                          : FontWeight.w600,
+                                    ),
+                                  ),
+                                  if (isDone && t2Wins) ...[
+                                    const SizedBox(height: 3),
+                                    Row(mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                      const Icon(Icons.emoji_events,
+                                          color: Color(0xFFFFD700), size: 10),
+                                      const SizedBox(width: 3),
+                                      Text('Winner',
+                                          style: TextStyle(
+                                              color: const Color(0xFFFFD700)
+                                                  .withOpacity(0.8),
+                                              fontSize: 9,
+                                              fontWeight: FontWeight.bold)),
+                                    ]),
+                                  ],
+                                ],
+                              )),
+                            ]),
                           ),
                           GestureDetector(
                             onTap: !isDone && gm != null
@@ -3560,7 +3664,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
 
   // ── FIFA Knockout Bracket View ───────────────────────────────────────────────
-  Widget _buildKnockoutView(List<Map<String, dynamic>> koRows) {
+  Widget _buildKnockoutView(List<Map<String, dynamic>> koRows, {int arenaCount = 1}) {
     // Dynamic round order based on actual group count
     final koNumGroups  = _groups.isNotEmpty ? _groups.length : 8;
     final roundOrder   = _fifaRoundOrder(koNumGroups, totalRegisteredTeams: _soccerTeams.length);
@@ -3615,10 +3719,10 @@ class _ScheduleViewerState extends State<ScheduleViewer>
               .compareTo((b['matchId'] as int?) ?? 0);
         });
 
-        // Group by time slot, then chunk into rows of max 2 arenas each.
-        // This ensures QF (4 matches) shows as 2 rows of 2 instead of
-        // 1 row of 3 + 1 row of 1 when 3 matches share the same time.
-        const int maxArenasPerRow = 2;
+        // Use the tournament's total arena count (same as group stage).
+        // This ensures KO matches are laid out across all arenas, not just 1.
+        final int maxArenasPerRow = arenaCount > 1 ? arenaCount : 1;
+
         final Map<String, List<Map<String, dynamic>>> byTimeMap = {};
         for (final m in matches) {
           final t = (m['time'] as String? ?? '').isNotEmpty
@@ -3636,10 +3740,33 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         final List<List<Map<String, dynamic>>> rows = [];
         final List<String> timeKeys = [];
         for (final t in sortedTimeKeys) {
-          final slotMatches = byTimeMap[t]!;
-          for (int i = 0; i < slotMatches.length; i += maxArenasPerRow) {
-            final chunk = slotMatches.sublist(
-                i, (i + maxArenasPerRow).clamp(0, slotMatches.length));
+          // Reorder: fully-seeded matches (2 teams) go to the OUTSIDE (first & last),
+          // TBD matches (missing 1 or both teams) go to the CENTER.
+          // e.g. [Seeded, TBD, TBD, Seeded] instead of [Seeded, Seeded, TBD, TBD]
+          final all = List<Map<String, dynamic>>.from(byTimeMap[t]!);
+          final seeded = all.where((m) =>
+              (m['team1'] as String? ?? '').isNotEmpty &&
+              (m['team2'] as String? ?? '').isNotEmpty).toList();
+          final tbds = all.where((m) =>
+              (m['team1'] as String? ?? '').isEmpty ||
+              (m['team2'] as String? ?? '').isEmpty).toList();
+
+          // Interleave: seeded on outside, TBD in center
+          final reordered = <Map<String, dynamic>>[];
+          if (seeded.length >= 2) {
+            // First seeded on left, TBDs in middle, last seeded on right
+            reordered.add(seeded.first);
+            reordered.addAll(tbds);
+            reordered.addAll(seeded.skip(1));
+          } else {
+            // Not enough seeded to split — just seeded first then TBDs
+            reordered.addAll(seeded);
+            reordered.addAll(tbds);
+          }
+
+          for (int i = 0; i < reordered.length; i += maxArenasPerRow) {
+            final chunk = reordered.sublist(
+                i, (i + maxArenasPerRow).clamp(0, reordered.length));
             rows.add(chunk);
             timeKeys.add(t);
           }
@@ -3685,13 +3812,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             ]),
           ),
 
-          // ── Arena headers (based on max matches per row) ──────────────
+          // ── Arena headers (based on actual arena count) ──────────────
           Container(
             color: const Color(0xFF080618),
             padding: const EdgeInsets.fromLTRB(86, 6, 16, 6),
             child: Row(
-              children: List.generate(
-                  rows.isEmpty ? 0 : rows.map((r) => r.length).reduce((a,b) => a>b?a:b), (a) =>
+              children: List.generate(maxArenasPerRow, (a) =>
                 Expanded(child: Container(
                   margin: const EdgeInsets.symmetric(horizontal: 3),
                   padding: const EdgeInsets.symmetric(vertical: 4),
@@ -3728,7 +3854,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     bottom: BorderSide(color: Color(0xFF140E38), width: 1)),
               ),
               padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
-              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: rowMatches.length < maxArenasPerRow
+                      ? MainAxisAlignment.center
+                      : MainAxisAlignment.start,
+                  children: [
                 // Row number
                 SizedBox(width: 28,
                   child: Center(child: Padding(
@@ -3736,7 +3866,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     child: Text('${rowIdx + 1}',
                         style: TextStyle(
                             color: Colors.white.withOpacity(0.3),
-                            fontSize: 12, fontWeight: FontWeight.bold)),
+                            fontSize: 16, fontWeight: FontWeight.bold)),
                   )),
                 ),
                 // Time
@@ -3748,7 +3878,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                       style: TextStyle(
                           color: rowTime.isNotEmpty
                               ? const Color(0xFF00CFFF) : Colors.white24,
-                          fontSize: 12, fontWeight: FontWeight.w600),
+                          fontSize: 16, fontWeight: FontWeight.w700),
                     ),
                   ),
                 ),
@@ -3797,94 +3927,210 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                           ),
                           child: Center(child: Text(roundLabel,
                               style: TextStyle(color: accentColor,
-                                  fontSize: 10, fontWeight: FontWeight.w900))),
+                                  fontSize: 14, fontWeight: FontWeight.w900))),
                         ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 8),
-                          child: hasScore
-                              ? const Center(child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(Icons.check_circle,
-                                        color: Colors.green, size: 14),
-                                    SizedBox(width: 6),
-                                    Text('DONE',
-                                        style: TextStyle(
-                                            color: Colors.green,
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w900,
-                                            letterSpacing: 1)),
-                                  ]))
-                              : Row(children: [
-                                  Expanded(child: Text(
-                                    team1.isEmpty ? 'TBD' : team1,
-                                    textAlign: TextAlign.right,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                        color: team1.isEmpty
-                                            ? Colors.white24
-                                            : Colors.white,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600),
-                                  )),
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 6),
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 5, vertical: 3),
-                                      decoration: BoxDecoration(
-                                        color: accentColor.withOpacity(0.1),
-                                        borderRadius:
-                                            BorderRadius.circular(4),
-                                        border: Border.all(
-                                            color: accentColor
-                                                .withOpacity(0.3)),
-                                      ),
-                                      child: Text('vs',
-                                          style: TextStyle(
-                                              color: accentColor,
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.bold))),
-                                  ),
-                                  Expanded(child: Text(
-                                    team2.isEmpty ? 'TBD' : team2,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                        color: team2.isEmpty
-                                            ? Colors.white24
-                                            : Colors.white,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600),
-                                  )),
-                                ]),
-                        ),
+                        // Team 1 row
                         Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(vertical: 3),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 7),
                           decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.03),
-                            borderRadius: const BorderRadius.vertical(
-                                bottom: Radius.circular(8)),
+                            color: win1
+                                ? const Color(0xFF00FF88).withOpacity(0.10)
+                                : win2
+                                    ? Colors.black.withOpacity(0.15)
+                                    : Colors.transparent,
                           ),
-                          child: Center(child: Text(
-                            team1.isEmpty || team2.isEmpty ? 'TBD' : 'Pending',
-                            style: TextStyle(
-                                color: team1.isEmpty || team2.isEmpty
-                                    ? Colors.white12 : Colors.white24,
-                                fontSize: 9,
-                                fontWeight: FontWeight.bold))),
+                          child: Row(children: [
+                            Expanded(child: Text(
+                              team1.isEmpty ? 'TBD' : team1,
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 2,
+                              style: TextStyle(
+                                color: team1.isEmpty ? Colors.white24
+                                    : win1  ? const Color(0xFF00FF88)
+                                    : win2  ? Colors.white24
+                                    : Colors.white70,
+                                fontSize: 15,
+                                fontWeight: win1 ? FontWeight.w800 : FontWeight.w500,
+                              ),
+                            )),
+                            if (win1 && roundLabel != 'FINAL')
+                              const Icon(Icons.arrow_forward_ios_rounded,
+                                  color: Color(0xFF00FF88), size: 13),
+                            if (win1 && roundLabel == 'FINAL')
+                              const Icon(Icons.emoji_events,
+                                  color: Color(0xFFFFD700), size: 17),
+                            Container(
+                              width: 30, height: 24,
+                              alignment: Alignment.center,
+                              margin: const EdgeInsets.only(left: 4),
+                              decoration: BoxDecoration(
+                                color: hasScore
+                                    ? (win1
+                                        ? const Color(0xFF00FF88).withOpacity(0.18)
+                                        : Colors.white.withOpacity(0.04))
+                                    : accentColor.withOpacity(0.06),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(
+                                  color: hasScore
+                                      ? (win1
+                                          ? const Color(0xFF00FF88).withOpacity(0.4)
+                                          : Colors.white10)
+                                      : accentColor.withOpacity(0.18),
+                                ),
+                              ),
+                              child: hasScore
+                                  ? Text('${g1 ?? '-'}',
+                                      style: TextStyle(
+                                          color: win1
+                                              ? const Color(0xFF00FF88)
+                                              : Colors.white30,
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.bold))
+                                  : Icon(
+                                      team1.isNotEmpty && team2.isNotEmpty
+                                          ? Icons.touch_app
+                                          : Icons.remove,
+                                      color: accentColor.withOpacity(
+                                          team1.isNotEmpty && team2.isNotEmpty ? 0.4 : 0.15),
+                                      size: 11),
+                            ),
+                          ]),
                         ),
+                        // Divider
+                        Container(height: 1, color: accentColor.withOpacity(0.18)),
+                        // Team 2 row
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 7),
+                          decoration: BoxDecoration(
+                            color: win2
+                                ? const Color(0xFF00FF88).withOpacity(0.10)
+                                : win1
+                                    ? Colors.black.withOpacity(0.15)
+                                    : Colors.transparent,
+                          ),
+                          child: Row(children: [
+                            Expanded(child: Text(
+                              team2.isEmpty ? 'TBD' : team2,
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 2,
+                              style: TextStyle(
+                                color: team2.isEmpty ? Colors.white24
+                                    : win2  ? const Color(0xFF00FF88)
+                                    : win1  ? Colors.white24
+                                    : Colors.white70,
+                                fontSize: 15,
+                                fontWeight: win2 ? FontWeight.w800 : FontWeight.w500,
+                              ),
+                            )),
+                            if (win2 && roundLabel != 'FINAL')
+                              const Icon(Icons.arrow_forward_ios_rounded,
+                                  color: Color(0xFF00FF88), size: 13),
+                            if (win2 && roundLabel == 'FINAL')
+                              const Icon(Icons.emoji_events,
+                                  color: Color(0xFFFFD700), size: 17),
+                            Container(
+                              width: 30, height: 24,
+                              alignment: Alignment.center,
+                              margin: const EdgeInsets.only(left: 4),
+                              decoration: BoxDecoration(
+                                color: hasScore
+                                    ? (win2
+                                        ? const Color(0xFF00FF88).withOpacity(0.18)
+                                        : Colors.white.withOpacity(0.04))
+                                    : accentColor.withOpacity(0.06),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(
+                                  color: hasScore
+                                      ? (win2
+                                          ? const Color(0xFF00FF88).withOpacity(0.4)
+                                          : Colors.white10)
+                                      : accentColor.withOpacity(0.18),
+                                ),
+                              ),
+                              child: hasScore
+                                  ? Text('${g2 ?? '-'}',
+                                      style: TextStyle(
+                                          color: win2
+                                              ? const Color(0xFF00FF88)
+                                              : Colors.white30,
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.bold))
+                                  : Icon(
+                                      team1.isNotEmpty && team2.isNotEmpty
+                                          ? Icons.touch_app
+                                          : Icons.remove,
+                                      color: accentColor.withOpacity(
+                                          team1.isNotEmpty && team2.isNotEmpty ? 0.4 : 0.15),
+                                      size: 11),
+                            ),
+                          ]),
+                        ),
+                        // Winner footer
+                        if (hasScore) ...[
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: roundLabel == 'FINAL'
+                                  ? const Color(0xFFFFD700).withOpacity(0.07)
+                                  : const Color(0xFF00FF88).withOpacity(0.07),
+                              borderRadius: const BorderRadius.vertical(
+                                  bottom: Radius.circular(8)),
+                            ),
+                            child: Row(children: [
+                              Icon(
+                                roundLabel == 'FINAL'
+                                    ? Icons.emoji_events
+                                    : Icons.arrow_forward_rounded,
+                                color: roundLabel == 'FINAL'
+                                    ? const Color(0xFFFFD700)
+                                    : const Color(0xFF00FF88),
+                                size: 10,
+                              ),
+                              const SizedBox(width: 4),
+                              Expanded(child: Text(
+                                roundLabel == 'FINAL'
+                                    ? '${win1 ? team1 : team2}  CHAMPION'
+                                    : '${win1 ? team1 : team2}  advances',
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: roundLabel == 'FINAL'
+                                      ? const Color(0xFFFFD700)
+                                      : const Color(0xFF00FF88),
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              )),
+                            ]),
+                          ),
+                        ] else ...[
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(vertical: 5),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.03),
+                              borderRadius: const BorderRadius.vertical(
+                                  bottom: Radius.circular(8)),
+                            ),
+                            child: Center(child: Text(
+                              team1.isEmpty || team2.isEmpty ? 'TBD' : 'Pending',
+                              style: TextStyle(
+                                  color: team1.isEmpty || team2.isEmpty
+                                      ? Colors.white12 : Colors.white24,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold))),
+                          ),
+                        ],
                       ]),
                     ),
                   ));
                 }),
                 // Pad remaining columns if this row has fewer than max
                 ...List.generate(
-                    rows.map((r) => r.length).reduce((a,b) => a>b?a:b) - rowMatches.length,
+                    maxArenasPerRow - rowMatches.length,
                     (_) => Expanded(child: Container(
                       margin: const EdgeInsets.symmetric(
                           horizontal: 3, vertical: 2),
@@ -3982,18 +4228,19 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                             fontWeight: FontWeight.bold)),
                   ))),
                   Expanded(flex: 4, child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                    padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
                     child: Column(mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.end, children: [
+                        crossAxisAlignment: CrossAxisAlignment.center, children: [
                       if (t1Wins) const Icon(Icons.emoji_events,
-                          color: Color(0xFFFFD700), size: 12),
+                          color: Color(0xFFFFD700), size: 18),
                       Text(team1.isNotEmpty ? team1 : '—',
-                          textAlign: TextAlign.right, maxLines: 2,
+                          textAlign: TextAlign.center, maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                               color: t1Wins ? const Color(0xFF00FF88) : Colors.white,
-                              fontSize: 14,
-                              fontWeight: t1Wins ? FontWeight.bold : FontWeight.w600)),
+                              fontSize: 22,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.3)),
                     ]),
                   )),
                   Expanded(flex: 1, child: Center(child: GestureDetector(
@@ -4001,32 +4248,35 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     child: isDone
                         ? Text('${gm!.score1}–${gm.score2}',
                             style: const TextStyle(color: Colors.white,
-                                fontSize: 12, fontWeight: FontWeight.bold))
+                                fontSize: 20, fontWeight: FontWeight.w900))
                         : Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 5),
+                                horizontal: 8, vertical: 6),
                             decoration: BoxDecoration(
                               color: const Color(0xFF00CFFF).withOpacity(0.08),
-                              borderRadius: BorderRadius.circular(6),
+                              borderRadius: BorderRadius.circular(8),
                               border: Border.all(
                                   color: const Color(0xFF00CFFF).withOpacity(0.35)),
                             ),
-                            child: const Text('vs',
+                            child: const Text('VS',
                                 style: TextStyle(color: Color(0xFF00CFFF),
-                                    fontSize: 11, fontWeight: FontWeight.bold))),
+                                    fontSize: 14, fontWeight: FontWeight.w900,
+                                    letterSpacing: 1))),
                   ))),
                   Expanded(flex: 4, child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                    padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
                     child: Column(mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        crossAxisAlignment: CrossAxisAlignment.center, children: [
                       if (t2Wins) const Icon(Icons.emoji_events,
-                          color: Color(0xFFFFD700), size: 12),
+                          color: Color(0xFFFFD700), size: 18),
                       Text(team2.isNotEmpty ? team2 : '—',
-                          maxLines: 2, overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center, maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                               color: t2Wins ? const Color(0xFF00FF88) : Colors.white,
-                              fontSize: 14,
-                              fontWeight: t2Wins ? FontWeight.bold : FontWeight.w600)),
+                              fontSize: 22,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.3)),
                     ]),
                   )),
                   Expanded(flex: 2, child: Center(child: isDone
@@ -4346,16 +4596,22 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           Icon(Icons.sports_soccer, color: Color(0xFF00CFFF), size: 18),
         ]),
       ),
-      ...rows.map((rowGroups) => Padding(
-        padding: const EdgeInsets.only(bottom: 12),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start,
-            children: rowGroups.map((g) => Expanded(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 5),
-                child: _buildFifaGroupCard(g),
-              ),
-            )).toList()),
-      )),
+      ...rows.map((rowGroups) {
+        final filledChildren = <Widget>[
+          ...rowGroups.map((g) => Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 5),
+              child: _buildFifaGroupCard(g),
+            ),
+          )),
+          // Fill remaining columns with invisible placeholders so alignment stays correct
+          ...List.generate(cols - rowGroups.length, (_) => const Expanded(child: SizedBox())),
+        ];
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: filledChildren),
+        );
+      }),
     ]);
   }
 
@@ -4662,19 +4918,28 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       final count = m['arenaCount'] as int? ?? 1;
       if (count > maxArenas) maxArenas = count;
     }
+
+    // ── Font scaling based on arena count ─────────────────────────────────
+    // More arenas = smaller fonts to fit all columns comfortably.
+    final double headerFontSize = maxArenas >= 3 ? 11 : maxArenas == 2 ? 12 : 14;
+    final double matchNumFont   = maxArenas >= 3 ? 13 : maxArenas == 2 ? 15 : 17;
+    final double scheduleFont   = maxArenas >= 3 ? 12 : maxArenas == 2 ? 14 : 16;
+    final double teamNameFont   = maxArenas >= 3 ? 12 : maxArenas == 2 ? 14 : 16;
+    final double statusFont     = maxArenas >= 3 ? 11 : maxArenas == 2 ? 12 : 13;
+
     return Column(children: [
       Container(
         decoration: const BoxDecoration(
             gradient: LinearGradient(colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
         child: Row(children: [
-          _headerCell('MATCH', flex: 1),
-          _headerCell('SCHEDULE', flex: 2),
+          _headerCell('MATCH', flex: 1, fontSize: headerFontSize),
+          _headerCell('SCHEDULE', flex: 2, fontSize: headerFontSize),
           if (maxArenas == 1) const Spacer(flex: 2),
           ...List.generate(maxArenas, (i) =>
-              _headerCell('ARENA ${i + 1}', flex: 3, center: true)),
+              _headerCell('ARENA ${i + 1}', flex: 3, center: true, fontSize: headerFontSize)),
           if (maxArenas == 1) const Spacer(flex: 2),
-          _headerCell('STATUS', flex: 2, center: true),
+          _headerCell('STATUS', flex: 2, center: true, fontSize: headerFontSize),
         ]),
       ),
       Expanded(
@@ -4690,22 +4955,66 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                   final arenas   = match['arenas'] as List;
                   final isEven   = index % 2 == 0;
                   final status   = _getStatus(catId, matchNum);
+                  final isDone = status == MatchStatus.done;
+
                   return Container(
                     color: isEven
                         ? const Color(0xFF160C40) : const Color(0xFF100830),
                     padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 24),
-                    child: Row(children: [
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
                       Expanded(flex: 1, child: Text('$matchNum',
-                          style: const TextStyle(color: Colors.white,
-                              fontWeight: FontWeight.bold, fontSize: 17))),
+                          style: TextStyle(
+                              color: isDone ? Colors.white24 : Colors.white,
+                              fontWeight: FontWeight.bold, fontSize: matchNumFont))),
                       Expanded(flex: 2, child: Text(schedule,
-                          style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 16))),
+                          style: TextStyle(
+                              color: isDone
+                                  ? Colors.white.withOpacity(0.25)
+                                  : Colors.white.withOpacity(0.75),
+                              fontSize: scheduleFont))),
                       if (maxArenas == 1) const Spacer(flex: 2),
                       ...List.generate(maxArenas, (ai) {
                         final team = ai < arenas.length
                             ? arenas[ai] as Map<String, dynamic>? : null;
                         if (team != null) {
                           final displayId = _fmtTeamId(team['team_id']?.toString() ?? '');
+                          // For arena 2+: wrap in a Column with DONE badge at bottom
+                          if (maxArenas >= 2) {
+                            return Expanded(flex: 3, child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (displayId.isNotEmpty) _teamIdBadge(displayId),
+                                if (displayId.isNotEmpty) const SizedBox(height: 4),
+                                Text(team['team_name']?.toString() ?? '',
+                                    style: TextStyle(
+                                        color: isDone
+                                            ? Colors.white24
+                                            : Colors.white,
+                                        fontSize: teamNameFont,
+                                        fontWeight: FontWeight.w600),
+                                    textAlign: TextAlign.center),
+                                if (isDone) ...[
+                                  const SizedBox(height: 5),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: Colors.green.withOpacity(0.12),
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(color: Colors.green.withOpacity(0.45), width: 1),
+                                    ),
+                                    child: Text('DONE',
+                                        style: TextStyle(
+                                            color: Colors.green.withOpacity(0.75),
+                                            fontSize: statusFont - 1,
+                                            fontWeight: FontWeight.bold,
+                                            letterSpacing: 0.8)),
+                                  ),
+                                ],
+                              ],
+                            ));
+                          }
+                          // Single arena: original layout
                           return Expanded(flex: 3, child: Column(
                             crossAxisAlignment: CrossAxisAlignment.center,
                             mainAxisAlignment: MainAxisAlignment.center,
@@ -4713,15 +5022,17 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                               if (displayId.isNotEmpty) _teamIdBadge(displayId),
                               const SizedBox(height: 4),
                               Text(team['team_name']?.toString() ?? '',
-                                  style: const TextStyle(color: Colors.white,
-                                      fontSize: 16, fontWeight: FontWeight.w600),
+                                  style: TextStyle(
+                                      color: isDone ? Colors.white24 : Colors.white,
+                                      fontSize: teamNameFont,
+                                      fontWeight: FontWeight.w600),
                                   textAlign: TextAlign.center),
                             ],
                           ));
                         }
-                        return const Expanded(flex: 3, child: Text('—',
+                        return Expanded(flex: 3, child: Text('—',
                             textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.white24, fontSize: 16)));
+                            style: TextStyle(color: Colors.white24, fontSize: teamNameFont)));
                       }),
                       if (maxArenas == 1) const Spacer(flex: 2),
                       Expanded(flex: 2, child: GestureDetector(
@@ -4735,7 +5046,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                           ),
                           child: Text(status.label, textAlign: TextAlign.center,
                               style: TextStyle(color: status.color,
-                                  fontWeight: FontWeight.bold, fontSize: 13)),
+                                  fontWeight: FontWeight.bold, fontSize: statusFont)),
                         ),
                       )),
                     ]),
@@ -4943,12 +5254,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     );
   }
 
-  Widget _headerCell(String text, {int flex = 1, bool center = false}) => Expanded(
+  Widget _headerCell(String text, {int flex = 1, bool center = false, double fontSize = 14}) => Expanded(
     flex: flex,
     child: Text(text,
         textAlign: center ? TextAlign.center : TextAlign.left,
-        style: const TextStyle(color: Colors.white70,
-            fontWeight: FontWeight.bold, fontSize: 14, letterSpacing: 0.8)),
+        style: TextStyle(color: Colors.white70,
+            fontWeight: FontWeight.bold, fontSize: fontSize, letterSpacing: 0.8)),
   );
 }
 
@@ -5700,8 +6011,10 @@ class _FifaBracketLinePainter extends CustomPainter {
       ..style = PaintingStyle.stroke;
 
     for (int ri = 0; ri < activeRounds.length - 1; ri++) {
-      final curCount  = expectedCount[activeRounds[ri]]!;
-      final nextCount = expectedCount[activeRounds[ri + 1]]!;
+      final curRound  = activeRounds[ri];
+      final nextRound = activeRounds[ri + 1];
+      final curCount  = expectedCount[curRound]!;
+      final nextCount = expectedCount[nextRound]!;
 
       final curSlotH  = totalH / curCount;
       final nextSlotH = totalH / nextCount;
@@ -5709,6 +6022,30 @@ class _FifaBracketLinePainter extends CustomPainter {
       final x1 = ri * (cardW + gapH) + cardW;
       final x2 = (ri + 1) * (cardW + gapH);
       final mx = x1 + gapH / 2;
+
+      // ── Special case: ELIM → QF with BYE slots ───────────────────────────
+      // The bracket layout is:
+      //   QF slot 0: BYE1 (pre-seeded) + ELIM winner 0   ← outer top
+      //   QF slot 1: Direct seed pair (e.g. 3v6)          ← inner
+      //   QF slot 2: Direct seed pair (e.g. 4v5)          ← inner
+      //   QF slot 3: BYE2 (pre-seeded) + ELIM winner 1   ← outer bottom
+      //
+      // ELIM slot 0 → QF slot 0 (top outer)
+      // ELIM slot 1 → QF slot 3 (bottom outer)
+      // Inner QF slots (1,2) have NO incoming ELIM lines — they are direct pairs.
+      if (curRound == 'elimination' && nextRound == 'quarter-finals' &&
+          curCount < nextCount) {
+        final List<int> elimToQfSlot = [0, nextCount - 1];
+        for (int ei = 0; ei < curCount && ei < elimToQfSlot.length; ei++) {
+          final cy   = ei * curSlotH + curSlotH / 2;
+          final qfNi = elimToQfSlot[ei];
+          final ny   = qfNi * nextSlotH + nextSlotH / 2;
+          canvas.drawLine(Offset(x1, cy), Offset(mx, cy), paint);
+          canvas.drawLine(Offset(mx, cy), Offset(mx, ny), paint);
+          canvas.drawLine(Offset(mx, ny), Offset(x2, ny), paint);
+        }
+        continue;
+      }
 
       for (int ni = 0; ni < nextCount; ni++) {
         final ny  = ni * nextSlotH + nextSlotH / 2;
