@@ -429,8 +429,10 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     if (sourceTeams.isEmpty) return;
     final shuffled = List<Map<String, dynamic>>.from(sourceTeams)..shuffle(Random());
     final n = shuffled.length;
-    // ── Fixed group count: always 3 groups ──────────────────────────────────
-    const int numGroups = 3;
+    // ── Dynamic group count: 4 teams per group, max 9 groups ────────────────
+    const int teamsPerGroup = 4;
+    const int maxGroups     = 9;
+    final int numGroups = (n / teamsPerGroup).ceil().clamp(1, maxGroups);
     final int baseSize  = n ~/ numGroups;
     final int extras    = n % numGroups;
     final counts = List.generate(numGroups, (i) => baseSize + (i < extras ? 1 : 0));
@@ -808,17 +810,26 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
       final scheduleRows = byMatch.values.toList()
         ..sort((a, b) {
-          // Group rows first, then KO rows by time
+          // Group rows first, then KO rows by time then match_id
           final btA = a['bracketType'] as String? ?? '';
           final btB = b['bracketType'] as String? ?? '';
           if (btA == 'group' && btB != 'group') return -1;
           if (btA != 'group' && btB == 'group') return 1;
           final tA = a['time'] as String? ?? '';
           final tB = b['time'] as String? ?? '';
-          if (tA.isEmpty && tB.isEmpty) return 0;
-          if (tA.isEmpty) return 1;
-          if (tB.isEmpty) return -1;
-          return tA.compareTo(tB);
+          if (tA.isEmpty && tB.isEmpty) {
+            // fall through to match_id tiebreaker
+          } else if (tA.isEmpty) return 1;
+          else if (tB.isEmpty) return -1;
+          else {
+            final cmp = tA.compareTo(tB);
+            if (cmp != 0) return cmp;
+          }
+          // Tiebreaker: sort by match_id ASC so slot positions are stable
+          // and match the DB insertion order used by advanceToKnockout.
+          final mA = a['matchId'] as int? ?? 0;
+          final mB = b['matchId'] as int? ?? 0;
+          return mA.compareTo(mB);
         });
 
       if (mounted) {
@@ -1046,8 +1057,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       rounds.add('quarter-finals');
     } else if (advancing == 16) {
       // 8 groups → 16 teams → R16 → QF
-      rounds.add('round-of-16'); 
-      rounds.add('quarter-finals');   
+      rounds.add('round-of-16');
+      rounds.add('quarter-finals');
+    } else if (advancing == 18) {
+      // 9 groups → 18 teams → ELIM(2) → R16(8) → QF(4)
+      rounds.add('elimination');
+      rounds.add('round-of-16');
+      rounds.add('quarter-finals');
     } else {
       // 5,6,7 groups → ELIM(top 2 BYE) → QF(4)
       rounds.add('elimination');
@@ -1507,9 +1523,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           FROM tbl_match m
           JOIN tbl_teamschedule ts ON ts.match_id = m.match_id
           JOIN tbl_team t ON t.team_id = ts.team_id
+          JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
           WHERE t.category_id = ${_soccerCategoryId}
             AND m.bracket_type = '$round'
-          GROUP BY m.match_id HAVING COUNT(DISTINCT ts.team_id) = 2
+          GROUP BY m.match_id, s.schedule_start HAVING COUNT(DISTINCT ts.team_id) = 2
+          ORDER BY s.schedule_start ASC, m.match_id ASC
         """);
         if (matchResult.rows.isEmpty) continue;
         final matchIds = matchResult.rows
@@ -1590,6 +1608,16 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           // Skip tied scores — knockout draw is invalid, admin must correct score
           if (g0 == g1) {
             debugPrint('⚠️ Tied KO score for match $matchId ($g0-$g1) — skipping');
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text(
+                  '⚠️ Match $matchId is a draw ($g0-$g0) — please correct the score to resolve the tie.',
+                  style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+                ),
+                backgroundColor: const Color(0xFFFFD700),
+                duration: const Duration(seconds: 5),
+              ));
+            }
             continue;
           }
           final winnerId = g0 > g1
@@ -2082,41 +2110,53 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           child: GestureDetector(
             onTap: () => setState(
                 () => _showBracketFlowInfo = !_showBracketFlowInfo),
-            child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(
-                color: _showBracketFlowInfo
-                    ? const Color(0xFF00CFFF).withOpacity(0.12)
-                    : const Color(0xFF7B6AFF).withOpacity(0.10),
-                borderRadius: BorderRadius.circular(7),
+                gradient: _showBracketFlowInfo
+                    ? const LinearGradient(
+                        colors: [Color(0xFF00CFFF), Color(0xFF0095BB)],
+                        begin: Alignment.topLeft, end: Alignment.bottomRight)
+                    : LinearGradient(
+                        colors: [
+                          const Color(0xFF7B6AFF).withOpacity(0.18),
+                          const Color(0xFF4D3AAA).withOpacity(0.12),
+                        ],
+                        begin: Alignment.topLeft, end: Alignment.bottomRight),
+                borderRadius: BorderRadius.circular(8),
                 border: Border.all(
                     color: _showBracketFlowInfo
-                        ? const Color(0xFF00CFFF).withOpacity(0.45)
-                        : const Color(0xFF7B6AFF).withOpacity(0.4)),
+                        ? const Color(0xFF00CFFF).withOpacity(0.8)
+                        : const Color(0xFF7B6AFF).withOpacity(0.45),
+                    width: 1),
+                boxShadow: _showBracketFlowInfo
+                    ? [BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.25),
+                        blurRadius: 8, spreadRadius: 0)]
+                    : [],
               ),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 Icon(
                   _showBracketFlowInfo
-                      ? Icons.close
-                      : Icons.help_outline_rounded,
-                  size: 12,
+                      ? Icons.close_rounded
+                      : Icons.help_rounded,
+                  size: 13,
                   color: _showBracketFlowInfo
-                      ? const Color(0xFF00CFFF)
-                      : const Color(0xFF7B6AFF),
+                      ? Colors.black
+                      : const Color(0xFF9B85FF),
                 ),
-                const SizedBox(width: 5),
+                const SizedBox(width: 6),
                 Text(
                   _showBracketFlowInfo
                       ? 'CLOSE'
                       : 'HOW DOES THIS WORK?',
                   style: TextStyle(
                     color: _showBracketFlowInfo
-                        ? const Color(0xFF00CFFF)
-                        : const Color(0xFF7B6AFF),
+                        ? Colors.black
+                        : const Color(0xFF9B85FF),
                     fontSize: 10,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.5,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 0.8,
                   ),
                 ),
               ]),
@@ -2126,9 +2166,9 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
         // ── Info panel — shown when button is tapped ───────────────────
         if (_showBracketFlowInfo) ...[
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 320),
+            constraints: const BoxConstraints(maxHeight: 340),
             child: SingleChildScrollView(
               child: _buildBracketInfoPanel(ng),
             ),
@@ -2191,7 +2231,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         case 6:
           return 'Overall top 4 seeds get BYEs directly into QF (slots 1 & 4 outer, 2 & 3 inner). The remaining 8 teams (Seeds 5-12) play 4 ELIM matches → winners fill the remaining QF slots.';
         case 7:
-          return 'Overall top 2 seeds get BYEs into QF. Remaining 12 teams play 6 ELIM matches.';
+          return 'Overall top 2 seeds (Seed 1 & Seed 2) get BYEs directly into QF. '
+              'Seed 1 → QF 0 (outer top), Seed 2 → QF 3 (outer bottom). '
+              'Remaining 12 teams (Seeds 3–14) play 6 ELIM matches: '
+              'ELIM 0 winner joins Seed 1 in QF 0; '
+              'ELIM 1 & 2 winners merge into QF 1; '
+              'ELIM 3 & 4 winners merge into QF 2; '
+              'ELIM 5 winner joins Seed 2 in QF 3.';
         case 9:
           return 'Overall top 2 seeds get BYEs into R16. Remaining 16 teams play 2 ELIM matches.';
         default:
@@ -2286,33 +2332,36 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             '\n★ Seeds ranked by overall: PTS → Goal Diff → Goals For';
         case 7:
           return
-            'Seed 1 ── BYE ─────────────────────────────── QF slot 1 (outer top)\n'
-            'Seed 5  ──┐\n'
-            '          ├── ELIM 1 ────── winner fills QF slot 1\n'
+            'Seed 1 ── BYE ──────────────────────────────┐\n'
+            '                                             ├── QF 0\n'
+            'Seed 3  ──┐                                  │\n'
+            '          ├── ELIM 0 ── winner ──────────────┘\n'
             'Seed 14 ──┘\n'
             '\n'
-            'Seed 3  ──┐\n'
-            '          ├── ELIM 2 ────── winner fills QF slot 2\n'
-            'Seed 12 ──┘\n'
-            '\n'
             'Seed 4  ──┐\n'
-            '          ├── ELIM 3 ────── winner fills QF slot 3\n'
-            'Seed 11 ──┘\n'
+            '          ├── ELIM 1 ── winner ──┐\n'
+            'Seed 11 ──┘                      ├── QF 1\n'
+            'Seed 5  ──┐                      │\n'
+            '          ├── ELIM 2 ── winner ──┘\n'
+            'Seed 10 ──┘\n'
             '\n'
             'Seed 6  ──┐\n'
-            '          ├── ELIM 4 ────── winner fills QF slot 4\n'
-            'Seed 9  ──┘\n'
-            '\n'
-            'Seed 7  ──┐\n'
-            '          ├── ELIM 5 ────── winner fills QF\n'
+            '          ├── ELIM 3 ── winner ──┐\n'
+            'Seed 9  ──┘                      ├── QF 2\n'
+            'Seed 7  ──┐                      │\n'
+            '          ├── ELIM 4 ── winner ──┘\n'
             'Seed 8  ──┘\n'
             '\n'
-            'Seed 13 ──┐\n'
-            '          ├── ELIM 6 ────── winner fills QF\n'
-            'Seed 10 ──┘\n'
-            'Seed 2 ── BYE ─────────────────────────────── QF slot 4 (outer bottom)\n'
+            'Seed 12 ──┐\n'
+            '          ├── ELIM 5 ── winner ──────────────┐\n'
+            'Seed 13 ──┘                                  ├── QF 3\n'
+            'Seed 2 ── BYE ──────────────────────────────┘\n'
             '\n2 BYE seeds (Seeds 1 & 2) skip ELIM → go directly to QF\n'
-            '6 ELIM matches: 12 teams battle for remaining 6 QF spots\n'
+            '6 ELIM matches: Seeds 3–14 compete for 4 QF spots\n'
+            '  ELIM 0 winner + Seed 1 BYE → QF 0\n'
+            '  ELIM 1 winner + ELIM 2 winner → QF 1\n'
+            '  ELIM 3 winner + ELIM 4 winner → QF 2\n'
+            '  ELIM 5 winner + Seed 2 BYE → QF 3\n'
             '\nQF → SF → 3RD PLACE / FINAL\n'
             '\n★ Seeds ranked by overall: PTS → Goal Diff → Goals For';
         case 8:
@@ -2346,85 +2395,156 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     final hasBye = byeCount(ng) > 0;
 
     return Container(
-      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: const Color(0xFF080418),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFF3D1E88).withOpacity(0.4)),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF0D0730), Color(0xFF060218)],
+          begin: Alignment.topLeft, end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF3D1E88).withOpacity(0.5)),
+        boxShadow: [
+          BoxShadow(color: const Color(0xFF7B6AFF).withOpacity(0.08),
+              blurRadius: 16, spreadRadius: 0),
+        ],
       ),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
-        // ── Title ──────────────────────────────────────────────────────
-        Row(children: [
-          const Icon(Icons.account_tree,
-              color: Color(0xFF7B6AFF), size: 13),
-          const SizedBox(width: 6),
-          Text(
-            'Bracket for $ng Group${ng == 1 ? '' : 's'}',
-            style: const TextStyle(
-                color: Color(0xFF7B6AFF),
-                fontSize: 12, fontWeight: FontWeight.w900,
-                letterSpacing: 0.5),
-          ),
-        ]),
-        const SizedBox(height: 10),
-
-        // ── Flow line ──────────────────────────────────────────────────
+        // ── Header banner ──────────────────────────────────────────────
         Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
-            color: const Color(0xFF0F0A2A),
-            borderRadius: BorderRadius.circular(7),
-            border: Border.all(
-                color: const Color(0xFF7B6AFF).withOpacity(0.2)),
+            gradient: const LinearGradient(
+              colors: [Color(0xFF2A1570), Color(0xFF1A0D50)],
+              begin: Alignment.centerLeft, end: Alignment.centerRight,
+            ),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(11)),
           ),
-          child: Text(_flow(),
+          child: Row(children: [
+            Container(
+              padding: const EdgeInsets.all(5),
+              decoration: BoxDecoration(
+                color: const Color(0xFF7B6AFF).withOpacity(0.25),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: const Icon(Icons.account_tree_rounded,
+                  color: Color(0xFFBBAAFF), size: 14),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              'Bracket for $ng Group${ng == 1 ? '' : 's'}',
               style: const TextStyle(
-                  color: Color(0xFF9B85FF),
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.3,
-                  height: 1.4)),
+                  color: Color(0xFFCCBBFF),
+                  fontSize: 12, fontWeight: FontWeight.w900,
+                  letterSpacing: 0.6),
+            ),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFF7B6AFF).withOpacity(0.15),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFF7B6AFF).withOpacity(0.4)),
+              ),
+              child: Text('${ng * 2} teams advance',
+                  style: const TextStyle(color: Color(0xFF9B85FF),
+                      fontSize: 9, fontWeight: FontWeight.w700)),
+            ),
+          ]),
         ),
-        const SizedBox(height: 10),
 
-        // ── Why section ────────────────────────────────────────────────
-        _infoSection(
-          icon: Icons.lightbulb_outline,
-          color: const Color(0xFFFF9F43),
-          title: 'Why this flow?',
-          body: _why(),
-        ),
+        Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
-        // ── BYE section (only if applicable) ──────────────────────────
-        if (hasBye) ...[
-          const SizedBox(height: 8),
-          _infoSection(
-            icon: Icons.directions_run,
-            color: const Color(0xFFFFD700),
-            title: 'Who gets the BYE?',
-            body: _byeWho(),
-          ),
-        ],
-        const SizedBox(height: 10),
+            // ── Flow line ────────────────────────────────────────────────
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0A0525),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                    color: const Color(0xFF7B6AFF).withOpacity(0.25)),
+              ),
+              child: Row(children: [
+                Container(
+                  width: 3, height: 28,
+                  margin: const EdgeInsets.only(right: 10),
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF7B6AFF), Color(0xFF00CFFF)],
+                      begin: Alignment.topCenter, end: Alignment.bottomCenter,
+                    ),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Expanded(
+                  child: Text(_flow(),
+                      style: const TextStyle(
+                          color: Color(0xFF9B85FF),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.4,
+                          height: 1.5)),
+                ),
+              ]),
+            ),
+            const SizedBox(height: 10),
 
-        // ── Diagram ────────────────────────────────────────────────────
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: const Color(0xFF04020F),
-            borderRadius: BorderRadius.circular(7),
-            border: Border.all(
-                color: Colors.white.withOpacity(0.07)),
-          ),
-          child: Text(_diagram(),
-              style: const TextStyle(
-                  color: Colors.white54,
-                  fontSize: 10,
-                  fontFamily: 'monospace',
-                  height: 1.6)),
+            // ── Why section ──────────────────────────────────────────────
+            _infoSection(
+              icon: Icons.lightbulb_rounded,
+              color: const Color(0xFFFF9F43),
+              title: 'Why this flow?',
+              body: _why(),
+            ),
+
+            // ── BYE section (only if applicable) ────────────────────────
+            if (hasBye) ...[
+              const SizedBox(height: 8),
+              _infoSection(
+                icon: Icons.star_rounded,
+                color: const Color(0xFFFFD700),
+                title: 'Who gets the BYE?',
+                body: _byeWho(),
+              ),
+            ],
+            const SizedBox(height: 10),
+
+            // ── Diagram ──────────────────────────────────────────────────
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF030110),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                    color: const Color(0xFF7B6AFF).withOpacity(0.12)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    const Icon(Icons.schema_outlined,
+                        color: Color(0xFF4D3AAA), size: 11),
+                    const SizedBox(width: 5),
+                    Text('BRACKET DIAGRAM',
+                        style: TextStyle(
+                            color: const Color(0xFF4D3AAA).withOpacity(0.9),
+                            fontSize: 9, fontWeight: FontWeight.w900,
+                            letterSpacing: 0.8)),
+                  ]),
+                  const SizedBox(height: 8),
+                  Text(_diagram(),
+                      style: const TextStyle(
+                          color: Colors.white38,
+                          fontSize: 10,
+                          fontFamily: 'monospace',
+                          height: 1.7)),
+                ],
+              ),
+            ),
+          ]),
         ),
       ]),
     );
@@ -2437,31 +2557,39 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     required String body,
   }) =>
       Container(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.all(11),
         decoration: BoxDecoration(
-          color: color.withOpacity(0.05),
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: color.withOpacity(0.2)),
+          color: color.withOpacity(0.04),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withOpacity(0.22)),
         ),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-          Icon(icon, color: color, size: 13),
-          const SizedBox(width: 8),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Container(
+            width: 26, height: 26,
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Center(child: Icon(icon, color: color, size: 13)),
+          ),
+          const SizedBox(width: 10),
           Expanded(
             child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+              const SizedBox(height: 3),
               Text(title,
                   style: TextStyle(
                       color: color,
                       fontSize: 10,
-                      fontWeight: FontWeight.w800)),
-              const SizedBox(height: 4),
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.3)),
+              const SizedBox(height: 5),
               Text(body,
                   style: const TextStyle(
-                      color: Colors.white54,
+                      color: Colors.white60,
                       fontSize: 10,
-                      height: 1.5)),
+                      height: 1.55)),
             ]),
           ),
         ]),
@@ -2621,12 +2749,14 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         : 'ELIM';
     final roundLabels = {
       'elimination':    elimCanvasLabel,
+      'round-of-16':    'R16',
       'quarter-finals': 'QF',
       'semi-finals':    'SF',
       'final':          'FINAL',
     };
     const roundColors = {
       'elimination':    Color(0xFF00CFFF),
+      'round-of-16':    Color(0xFF00CFFF),
       'quarter-finals': Color(0xFF00FF88),
       'semi-finals':    Color(0xFFFF9F43),
       'final':          Color(0xFFFFD700),
@@ -2651,11 +2781,19 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         .where((r) => r['bracketType'] != 'third-place').toList();
 
     // ── Group rows by round ───────────────────────────────────────────────────
+    // FIX: Sort each round's matches by matchId ASC so bracket slot positions
+    // (slot 0 = QF1, slot 1 = QF2, …) always align with the PHP seeding order
+    // and the Schedule List view (which now also sorts by matchId ASC).
     final Map<String, List<Map<String, dynamic>>> byRound = {};
     for (final row in mainRows) {
       final bt = row['bracketType'] as String? ?? '';
       byRound.putIfAbsent(bt, () => []);
       byRound[bt]!.add(row);
+    }
+    for (final list in byRound.values) {
+      list.sort((a, b) =>
+          ((a['matchId'] as int?) ?? 0)
+              .compareTo((b['matchId'] as int?) ?? 0));
     }
 
     // Determine active rounds (that exist in DB)
@@ -2766,17 +2904,28 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                           padding: const EdgeInsets.symmetric(
                               horizontal: 14, vertical: 6),
                           decoration: BoxDecoration(
-                            color: color.withOpacity(0.12),
+                            gradient: LinearGradient(
+                              colors: [
+                                color.withOpacity(0.18),
+                                color.withOpacity(0.08),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
                             borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: color.withOpacity(0.5)),
+                            border: Border.all(color: color.withOpacity(0.55)),
+                            boxShadow: [
+                              BoxShadow(color: color.withOpacity(0.12),
+                                  blurRadius: 8, spreadRadius: 0),
+                            ],
                           ),
                           child: Text(label, style: TextStyle(
-                              color: color, fontSize: 13,
+                              color: color, fontSize: 12,
                               fontWeight: FontWeight.w900, letterSpacing: 1.2)),
                         ),
-                        const SizedBox(height: 3),
+                        const SizedBox(height: 4),
                         Text('$count match${count == 1 ? '' : 'es'}',
-                            style: TextStyle(color: color.withOpacity(0.5),
+                            style: TextStyle(color: color.withOpacity(0.45),
                                 fontSize: 10)),
                       ]),
                     ),
@@ -2797,10 +2946,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     painter: _FifaBracketLinePainter(
                       activeRounds: activeRounds,
                       expectedCount: expectedCount,
-                      cardW:  cardW,
-                      cardH:  slotH,
-                      gapH:   gapH,
-                      totalH: totalH,
+                      cardW:     cardW,
+                      cardH:     slotH,
+                      gapH:      gapH,
+                      totalH:    totalH,
+                      numGroups: canvasNumGroups,
                     ),
                   ),
                 ),
@@ -2974,18 +3124,40 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         height: 68,
         child: Container(
           decoration: BoxDecoration(
-            color: isFinal ? const Color(0xFF1A1200) : const Color(0xFF0C0820),
+            gradient: isFinal
+                ? const LinearGradient(
+                    colors: [Color(0xFF1E1500), Color(0xFF100C00)],
+                    begin: Alignment.topLeft, end: Alignment.bottomRight)
+                : const LinearGradient(
+                    colors: [Color(0xFF0E0B22), Color(0xFF080618)],
+                    begin: Alignment.topLeft, end: Alignment.bottomRight),
             borderRadius: BorderRadius.circular(10),
             border: Border.all(
               color: hasScore
-                  ? color.withOpacity(0.65)
-                  : color.withOpacity(isFinal ? 0.60 : 0.28),
+                  ? color.withOpacity(0.75)
+                  : color.withOpacity(isFinal ? 0.65 : 0.32),
               width: isFinal ? 2 : 1,
             ),
+            boxShadow: hasScore || isFinal
+                ? [BoxShadow(
+                    color: color.withOpacity(isFinal ? 0.18 : 0.10),
+                    blurRadius: 8, spreadRadius: 0,
+                    offset: const Offset(0, 2))]
+                : [],
           ),
           child: Column(children: [
             teamSlot(team1, grp1, win1, win2, goals1),
-            Container(height: 1, color: color.withOpacity(0.18)),
+            Container(height: 1,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    Colors.transparent,
+                    color.withOpacity(0.30),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
             teamSlot(team2, grp2, win2, win1, goals2),
           ]),
         ),
@@ -2998,18 +3170,18 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           padding: const EdgeInsets.symmetric(horizontal: 8),
           decoration: BoxDecoration(
             color: isFinal
-                ? const Color(0xFFFFD700).withOpacity(0.07)
+                ? const Color(0xFFFFD700).withOpacity(0.08)
                 : const Color(0xFF00FF88).withOpacity(0.07),
             borderRadius: BorderRadius.circular(5),
             border: Border.all(
               color: isFinal
-                  ? const Color(0xFFFFD700).withOpacity(0.3)
-                  : const Color(0xFF00FF88).withOpacity(0.25),
+                  ? const Color(0xFFFFD700).withOpacity(0.35)
+                  : const Color(0xFF00FF88).withOpacity(0.28),
             ),
           ),
           child: Row(children: [
             Icon(
-              isFinal ? Icons.emoji_events : Icons.arrow_forward_rounded,
+              isFinal ? Icons.emoji_events_rounded : Icons.arrow_forward_rounded,
               color: isFinal
                   ? const Color(0xFFFFD700)
                   : const Color(0xFF00FF88),
@@ -3101,20 +3273,30 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         padding: const EdgeInsets.all(28),
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: const Color(0xFF130742),
-          border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.25), width: 2),
+          gradient: const RadialGradient(
+            colors: [Color(0xFF1A0D50), Color(0xFF0A0520)],
+          ),
+          border: Border.all(color: const Color(0xFF00CFFF).withOpacity(0.3), width: 2),
+          boxShadow: [
+            BoxShadow(color: const Color(0xFF00CFFF).withOpacity(0.12),
+                blurRadius: 24, spreadRadius: 0),
+          ],
         ),
-        child: const Icon(Icons.account_tree, color: Color(0xFF00CFFF), size: 48),
+        child: const Icon(Icons.account_tree_rounded,
+            color: Color(0xFF00CFFF), size: 48),
       ),
       const SizedBox(height: 20),
       const Text('Bracket Preview',
-          style: TextStyle(color: Colors.white54, fontSize: 20,
-              fontWeight: FontWeight.w900)),
-      const SizedBox(height: 8),
-      const Text(
-        'Generate groups to see the expected bracket.\nAdvancing teams will populate the bracket automatically.',
-        textAlign: TextAlign.center,
-        style: TextStyle(color: Colors.white24, fontSize: 13, height: 1.6),
+          style: TextStyle(color: Colors.white60, fontSize: 20,
+              fontWeight: FontWeight.w900, letterSpacing: 0.5)),
+      const SizedBox(height: 10),
+      const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 40),
+        child: Text(
+          'Generate groups to see the expected bracket.\nAdvancing teams will populate the bracket automatically.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white24, fontSize: 13, height: 1.7),
+        ),
       ),
     ]),
   );
@@ -3488,16 +3670,18 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                   if (isDone && t1Wins) ...[
                                     const SizedBox(height: 3),
                                     Row(mainAxisSize: MainAxisSize.min,
+                                        mainAxisAlignment: MainAxisAlignment.center,
                                         children: [
                                       const Icon(Icons.emoji_events,
                                           color: Color(0xFFFFD700), size: 10),
                                       const SizedBox(width: 3),
-                                      Text('Winner',
+                                      Flexible(child: Text('Winner',
+                                          overflow: TextOverflow.ellipsis,
                                           style: TextStyle(
                                               color: const Color(0xFFFFD700)
                                                   .withOpacity(0.8),
                                               fontSize: 9,
-                                              fontWeight: FontWeight.bold)),
+                                              fontWeight: FontWeight.bold))),
                                     ]),
                                   ],
                                 ],
@@ -3553,16 +3737,18 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                   if (isDone && t2Wins) ...[
                                     const SizedBox(height: 3),
                                     Row(mainAxisSize: MainAxisSize.min,
+                                        mainAxisAlignment: MainAxisAlignment.center,
                                         children: [
                                       const Icon(Icons.emoji_events,
                                           color: Color(0xFFFFD700), size: 10),
                                       const SizedBox(width: 3),
-                                      Text('Winner',
+                                      Flexible(child: Text('Winner',
+                                          overflow: TextOverflow.ellipsis,
                                           style: TextStyle(
                                               color: const Color(0xFFFFD700)
                                                   .withOpacity(0.8),
                                               fontSize: 9,
-                                              fontWeight: FontWeight.bold)),
+                                              fontWeight: FontWeight.bold))),
                                     ]),
                                   ],
                                 ],
@@ -3696,6 +3882,13 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       byRound.putIfAbsent(bt, () => []);
       byRound[bt]!.add(row);
     }
+    // FIX: Sort by matchId ASC so KO list slot order matches bracket canvas
+    // and PHP seeding order (QF slot 0 = lowest match_id, etc.)
+    for (final list in byRound.values) {
+      list.sort((a, b) =>
+          ((a['matchId'] as int?) ?? 0)
+              .compareTo((b['matchId'] as int?) ?? 0));
+    }
     final rounds = roundOrder.where((r) => byRound.containsKey(r)).toList();
 
     if (rounds.isEmpty) {
@@ -3737,36 +3930,22 @@ class _ScheduleViewerState extends State<ScheduleViewer>
             return a.compareTo(b);
           });
         // Flatten into rows of max maxArenasPerRow
+        // FIX: Sort strictly by matchId ASC (same order as DB seeding and
+        // bracket canvas) so Schedule List and Bracket View always show the
+        // same match-to-arena mapping.  The old "seeded outside, TBD center"
+        // reorder caused Arena 1 in the list to show a different match than
+        // position 0 in the bracket canvas.
         final List<List<Map<String, dynamic>>> rows = [];
         final List<String> timeKeys = [];
         for (final t in sortedTimeKeys) {
-          // Reorder: fully-seeded matches (2 teams) go to the OUTSIDE (first & last),
-          // TBD matches (missing 1 or both teams) go to the CENTER.
-          // e.g. [Seeded, TBD, TBD, Seeded] instead of [Seeded, Seeded, TBD, TBD]
-          final all = List<Map<String, dynamic>>.from(byTimeMap[t]!);
-          final seeded = all.where((m) =>
-              (m['team1'] as String? ?? '').isNotEmpty &&
-              (m['team2'] as String? ?? '').isNotEmpty).toList();
-          final tbds = all.where((m) =>
-              (m['team1'] as String? ?? '').isEmpty ||
-              (m['team2'] as String? ?? '').isEmpty).toList();
+          final ordered = List<Map<String, dynamic>>.from(byTimeMap[t]!)
+            ..sort((a, b) =>
+                ((a['matchId'] as int?) ?? 0)
+                    .compareTo((b['matchId'] as int?) ?? 0));
 
-          // Interleave: seeded on outside, TBD in center
-          final reordered = <Map<String, dynamic>>[];
-          if (seeded.length >= 2) {
-            // First seeded on left, TBDs in middle, last seeded on right
-            reordered.add(seeded.first);
-            reordered.addAll(tbds);
-            reordered.addAll(seeded.skip(1));
-          } else {
-            // Not enough seeded to split — just seeded first then TBDs
-            reordered.addAll(seeded);
-            reordered.addAll(tbds);
-          }
-
-          for (int i = 0; i < reordered.length; i += maxArenasPerRow) {
-            final chunk = reordered.sublist(
-                i, (i + maxArenasPerRow).clamp(0, reordered.length));
+          for (int i = 0; i < ordered.length; i += maxArenasPerRow) {
+            final chunk = ordered.sublist(
+                i, (i + maxArenasPerRow).clamp(0, ordered.length));
             rows.add(chunk);
             timeKeys.add(t);
           }
@@ -4704,7 +4883,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   }
 
   String _groupSplitLabel(int n) {
-    const int maxGroups     = 8;
+    const int maxGroups     = 9;
     const int teamsPerGroup = 4;
     final int numGroups = (n / teamsPerGroup).ceil().clamp(1, maxGroups);
     final int baseSize  = n ~/ numGroups;
@@ -5993,6 +6172,7 @@ class _FifaBracketLinePainter extends CustomPainter {
   final List<String>                     activeRounds;
   final Map<String, int>                 expectedCount;
   final double cardW, cardH, gapH, totalH;
+  final int    numGroups;
 
   const _FifaBracketLinePainter({
     required this.activeRounds,
@@ -6001,6 +6181,7 @@ class _FifaBracketLinePainter extends CustomPainter {
     required this.cardH,
     required this.gapH,
     required this.totalH,
+    this.numGroups = 0,
   });
 
   @override
@@ -6024,25 +6205,119 @@ class _FifaBracketLinePainter extends CustomPainter {
       final mx = x1 + gapH / 2;
 
       // ── Special case: ELIM → QF with BYE slots ───────────────────────────
-      // The bracket layout is:
-      //   QF slot 0: BYE1 (pre-seeded) + ELIM winner 0   ← outer top
-      //   QF slot 1: Direct seed pair (e.g. 3v6)          ← inner
-      //   QF slot 2: Direct seed pair (e.g. 4v5)          ← inner
-      //   QF slot 3: BYE2 (pre-seeded) + ELIM winner 1   ← outer bottom
-      //
-      // ELIM slot 0 → QF slot 0 (top outer)
-      // ELIM slot 1 → QF slot 3 (bottom outer)
-      // Inner QF slots (1,2) have NO incoming ELIM lines — they are direct pairs.
-      if (curRound == 'elimination' && nextRound == 'quarter-finals' &&
-          curCount < nextCount) {
-        final List<int> elimToQfSlot = [0, nextCount - 1];
-        for (int ei = 0; ei < curCount && ei < elimToQfSlot.length; ei++) {
-          final cy   = ei * curSlotH + curSlotH / 2;
-          final qfNi = elimToQfSlot[ei];
-          final ny   = qfNi * nextSlotH + nextSlotH / 2;
-          canvas.drawLine(Offset(x1, cy), Offset(mx, cy), paint);
-          canvas.drawLine(Offset(mx, cy), Offset(mx, ny), paint);
-          canvas.drawLine(Offset(mx, ny), Offset(x2, ny), paint);
+      if (curRound == 'elimination' && nextRound == 'quarter-finals') {
+
+        // 7-group: 6 ELIM → 4 QF with explicit mapping
+        //   ELIM 0 → QF 0 (BYE1 slot, outer top)
+        //   ELIM 1 → QF 1 (merge)
+        //   ELIM 2 → QF 1 (merge)
+        //   ELIM 3 → QF 2 (merge)
+        //   ELIM 4 → QF 2 (merge)
+        //   ELIM 5 → QF 3 (BYE2 slot, outer bottom)
+        if (numGroups == 7 && curCount == 6 && nextCount == 4) {
+          // 7-group ELIM→QF mapping:
+          //   ELIM 0 → QF 0  (single, with BYE Seed 1)
+          //   ELIM 1 + ELIM 2 → QF 1  (merge)
+          //   ELIM 3 + ELIM 4 → QF 2  (merge)
+          //   ELIM 5 → QF 3  (single, with BYE Seed 2)
+          const List<int> elim7toQF = [0, 1, 1, 2, 2, 3];
+
+          // Draw single connectors first (ELIM 0 → QF 0, ELIM 5 → QF 3)
+          for (final ei in [0, 5]) {
+            final qfIdx = elim7toQF[ei];
+            final cy = ei * curSlotH + curSlotH / 2;
+            final ny = qfIdx * nextSlotH + nextSlotH / 2;
+            canvas.drawLine(Offset(x1, cy), Offset(mx, cy), paint);
+            canvas.drawLine(Offset(mx, cy), Offset(mx, ny), paint);
+            canvas.drawLine(Offset(mx, ny), Offset(x2, ny), paint);
+          }
+
+          // Draw merge pairs (ELIM 1+2 → QF 1, ELIM 3+4 → QF 2)
+          for (final pair in [[1, 2], [3, 4]]) {
+            final eiTop = pair[0];
+            final eiBot = pair[1];
+            final qfIdx = elim7toQF[eiTop];
+            final cyTop = eiTop * curSlotH + curSlotH / 2;
+            final cyBot = eiBot * curSlotH + curSlotH / 2;
+            final ny    = qfIdx * nextSlotH + nextSlotH / 2;
+            final joinY = (cyTop + cyBot) / 2;
+
+            // Horizontal lines from each ELIM card to mid-x
+            canvas.drawLine(Offset(x1, cyTop), Offset(mx, cyTop), paint);
+            canvas.drawLine(Offset(x1, cyBot), Offset(mx, cyBot), paint);
+            // Vertical join between the two ELIM mid-points at mx
+            canvas.drawLine(Offset(mx, cyTop), Offset(mx, cyBot), paint);
+            // Vertical from join-center to QF slot level
+            canvas.drawLine(Offset(mx, joinY), Offset(mx, ny), paint);
+            // Horizontal to QF card
+            canvas.drawLine(Offset(mx, ny), Offset(x2, ny), paint);
+          }
+          continue;
+        }
+
+        // Generic: ≤2 ELIM matches (5/6-group: ELIM 0→QF0, ELIM 1→QF3)
+        if (curCount < nextCount) {
+          final List<int> elimToQfSlot = [0, nextCount - 1];
+          for (int ei = 0; ei < curCount && ei < elimToQfSlot.length; ei++) {
+            final cy   = ei * curSlotH + curSlotH / 2;
+            final qfNi = elimToQfSlot[ei];
+            final ny   = qfNi * nextSlotH + nextSlotH / 2;
+            canvas.drawLine(Offset(x1, cy), Offset(mx, cy), paint);
+            canvas.drawLine(Offset(mx, cy), Offset(mx, ny), paint);
+            canvas.drawLine(Offset(mx, ny), Offset(x2, ny), paint);
+          }
+          continue;
+        }
+      }
+
+      // ── Special case: ELIM → R16 (9-group: 2 ELIM + 14 BYEs → 8 R16 slots) ─
+      if (curRound == 'elimination' && nextRound == 'round-of-16') {
+        // 9 groups: 18 teams advance
+        //   ELIM 0 winner → R16 slot 3 (gitna top, with Seed 1 BYE)
+        //   ELIM 1 winner → R16 slot 4 (gitna bottom, with Seed 2 BYE)
+        if (curCount == 2 && nextCount == 8) {
+          // ELIM 0 (top) → R16 slot 3
+          final cy0 = 0 * curSlotH + curSlotH / 2;
+          final ny3 = 3 * nextSlotH + nextSlotH / 2;
+          canvas.drawLine(Offset(x1, cy0), Offset(mx, cy0), paint);
+          canvas.drawLine(Offset(mx, cy0), Offset(mx, ny3), paint);
+          canvas.drawLine(Offset(mx, ny3), Offset(x2, ny3), paint);
+
+          // ELIM 1 (bottom) → R16 slot 4
+          final cy1 = 1 * curSlotH + curSlotH / 2;
+          final ny4 = 4 * nextSlotH + nextSlotH / 2;
+          canvas.drawLine(Offset(x1, cy1), Offset(mx, cy1), paint);
+          canvas.drawLine(Offset(mx, cy1), Offset(mx, ny4), paint);
+          canvas.drawLine(Offset(mx, ny4), Offset(x2, ny4), paint);
+          continue;
+        }
+        // Generic ELIM→R16: each ELIM winner feeds outer slots (top + bottom)
+        if (curCount < nextCount) {
+          final List<int> slots = [0, nextCount - 1];
+          for (int ei = 0; ei < curCount && ei < slots.length; ei++) {
+            final cy = ei * curSlotH + curSlotH / 2;
+            final ny = slots[ei] * nextSlotH + nextSlotH / 2;
+            canvas.drawLine(Offset(x1, cy), Offset(mx, cy), paint);
+            canvas.drawLine(Offset(mx, cy), Offset(mx, ny), paint);
+            canvas.drawLine(Offset(mx, ny), Offset(x2, ny), paint);
+          }
+          continue;
+        }
+      }
+
+      // ── Special case: R16 → QF (9-group: adjacent pairs 0+1, 2+3, 4+5, 6+7) ─
+      if (curRound == 'round-of-16' && nextRound == 'quarter-finals'
+          && numGroups == 9 && curCount == 8 && nextCount == 4) {
+        for (int ni = 0; ni < nextCount; ni++) {
+          final ia  = ni * 2;
+          final ib  = ni * 2 + 1;
+          final cy1 = ia * curSlotH + curSlotH / 2;
+          final cy2 = ib * curSlotH + curSlotH / 2;
+          final ny  = ni * nextSlotH + nextSlotH / 2;
+          canvas.drawLine(Offset(x1, cy1), Offset(mx, cy1), paint);
+          canvas.drawLine(Offset(x1, cy2), Offset(mx, cy2), paint);
+          canvas.drawLine(Offset(mx, cy1), Offset(mx, cy2), paint);
+          canvas.drawLine(Offset(mx, ny),  Offset(x2, ny),  paint);
         }
         continue;
       }

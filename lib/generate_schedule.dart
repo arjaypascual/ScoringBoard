@@ -162,7 +162,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
         _soccerTeams = soccerTeams;
         // Clamp arenas to number of groups
         final maxA = soccerTeams.isEmpty ? 1
-            : (soccerTeams.length / 4).ceil().clamp(1, 8);
+            : (soccerTeams.length / 4).ceil().clamp(1, 9);
         if (_soccerArenas > maxA) _soccerArenas = maxA;
         for (final c in nonSoccer) {
           final id    = int.tryParse(c['category_id'].toString()) ?? 0;
@@ -429,7 +429,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
         }).toList();
         final shuffled = List<Map<String, dynamic>>.from(presentSoccerTeams)..shuffle();
         const tpg = 4;
-        final ng  = (shuffled.length / tpg).ceil().clamp(1, 8);
+        final ng  = (shuffled.length / tpg).ceil().clamp(1, 9);
         final bs  = shuffled.length ~/ ng;
         final ex  = shuffled.length % ng;
         final List<List<Map<String, dynamic>>> groups = [];
@@ -521,7 +521,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
       }).toList();
       final shuffled = List<Map<String, dynamic>>.from(presentSoccerTeams)..shuffle();
       const teamsPerGroup = 4;
-      final numGroups   = (shuffled.length / teamsPerGroup).ceil().clamp(1, 8);
+      final numGroups   = (shuffled.length / teamsPerGroup).ceil().clamp(1, 9);
       final baseSize    = shuffled.length ~/ numGroups;
       final extras      = shuffled.length % numGroups;
       final groupLabels = List.generate(numGroups, (i) => String.fromCharCode(65 + i));
@@ -1570,7 +1570,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
     final tc = _soccerTeams.length;
     if (tc < 4) return 1;
     const teamsPerGroup = 4;
-    return (tc / teamsPerGroup).ceil().clamp(1, 8);
+    return (tc / teamsPerGroup).ceil().clamp(1, 9);
   }
 
   Widget _buildSoccerCard() {
@@ -2074,7 +2074,7 @@ class _GenerateScheduleState extends State<GenerateSchedule>
   // ── Bracket flow steps ──────────────────────────────────────────────────────
   Widget _buildBracketFlow() {
     final tc = _soccerTeams.length;
-    final numGroups = (tc / 4).ceil().clamp(1, 8);
+    final numGroups = (tc / 4).ceil().clamp(1, 9);
     final advancing = numGroups * 2;
     int bracketSize = 1;
     while (bracketSize < advancing) bracketSize <<= 1;

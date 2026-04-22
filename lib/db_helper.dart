@@ -611,6 +611,14 @@ class DBHelper {
     // Step 6: Clear tiebreaker matches
     await clearTiebreakerMatches(categoryId);
 
+    // Step 7: Reset AUTO_INCREMENT so new match_ids are sequential and
+    // predictable. Without this, re-generated match_ids keep climbing and
+    // ORDER BY match_id ASC no longer reflects insertion/arena order.
+    try { await conn.execute("ALTER TABLE tbl_match AUTO_INCREMENT = 1"); } catch (_) {}
+    try { await conn.execute("ALTER TABLE tbl_schedule AUTO_INCREMENT = 1"); } catch (_) {}
+    try { await conn.execute("ALTER TABLE tbl_teamschedule AUTO_INCREMENT = 1"); } catch (_) {}
+    try { await conn.execute("ALTER TABLE tbl_score AUTO_INCREMENT = 1"); } catch (_) {}
+
     print("✅ Soccer schedule fully cleared for category $categoryId.");
   }
 
@@ -1465,6 +1473,33 @@ class DBHelper {
   static Future<void> advanceToKnockout(int categoryId) async {
     final conn = await getConnection();
 
+    // ── 0. Clear any stale KO seeding so INSERT IGNORE never produces duplicates ──
+    // advanceToKnockout is idempotent: calling it again always re-seeds from scratch.
+    // Deletes tbl_teamschedule + tbl_score rows for all KO matches of this category.
+    const koTypesToClear = [
+      'elimination','round-of-32','round-of-16','round-of-8',
+      'quarter-finals','semi-finals','third-place','final',
+    ];
+    try {
+      final inClause0 = koTypesToClear.map((t) => "'$t'").join(',');
+      final staleResult = await conn.execute("""
+        SELECT DISTINCT m.match_id FROM tbl_match m
+        WHERE m.bracket_type IN ($inClause0) AND m.category_id = $categoryId
+      """);
+      final staleIds = staleResult.rows
+          .map((r) => r.assoc()['match_id']?.toString() ?? '0')
+          .where((id) => id != '0')
+          .toList();
+      if (staleIds.isNotEmpty) {
+        final idList0 = staleIds.join(',');
+        await conn.execute("DELETE FROM tbl_score        WHERE match_id IN ($idList0)");
+        await conn.execute("DELETE FROM tbl_teamschedule WHERE match_id IN ($idList0)");
+        print("ℹ️  advanceToKnockout: cleared stale seeding for ${staleIds.length} KO matches.");
+      }
+    } catch (e) {
+      print("⚠️  advanceToKnockout: could not clear stale seeding — $e");
+    }
+
     // ── 1. Get all groups and their teams ────────────────────────────────────
     // SOURCE: tbl_soccer_groups — guaranteed to have ALL teams in all groups,
     // even those with no scores yet. This prevents teams from being silently
@@ -1483,6 +1518,27 @@ class DBHelper {
       if (!groupTeams[label]!.contains(teamId)) groupTeams[label]!.add(teamId);
     }
     if (groupTeams.isEmpty) throw Exception('No groups found for category $categoryId');
+
+    // ── PRE-CHECK: Ensure all group matches have scores for both teams ───────
+    // If any match is missing scores, advanceToKnockout will produce incorrect
+    // rankings, leading to TBD slots in the elimination bracket.
+    final unscoredCheck = await conn.execute("""
+      SELECT COUNT(*) AS unscored
+      FROM tbl_match m
+      JOIN tbl_teamschedule ts ON ts.match_id = m.match_id
+      JOIN tbl_team t ON t.team_id = ts.team_id
+      WHERE m.bracket_type = 'group'
+        AND m.category_id  = :catId
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_score sc
+          WHERE sc.match_id = m.match_id AND sc.team_id = ts.team_id
+        )
+    """, {"catId": categoryId});
+    final unscoredCount = int.tryParse(
+        unscoredCheck.rows.first.assoc()['unscored']?.toString() ?? '0') ?? 0;
+    if (unscoredCount > 0) {
+      print("⚠️  advanceToKnockout: $unscoredCount team-slots in group stage have no score yet. Proceeding with 0-stat fallback for unscored teams.");
+    }
     print("ℹ️  Groups loaded: ${groupTeams.map((k,v) => MapEntry(k, v.length))}");
 
     // ── 2. Get scores per team from group stage using tbl_score ────────────────
@@ -1650,60 +1706,60 @@ class DBHelper {
       // final int byeCnt  = halfB - elimCnt;  // teams with BYEs (unused variable)
 
       if (elimCnt == 0) {
-        if (allAdvancing.length <= 4) {
-          // 2 groups → 4 teams → direct to SF, no ELIM.
-          // Standard seeding: #1 vs #4, #2 vs #3
-          // (top seed faces weakest, second seed faces third)
-          seeds.add({
-            'home': allAdvancing.isNotEmpty ? allAdvancing[0] : 0,
-            'away': allAdvancing.length > 3 ? allAdvancing[3] : 0,
-          });
-          seeds.add({
-            'home': allAdvancing.length > 1 ? allAdvancing[1] : 0,
-            'away': allAdvancing.length > 2 ? allAdvancing[2] : 0,
-          });
-        } else {
-          // 4 groups → 8 teams → direct to QF, no ELIM, no BYE.
-          // Standard bracket seeding: top half vs bottom half
-          // #1 vs #8, #4 vs #5 (top half)
-          // #2 vs #7, #3 vs #6 (bottom half)
-          // This guarantees #1 and #2 are on opposite sides of the bracket.
-          final int tc = allAdvancing.length;
-          seeds.add({
-            'home': tc > 0 ? allAdvancing[0] : 0,
-            'away': tc > 7 ? allAdvancing[7] : 0,
-          });
-          seeds.add({
-            'home': tc > 3 ? allAdvancing[3] : 0,
-            'away': tc > 4 ? allAdvancing[4] : 0,
-          });
-          seeds.add({
-            'home': tc > 2 ? allAdvancing[2] : 0,
-            'away': tc > 5 ? allAdvancing[5] : 0,
-          });
-          seeds.add({
-            'home': tc > 1 ? allAdvancing[1] : 0,
-            'away': tc > 6 ? allAdvancing[6] : 0,
-          });
-          // Same-group conflict resolution for direct QF pairs
+        // 2 groups → 4 teams → direct to SF, no ELIM.
+        // Standard seeding: #1 vs #4, #2 vs #3
+        // (top seed faces weakest, second seed faces third)
+        seeds.add({
+          'home': allAdvancing.isNotEmpty       ? allAdvancing[0] : 0,
+          'away': allAdvancing.length > 3       ? allAdvancing[3] : 0,
+        });
+        seeds.add({
+          'home': allAdvancing.length > 1       ? allAdvancing[1] : 0,
+          'away': allAdvancing.length > 2       ? allAdvancing[2] : 0,
+        });
+      } else if (advTeams == 6) {
+        // ── SPECIAL CASE: 3 groups → 6 teams → ELIM(2) → SF(2) ─────────────
+        // generateFifaSchedule creates: ELIM(2 matches), SF(2 matches)
+        // NO QF round exists for 3 groups — top 2 seeds BYE directly to SF.
+        //
+        // Seeding:
+        //   ELIM match 0: Seed 3 vs Seed 6  (lowest seeds fight)
+        //   ELIM match 1: Seed 4 vs Seed 5
+        //   BYE: Seed 1 → SF slot 0, Seed 2 → SF slot 1
+        //
+        // BYE seeds go directly to SF (not QF which doesn't exist)
+        for (int i = 0; i < 2 && i < allAdvancing.length; i++) {
+          byeSeeds.add(allAdvancing[i]); // Seed 1 and Seed 2
+        }
+
+        // ELIM pairs: seeds 3,4,5,6 → [3v6], [4v5]
+        final List<int> elimTeams6 = allAdvancing.length >= 6
+            ? allAdvancing.sublist(2) // seeds 3,4,5,6
+            : allAdvancing.length > 2 ? allAdvancing.sublist(2) : [];
+        {
+          int lo = 0, hi = elimTeams6.length - 1;
+          while (lo < hi) {
+            seeds.add({'home': elimTeams6[lo], 'away': elimTeams6[hi]});
+            lo++; hi--;
+          }
+          // Same-group conflict resolution for 3-group ELIM pairs
           bool conflictResolved = false;
           for (int attempt = 0; attempt < seeds.length * 2 && !conflictResolved; attempt++) {
             bool anyConflict = false;
             for (int pi = 0; pi < seeds.length; pi++) {
-              final homeId = seeds[pi]['home'] as int;
-              final awayId = seeds[pi]['away'] as int;
-              if (homeId > 0 && awayId > 0 &&
-                  teamGroup[homeId] != null &&
-                  teamGroup[awayId] != null &&
-                  teamGroup[homeId] == teamGroup[awayId]) {
+              final home = seeds[pi]['home'] as int;
+              final away = seeds[pi]['away'] as int;
+              if (teamGroup[home] != null &&
+                  teamGroup[away] != null &&
+                  teamGroup[home] == teamGroup[away]) {
                 final nextPi = (pi + 1) % seeds.length;
                 if (nextPi != pi) {
                   final swapAway = seeds[nextPi]['away'] as int;
-                  if (teamGroup[homeId] != teamGroup[swapAway] &&
-                      teamGroup[seeds[nextPi]['home'] as int] != teamGroup[awayId]) {
+                  if (teamGroup[home] != teamGroup[swapAway] &&
+                      teamGroup[seeds[nextPi]['home'] as int] != teamGroup[away]) {
                     seeds[pi]['away']     = swapAway;
-                    seeds[nextPi]['away'] = awayId;
-                    print("ℹ️  Direct 8-team QF conflict resolved: swapped slots $pi and $nextPi");
+                    seeds[nextPi]['away'] = away;
+                    print("ℹ️  3-grp ELIM conflict resolved: swapped between matches $pi and $nextPi");
                     anyConflict = true;
                     break;
                   }
@@ -1712,41 +1768,238 @@ class DBHelper {
             }
             if (!anyConflict) conflictResolved = true;
           }
-          // NOTE: byeSeeds stays empty — no BYEs needed for 8-team direct QF.
         }
+        // No direct QF pairs for 3-group — QF round doesn't exist
+        _directQFPairs = [];
+        print("ℹ️  3-group path: ${byeSeeds.length} BYEs → SF, ${seeds.length} ELIM matches (seeds 3-6)");
+      } else if (n == 7) {
+        // ── SPECIAL CASE: 7 groups → up to 14 teams → ELIM(6) → QF(4) → SF(2) ────
+        // Uses n == 7 (group count) not advTeams == 14, so absent teams don't
+        // accidentally fall through to the generic 5/6-group branch.
+        //
+        // Confirmed bracket design:
+        //   QF 1: Seed 1 (BYE)  vs  Winner of ELIM 1
+        //   QF 2: Winner ELIM 2 vs  Winner of ELIM 3
+        //   QF 3: Winner ELIM 4 vs  Winner of ELIM 5
+        //   QF 4: Seed 2 (BYE)  vs  Winner of ELIM 6
+        //
+        // Seed 1 → BYE → QF slot 0 (outer top)
+        // Seed 2 → BYE → QF slot 3 (outer bottom)
+        // Seeds 3–14 → 6 ELIM matches:
+        //   ELIM 1: Seed 3  vs Seed 14  → feeds QF 1
+        //   ELIM 2: Seed 4  vs Seed 11  → feeds QF 2 (top)
+        //   ELIM 3: Seed 5  vs Seed 10  → feeds QF 2 (bottom)
+        //   ELIM 4: Seed 6  vs Seed 9   → feeds QF 3 (top)
+        //   ELIM 5: Seed 7  vs Seed 8   → feeds QF 3 (bottom)  (NOTE: only 12 available so Seed 13)
+        //   ELIM 6: Seed 12 vs Seed 13  → feeds QF 4
+        //
+        // No direct QF inner pairs — all 4 QF slots wait for ELIM winners
+        // (except Seed 1 and Seed 2 BYEs at outer slots).
+
+        // BYE seeds: Seed 1 → QF slot 0, Seed 2 → QF slot 3
+        if (allAdvancing.isNotEmpty) byeSeeds.add(allAdvancing[0]); // Seed 1
+        if (allAdvancing.length > 1) byeSeeds.add(allAdvancing[1]); // Seed 2
+
+        // ELIM teams: seeds 3..14 (indices 2..13)
+        final List<int> elimTeams14 = allAdvancing.length > 2
+            ? List<int>.from(allAdvancing.sublist(2))
+            : <int>[];
+
+        // ELIM pairings: bracket-style seeding
+        //   Match 0: seed[0]  vs seed[et-1]  (3 vs 14) → QF 0  (single, with BYE Seed 1)
+        //   Match 1: seed[1]  vs seed[8]     (4 vs 11) → QF 1  (merge top)
+        //   Match 2: seed[2]  vs seed[7]     (5 vs 10) → QF 1  (merge bottom)
+        //   Match 3: seed[3]  vs seed[6]     (6 vs  9) → QF 2  (merge top)
+        //   Match 4: seed[4]  vs seed[5]     (7 vs  8) → QF 2  (merge bottom)
+        //   Match 5: seed[9]  vs seed[10]    (12 vs 13)→ QF 3  (single, with BYE Seed 2)
+        final List<List<int>> elimPairs14 = [];
+        final int et = elimTeams14.length;
+        if (et >= 2) {
+          // E0: 3 vs 14 (or last available)
+          elimPairs14.add([elimTeams14[0], elimTeams14[et - 1]]);
+        }
+        if (et >= 4) {
+          // E1: 4 vs 11
+          final opp1 = et > 8 ? 8 : et - 2;
+          elimPairs14.add([elimTeams14[1], elimTeams14[opp1]]);
+        }
+        if (et >= 4) {
+          // E2: 5 vs 10
+          final opp2 = et > 7 ? 7 : et - 3;
+          elimPairs14.add([elimTeams14[2], elimTeams14[opp2]]);
+        }
+        if (et >= 6) {
+          // E3: 6 vs 9
+          final opp3 = et > 6 ? 6 : et - 4;
+          elimPairs14.add([elimTeams14[3], elimTeams14[opp3]]);
+        }
+        if (et >= 6) {
+          // E4: 7 vs 8
+          final idx4a = 4;
+          final idx4b = (et > 5) ? 5 : et - 1;
+          if (idx4a < et && idx4b < et && idx4a != idx4b) {
+            elimPairs14.add([elimTeams14[idx4a], elimTeams14[idx4b]]);
+          }
+        }
+        if (et >= 12) {
+          // E5: 12 vs 13
+          if (9 < et && 10 < et) {
+            elimPairs14.add([elimTeams14[9], elimTeams14[10]]);
+          }
+        }
+
+        // Same-group conflict resolution for ELIM pairs.
+        // CRITICAL for 7-group: only swap the AWAY player within pairs that
+        // share the SAME QF destination slot. Never swap across different QF
+        // slots — that would mis-route a winner to the wrong QF match.
+        //
+        // QF slot groupings (from _elim7toQF = [0,1,1,2,2,3]):
+        //   Slot 0: only pair index 0  (E0 alone → can't swap)
+        //   Slot 1: pair indices 1,2   (E1 & E2 merge → can swap within)
+        //   Slot 2: pair indices 3,4   (E3 & E4 merge → can swap within)
+        //   Slot 3: only pair index 5  (E5 alone → can't swap)
+        const List<List<int>> sameSlotGroups = [[1, 2], [3, 4]];
+        for (int attempt = 0; attempt < 6; attempt++) {
+          bool anyConflict = false;
+          for (final grp in sameSlotGroups) {
+            final pi = grp[0];
+            final qi = grp[1];
+            if (pi >= elimPairs14.length || qi >= elimPairs14.length) continue;
+            // Check if either match in this QF-slot group has a same-group conflict
+            for (final checkIdx in [pi, qi]) {
+              final otherIdx = checkIdx == pi ? qi : pi;
+              final home = elimPairs14[checkIdx][0];
+              final away = elimPairs14[checkIdx][1];
+              if (teamGroup[home] != null &&
+                  teamGroup[away] != null &&
+                  teamGroup[home] == teamGroup[away]) {
+                // Try swapping away with the other match's away (same QF slot)
+                final swapAway = elimPairs14[otherIdx][1];
+                if (teamGroup[home] != teamGroup[swapAway] &&
+                    teamGroup[elimPairs14[otherIdx][0]] != teamGroup[away]) {
+                  elimPairs14[checkIdx][1] = swapAway;
+                  elimPairs14[otherIdx][1] = away;
+                  print("ℹ️  7-grp ELIM conflict resolved within QF slot: swapped [$checkIdx] ↔ [$otherIdx] away");
+                  anyConflict = true;
+                  break;
+                }
+              }
+            }
+            if (anyConflict) break;
+          }
+          if (!anyConflict) break;
+        }
+
+        for (final pair in elimPairs14) {
+          seeds.add({'home': pair[0], 'away': pair[1]});
+        }
+
+        // No direct QF inner pairs — all QF slots are filled by ELIM winners + BYEs
+        _directQFPairs = [];
+        print("ℹ️  7-group path: Seed1+Seed2 BYE → QF outer slots. ${seeds.length} ELIM matches (seeds 3-14).");
+
+      } else if (n == 9) {
+        // ── SPECIAL CASE: 9 groups → 18 teams → ELIM(2) → R16(8) → QF(4) → SF(2) ──
+        //
+        // Bracket layout:
+        //   R16 slot 0: Seed 3  vs Seed 14  (direct)
+        //   R16 slot 1: Seed 5  vs Seed 12  (direct)
+        //   R16 slot 2: Seed 7  vs Seed 10  (direct)
+        //   R16 slot 3: Seed 1  (BYE) vs ELIM 0 winner  ← gitna top
+        //   R16 slot 4: Seed 2  (BYE) vs ELIM 1 winner  ← gitna bottom
+        //   R16 slot 5: Seed 9  vs Seed 8   (direct)
+        //   R16 slot 6: Seed 11 vs Seed 6   (direct)
+        //   R16 slot 7: Seed 13 vs Seed 4   (direct)
+        //
+        // ELIM 0: Seed 17 vs Seed 18  → R16 slot 3 (with Seed 1 BYE)
+        // ELIM 1: Seed 15 vs Seed 16  → R16 slot 4 (with Seed 2 BYE)
+
+        // BYE seeds: Seed 1 → R16 slot 3, Seed 2 → R16 slot 4
+        if (allAdvancing.isNotEmpty) byeSeeds.add(allAdvancing[0]); // Seed 1
+        if (allAdvancing.length > 1) byeSeeds.add(allAdvancing[1]); // Seed 2
+
+        // ELIM pairings (bottom 4 seeds):
+        //   ELIM 0: Seed 17 vs Seed 18 (indices 16, 17)
+        //   ELIM 1: Seed 15 vs Seed 16 (indices 14, 15)
+        final int ae = allAdvancing.length;
+        if (ae >= 18) {
+          seeds.add({'home': allAdvancing[16], 'away': allAdvancing[17]}); // ELIM 0
+          seeds.add({'home': allAdvancing[14], 'away': allAdvancing[15]}); // ELIM 1
+        } else if (ae >= 16) {
+          seeds.add({'home': allAdvancing[ae - 2], 'away': allAdvancing[ae - 1]});
+          if (ae >= 16) seeds.add({'home': allAdvancing[ae - 4], 'away': allAdvancing[ae - 3]});
+        }
+
+        // Same-group conflict resolution for ELIM pairs
+        for (int attempt = 0; attempt < 4; attempt++) {
+          bool anyConflict = false;
+          for (int pi = 0; pi < seeds.length; pi++) {
+            final home = seeds[pi]['home'] as int;
+            final away = seeds[pi]['away'] as int;
+            if (teamGroup[home] != null &&
+                teamGroup[away] != null &&
+                teamGroup[home] == teamGroup[away]) {
+              final nextPi = (pi + 1) % seeds.length;
+              if (nextPi != pi) {
+                final swapAway = seeds[nextPi]['away'] as int;
+                if (teamGroup[home] != teamGroup[swapAway] &&
+                    teamGroup[seeds[nextPi]['home'] as int] != teamGroup[away]) {
+                  seeds[pi]['away']     = swapAway;
+                  seeds[nextPi]['away'] = away;
+                  anyConflict = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (!anyConflict) break;
+        }
+
+        // Direct R16 pairs (seeds 3–14, slots 0,1,2,5,6,7)
+        // slot 0: Seed 3  vs Seed 14  (indices 2, 13)
+        // slot 1: Seed 5  vs Seed 12  (indices 4, 11)
+        // slot 2: Seed 7  vs Seed 10  (indices 6,  9)
+        // slot 5: Seed 9  vs Seed 8   (indices 8,  7)
+        // slot 6: Seed 11 vs Seed 6   (indices 10, 5)
+        // slot 7: Seed 13 vs Seed 4   (indices 12, 3)
+        final List<List<int>> direct9Pairs = [];
+        final List<int> dIdx = [2, 4, 6, 8, 10, 12]; // home seed indices
+        final List<int> oIdx = [13, 11, 9, 7, 5, 3];  // away seed indices
+        for (int i = 0; i < dIdx.length; i++) {
+          if (dIdx[i] < ae && oIdx[i] < ae) {
+            direct9Pairs.add([allAdvancing[dIdx[i]], allAdvancing[oIdx[i]]]);
+          }
+        }
+        _directQFPairs = direct9Pairs;
+
+        print("ℹ️  9-group path: Seed1+Seed2 BYE → R16 slots 3&4. ${seeds.length} ELIM matches, ${direct9Pairs.length} direct R16 pairs.");
+
       } else {
-        // Bracket design (user-specified):
+        // ── GENERIC: 5, 6 groups (or other even counts) ──────────────────────
         //
-        //   QF slot 0: Seed 1  (BYE) vs Winner of ELIM match 0
-        //   QF slot 1: Seed 3  vs Seed (byeCount*2)           ← inner direct match
-        //   QF slot 2: Seed 4  vs Seed (byeCount*2 - 1)       ← inner direct match
-        //   QF slot 3: Seed 2  (BYE) vs Winner of ELIM match 1
+        //   QF slot 0: Seed 1 (BYE) vs Winner of ELIM match 0
+        //   QF slot 1: Seed 3 vs Seed 6   ← direct inner match
+        //   QF slot 2: Seed 4 vs Seed 5   ← direct inner match
+        //   QF slot 3: Seed 2 (BYE) vs Winner of ELIM match 1
         //
-        // Top 2 seeds always get BYEs (wait for their ELIM winner in QF).
-        // The next 4 seeds (3,4,5,6) play each other directly in QF inner slots.
-        // The bottom seeds (7+) play in ELIM.
-        //
-        // This gives a clean 4-QF bracket regardless of exact team count (5-7 groups).
+        // Top 2 seeds get BYEs. Middle seeds play direct QF inner slots.
+        // Bottom seeds play in ELIM.
 
         // Always exactly 2 BYE seeds (Seed 1 and Seed 2)
         const int byeCount = 2;
-
-        // BYE seeds → will be placed at QF slots 0 and 3 (outer) in step 8
         for (int i = 0; i < byeCount && i < allAdvancing.length; i++) {
           byeSeeds.add(allAdvancing[i]);
         }
 
-        // Middle seeds → direct inner QF slots (e.g. seeds 3,4,5,6 for 5 groups)
         // ELIM teams = bottom (elimCnt * 2) seeds
-        final int elimTeamCount = elimCnt * 2;           // = 4 teams for 5-grp, 8 for 7-grp
-        final int directQFEnd   = advTeams - elimTeamCount; // last index of direct QF teams
+        final int elimTeamCount = elimCnt * 2;
+        final int directQFEnd   = advTeams - elimTeamCount;
         final List<int> directQFTeams = List<int>.from(
-            allAdvancing.sublist(byeCount, directQFEnd));
+            allAdvancing.sublist(byeCount, directQFEnd.clamp(byeCount, allAdvancing.length)));
         final List<int> elimTeams = List<int>.from(
-            allAdvancing.sublist(directQFEnd));
+            allAdvancing.sublist(directQFEnd.clamp(0, allAdvancing.length)));
 
         // Direct QF pairings: highest vs lowest working inward
-        // e.g. seeds 3,4,5,6 → [3v6], [4v5]
         List<List<int>> directPairs = [];
         {
           int lo = 0, hi = directQFTeams.length - 1;
@@ -1754,7 +2007,7 @@ class DBHelper {
             directPairs.add([directQFTeams[lo], directQFTeams[hi]]);
             lo++; hi--;
           }
-          // Same-group conflict resolution for direct QF pairs
+          // Same-group conflict resolution
           bool conflictResolved = false;
           for (int attempt = 0; attempt < directPairs.length * 2 && !conflictResolved; attempt++) {
             bool anyConflict = false;
@@ -1771,7 +2024,7 @@ class DBHelper {
                       teamGroup[directPairs[nextPi][0]] != teamGroup[away]) {
                     directPairs[pi][1]     = swapAway;
                     directPairs[nextPi][1] = away;
-                    print("ℹ️  Direct QF conflict resolved: swapped between slots $pi and $nextPi");
+                    print("ℹ️  Direct QF conflict resolved: swapped slots $pi and $nextPi");
                     anyConflict = true;
                     break;
                   }
@@ -1782,7 +2035,7 @@ class DBHelper {
           }
         }
 
-        // ELIM pairings: highest vs lowest working inward (seeds 7v10, 8v9)
+        // ELIM pairings: highest vs lowest working inward
         final List<List<int>> elimPairs = [];
         {
           int lo = 0, hi = elimTeams.length - 1;
@@ -1790,7 +2043,7 @@ class DBHelper {
             elimPairs.add([elimTeams[lo], elimTeams[hi]]);
             lo++; hi--;
           }
-          // Same-group conflict resolution for ELIM pairs
+          // Same-group conflict resolution
           bool conflictResolved = false;
           for (int attempt = 0; attempt < elimPairs.length * 2 && !conflictResolved; attempt++) {
             bool anyConflict = false;
@@ -1807,7 +2060,7 @@ class DBHelper {
                       teamGroup[elimPairs[nextPi][0]] != teamGroup[away]) {
                     elimPairs[pi][1]     = swapAway;
                     elimPairs[nextPi][1] = away;
-                    print("ℹ️  ELIM conflict resolved: swapped between matches $pi and $nextPi");
+                    print("ℹ️  ELIM conflict resolved: swapped matches $pi and $nextPi");
                     anyConflict = true;
                     break;
                   }
@@ -1818,18 +2071,11 @@ class DBHelper {
           }
         }
 
-        // `seeds` = ELIM pairings (seeded into tbl_teamschedule for ELIM matches)
         for (final pair in elimPairs) {
           seeds.add({'home': pair[0], 'away': pair[1]});
         }
 
-        // `directQFSeeds` is used in step 8b to seed inner QF slots directly.
-        // Store as a list of pairs on byeSeeds extension:
-        // We repurpose the existing mechanism — see step 8b below.
-        // Tag directPairs into a side-list passed via a local variable.
-        // (byeSeeds stays as [Seed1, Seed2] for outer QF slot placement.)
-        // directPairs is used in the new step 8b block below.
-        _directQFPairs = directPairs; // assigned to the outer variable declared above
+        _directQFPairs = directPairs;
       }
     }
 
@@ -1951,6 +2197,8 @@ class DBHelper {
               (match_id, round_id, team_id, referee_id, arena_number)
             VALUES (:mid, 1, :tid, :rid, :arena)
           """, {"mid": matchId, "tid": homeId, "rid": refereeId, "arena": arenaNum});
+        } else {
+          print("⚠️  KO match $matchId arena $arenaNum: homeId is 0 — slot will show TBD. Check group scores are complete.");
         }
         if (awayId > 0) {
           await conn.execute("""
@@ -1958,6 +2206,8 @@ class DBHelper {
               (match_id, round_id, team_id, referee_id, arena_number)
             VALUES (:mid, 1, :tid, :rid, :arena)
           """, {"mid": matchId, "tid": awayId, "rid": refereeId, "arena": arenaNum});
+        } else {
+          print("⚠️  KO match $matchId arena $arenaNum: awayId is 0 — slot will show TBD. Check group scores are complete and no ties are unresolved.");
         }
         print("✅ KO match $matchId arena $arenaNum seeded: home=$homeId away=$awayId");
       }
@@ -2014,9 +2264,11 @@ class DBHelper {
       }
 
       print("ℹ️  Seeding ${byeSeeds.length} BYE team(s) directly into '$nextRound'");
-      // FIX: Added category_id filter — only seed into THIS category's matches.
+      // Get next-round matches ordered by match_id ASC.
+      // match_id order = insertion order = Arena 1,2,3,4 (since clearSoccerSchedule
+      // now resets AUTO_INCREMENT before every re-generate).
       final nextRoundMatches = await conn.execute("""
-        SELECT m.match_id, TIME_FORMAT(s.schedule_start,'%H:%i') AS slot_time
+        SELECT m.match_id
         FROM tbl_match m
         JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
         WHERE m.bracket_type = :nr
@@ -2024,50 +2276,54 @@ class DBHelper {
         ORDER BY s.schedule_start ASC, m.match_id ASC
       """, {"nr": nextRound, "catId": categoryId});
 
-      // Build arena-number map for the next round
-      final Map<int, int> byeMatchArena = {};
-      final Map<String, int> byeSlotCounter = {};
-      final nextSlots = <int>[];
-      for (final row in nextRoundMatches.rows) {
-        final mid  = int.tryParse(row.assoc()['match_id']?.toString() ?? '0') ?? 0;
-        final slot = row.assoc()['slot_time']?.toString() ?? '';
-        if (mid <= 0) continue;
-        byeSlotCounter[slot] = (byeSlotCounter[slot] ?? 0) + 1;
-        byeMatchArena[mid]   = byeSlotCounter[slot]!;
-        nextSlots.add(mid);
-      }
+      final nextSlots = nextRoundMatches.rows
+          .map((r) => int.tryParse(r.assoc()['match_id']?.toString() ?? '0') ?? 0)
+          .where((id) => id > 0)
+          .toList();
 
-      // Place BYE seeds at OUTER QF slots: Seed1 → slot 0, Seed2 → slot 3.
-      // Inner slots (1 and 2) are reserved for direct QF pairs (step 8b).
-      // Slot layout: [BYE1+ElimWin0] [Direct3v6] [Direct4v5] [BYE2+ElimWin1]
-      final List<int> outerSlotIndices = [0, nextSlots.length - 1]; // first and last
+      // BYE slot positions:
+      //   9-group: Seed1 → slot 3, Seed2 → slot 4 (gitna ng R16)
+      //   7-group: Seed1 → slot 0 (Arena 1), Seed2 → slot 3 (Arena 4)
+      //   Others:  Seed1 → slot 0, Seed2 → last slot
+      // Arena number = slot index + 1 (explicit, not derived from counter)
+      final List<int> byeSlotIndices = (n == 9)
+          ? [3, 4]
+          : [0, nextSlots.length - 1];
       for (int bi = 0; bi < byeSeeds.length; bi++) {
-        final teamId = byeSeeds[bi];
-        final slotIdx = bi < outerSlotIndices.length ? outerSlotIndices[bi] : bi;
+        final teamId  = byeSeeds[bi];
+        final slotIdx = bi < byeSlotIndices.length ? byeSlotIndices[bi] : bi;
         if (teamId <= 0 || slotIdx >= nextSlots.length) continue;
         final matchId  = nextSlots[slotIdx];
-        final arenaNum = byeMatchArena[matchId] ?? 1;
+        // Arena number is EXPLICITLY the 1-based position in the slot list.
+        // This must match how advanceKnockoutWinner looks up QF slots.
+        final arenaNum = slotIdx + 1;
         await conn.execute("""
           INSERT IGNORE INTO tbl_teamschedule
             (match_id, round_id, team_id, referee_id, arena_number)
           VALUES (:mid, 1, :tid, :rid, :arena)
         """, {"mid": matchId, "tid": teamId, "rid": refereeId, "arena": arenaNum});
-        print("✅ BYE team $teamId → '$nextRound' outer slot $slotIdx match $matchId");
+        print("✅ BYE team $teamId → '$nextRound' slot $slotIdx match $matchId arena $arenaNum");
       }
     }
 
-    // ── 8b. Seed direct QF pairs into INNER QF slots (1 and 2) ─────────────
-    // These are teams that skip ELIM but aren't top-2 seeds.
-    // e.g. for 5 groups: seeds 3,4,5,6 paired as [3v6] and [4v5].
+    // ── 8b. Seed direct pairs into correct round slots ──────────────────────
+    // 9-group: direct pairs go into R16 outer slots (0,1,2,5,6,7)
+    // Others:  direct pairs go into inner QF slots (1 and 2)
     if (_directQFPairs.isNotEmpty) {
+      // Determine target round and slot indices
+      final String directRound = (n == 9) ? 'round-of-16' : 'quarter-finals';
+      final List<int> directSlotIndices = (n == 9)
+          ? [0, 1, 2, 5, 6, 7]  // outer R16 slots for 9-group
+          : [];                   // empty = use inner slots logic below
+
       final qfResult = await conn.execute("""
         SELECT m.match_id, TIME_FORMAT(s.schedule_start,'%H:%i') AS slot_time
         FROM tbl_match m
         JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
-        WHERE m.bracket_type = 'quarter-finals'
+        WHERE m.bracket_type = :bt
           AND m.category_id  = :catId
         ORDER BY s.schedule_start ASC, m.match_id ASC
-      """, {"catId": categoryId});
+      """, {"bt": directRound, "catId": categoryId});
       final Map<int, int> qfMatchArena = {};
       final Map<String, int> qfSlotCounter = {};
       final List<int> qfSlots = [];
@@ -2079,15 +2335,25 @@ class DBHelper {
         qfMatchArena[mid]   = qfSlotCounter[slot]!;
         qfSlots.add(mid);
       }
-      // Inner slots are indices 1 and 2 (between the two outer BYE slots).
-      // For 4 QF slots: outer=[0,3], inner=[1,2] → [Direct3v6] [Direct4v5]
-      // We always want exactly the middle slots regardless of total count.
-      final List<int> innerSlots = qfSlots.length >= 4
-          ? qfSlots.sublist(1, qfSlots.length - 1)
-          : (qfSlots.length >= 2 ? qfSlots.sublist(1) : qfSlots);
+
+      // Build the actual slot list to seed into
+      final List<int> targetSlots;
+      if (directSlotIndices.isNotEmpty) {
+        // 9-group: explicit slot indices into R16
+        targetSlots = directSlotIndices
+            .where((i) => i < qfSlots.length)
+            .map((i) => qfSlots[i])
+            .toList();
+      } else {
+        // Others: inner slots (everything except outer 0 and last)
+        targetSlots = qfSlots.length >= 2
+            ? qfSlots.sublist(1, qfSlots.length - 1)
+            : qfSlots;
+      }
+
       for (int pi = 0; pi < _directQFPairs.length; pi++) {
-        if (pi >= innerSlots.length) break;
-        final matchId  = innerSlots[pi];
+        if (pi >= targetSlots.length) break;
+        final matchId  = targetSlots[pi];
         final arenaNum = qfMatchArena[matchId] ?? 1;
         final homeId   = _directQFPairs[pi][0];
         final awayId   = _directQFPairs[pi][1];
@@ -2236,36 +2502,39 @@ class DBHelper {
     final refereeId = refResult.rows.isEmpty ? 1
         : int.tryParse(refResult.rows.first.assoc()['referee_id']?.toString() ?? '1') ?? 1;
 
-    // 4. Seed team into the correct slot of target round.
-    //
-    // PRIORITY: prefer a slot that already has exactly 1 team (a BYE seed
-    // waiting for its opponent) before falling back to an empty slot.
-    // This prevents ELIM winners from landing in inner direct-QF slots
-    // instead of the outer BYE slots that are waiting for them.
-    Future<void> seedIntoRound(String targetType, int teamId) async {
-      // First try: find a slot that already has 1 team (BYE partner slot)
-      var matchResult = await conn.execute("""
-        SELECT m.match_id,
-               TIME_FORMAT(s.schedule_start,'%H:%i') AS slot_time,
-               COUNT(ts.teamschedule_id) AS team_count
-        FROM tbl_match m
-        JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
-        LEFT JOIN tbl_teamschedule ts ON ts.match_id = m.match_id
-        WHERE m.bracket_type = :bt
-          AND m.category_id  = :catId
-          AND m.match_id NOT IN (
-            SELECT DISTINCT ts2.match_id FROM tbl_teamschedule ts2
-            WHERE ts2.team_id = :tid
-          )
-        GROUP BY m.match_id, s.schedule_start
-        HAVING team_count = 1
-        ORDER BY s.schedule_start ASC, m.match_id ASC
-        LIMIT 1
-      """, {"bt": targetType, "tid": teamId, "catId": categoryId});
+    // 4. Seed team into first available slot of target round
+    Future<void> seedIntoRound(String targetType, int teamId, {int? forceMatchId}) async {
+      int nextMatchId;
+      String slotTime = '';
 
-      // Fallback: if no 1-team slot exists, use any slot with < 2 teams
-      if (matchResult.rows.isEmpty) {
-        matchResult = await conn.execute("""
+      if (forceMatchId != null && forceMatchId > 0) {
+        // ── Forced slot: used by 7-group ELIM→QF explicit mapping ─────────────
+        // Arena number = 1-based position ordered by schedule_start ASC, match_id ASC.
+        // Must be consistent with BYE seeding (slotIndex + 1).
+        final allQfResult = await conn.execute("""
+          SELECT m2.match_id
+          FROM tbl_match m2
+          JOIN tbl_schedule s2 ON s2.schedule_id = m2.schedule_id
+          WHERE m2.bracket_type = :bt AND m2.category_id = :catId
+          ORDER BY s2.schedule_start ASC, m2.match_id ASC
+        """, {"bt": targetType, "catId": categoryId});
+        final allQfIds = allQfResult.rows
+            .map((r) => int.tryParse(r.assoc()['match_id']?.toString() ?? '0') ?? 0)
+            .where((id) => id > 0)
+            .toList();
+        final posIdx = allQfIds.indexOf(forceMatchId);
+        final forcedArena = posIdx >= 0 ? posIdx + 1 : 1;
+
+        await conn.execute("""
+          INSERT IGNORE INTO tbl_teamschedule
+            (match_id, round_id, team_id, referee_id, arena_number)
+          VALUES (:nmid, 1, :tid, :rid, :arena)
+        """, {"nmid": forceMatchId, "tid": teamId, "rid": refereeId, "arena": forcedArena});
+        print("✅ Advance (forced): team $teamId -> $targetType match $forceMatchId arena $forcedArena");
+        return;
+      } else {
+        // FIX: Added category_id filter so winner only seeds into THIS category's matches.
+        final matchResult = await conn.execute("""
           SELECT m.match_id,
                  TIME_FORMAT(s.schedule_start,'%H:%i') AS slot_time,
                  COUNT(ts.teamschedule_id) AS team_count
@@ -2283,12 +2552,12 @@ class DBHelper {
           ORDER BY s.schedule_start ASC, m.match_id ASC
           LIMIT 1
         """, {"bt": targetType, "tid": teamId, "catId": categoryId});
+        if (matchResult.rows.isEmpty) return;
+        final row = matchResult.rows.first.assoc();
+        nextMatchId = int.tryParse(row['match_id']?.toString() ?? '0') ?? 0;
+        slotTime    = row['slot_time']?.toString() ?? '';
+        if (nextMatchId == 0) return;
       }
-      if (matchResult.rows.isEmpty) return;
-      final row         = matchResult.rows.first.assoc();
-      final nextMatchId = int.tryParse(row['match_id']?.toString() ?? '0') ?? 0;
-      final slotTime    = row['slot_time']?.toString() ?? '';
-      if (nextMatchId == 0) return;
 
       // Compute arena_number: count how many other matches in the same time slot
       // already have this round type — position = existing count + 1
@@ -2313,7 +2582,131 @@ class DBHelper {
       print("✅ Advance: team $teamId -> $targetType (match $nextMatchId arena $arenaNum)");
     }
 
-    await seedIntoRound(nextWinnerType, winnerTeamId);
+    // ── 7-group special: explicit ELIM→QF slot mapping ───────────────────────
+    // Bracket design:
+    //   QF 0: Seed 1 (BYE)     vs Winner of ELIM 0             → slot index 0
+    //   QF 1: Winner of ELIM 1 vs Winner of ELIM 2             → slot index 1
+    //   QF 2: Winner of ELIM 3 vs Winner of ELIM 4             → slot index 2
+    //   QF 3: Seed 2 (BYE)     vs Winner of ELIM 5             → slot index 3
+    //
+    // ELIM match order (by match_id ASC):
+    //   ELIM index 0 → QF slot 0  (with BYE Seed 1)
+    //   ELIM index 1 → QF slot 1
+    //   ELIM index 2 → QF slot 1  (merges with ELIM 1 winner)
+    //   ELIM index 3 → QF slot 2
+    //   ELIM index 4 → QF slot 2  (merges with ELIM 3 winner)
+    //   ELIM index 5 → QF slot 3  (with BYE Seed 2)
+    const List<int> _elim7toQF = [0, 1, 1, 2, 2, 3]; // ELIM index → QF slot index
+
+    bool _advanced = false;
+    if (currentType == 'elimination' && nextWinnerType == 'quarter-finals') {
+      // Count how many elimination matches exist for this category
+      final elimCountResult = await conn.execute("""
+        SELECT COUNT(*) AS cnt FROM tbl_match
+        WHERE bracket_type = 'elimination' AND category_id = :catId
+      """, {"catId": categoryId});
+      final elimCount = int.tryParse(
+          elimCountResult.rows.firstOrNull?.assoc()['cnt']?.toString() ?? '0') ?? 0;
+
+      if (elimCount == 6) {
+        // ── 7-group path ─────────────────────────────────────────────────────
+        // Find this match's ELIM index (0-based) using schedule_start ASC then
+        // match_id ASC — MUST match the order used during schedule generation.
+        final allElimResult = await conn.execute("""
+          SELECT m.match_id FROM tbl_match m
+          JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
+          WHERE m.bracket_type = 'elimination' AND m.category_id = :catId
+          ORDER BY s.schedule_start ASC, m.match_id ASC
+        """, {"catId": categoryId});
+        final elimMatchIds = allElimResult.rows
+            .map((r) => int.tryParse(r.assoc()['match_id']?.toString() ?? '0') ?? 0)
+            .where((id) => id > 0)
+            .toList();
+        final elimIdx = elimMatchIds.indexOf(matchId);
+
+        print("ℹ️  7-group ELIM matchId=$matchId → elimIdx=$elimIdx (all ELIM ids: $elimMatchIds)");
+
+        if (elimIdx >= 0 && elimIdx < _elim7toQF.length) {
+          final qfSlotIdx = _elim7toQF[elimIdx];
+
+          // Get QF matches ordered by schedule_start ASC then match_id ASC.
+          // This matches the insertion order from generateFifaSchedule, and
+          // also matches the BYE seeding in advanceToKnockout which assigns
+          // arena_number = slotIndex + 1. So:
+          //   qfMatchIds[0] = QF slot 0 = Arena 1 (BYE Seed1 + ELIM0 + ELIM4 winners)
+          //   qfMatchIds[1] = QF slot 1 = Arena 2 (ELIM1 winner)
+          //   qfMatchIds[2] = QF slot 2 = Arena 3 (ELIM2 winner)
+          //   qfMatchIds[3] = QF slot 3 = Arena 4 (BYE Seed2 + ELIM3 + ELIM5 winners)
+          final qfMatchesResult = await conn.execute("""
+            SELECT m.match_id
+            FROM tbl_match m
+            JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
+            WHERE m.bracket_type = 'quarter-finals' AND m.category_id = :catId
+            ORDER BY s.schedule_start ASC, m.match_id ASC
+          """, {"catId": categoryId});
+          final qfMatchIds = qfMatchesResult.rows
+              .map((r) => int.tryParse(r.assoc()['match_id']?.toString() ?? '0') ?? 0)
+              .where((id) => id > 0)
+              .toList();
+
+          print("ℹ️  7-group QF slot $qfSlotIdx → QF matchIds: $qfMatchIds");
+
+          if (qfSlotIdx < qfMatchIds.length) {
+            final targetQfMatchId = qfMatchIds[qfSlotIdx];
+            print("✅ 7-group: ELIM[$elimIdx] winner $winnerTeamId → QF slot $qfSlotIdx (match $targetQfMatchId)");
+            await seedIntoRound('quarter-finals', winnerTeamId, forceMatchId: targetQfMatchId);
+            _advanced = true;
+          }
+        }
+      }
+    }
+
+    if (!_advanced && currentType == 'elimination' && nextWinnerType == 'round-of-16') {
+      // ── 9-group path: ELIM → R16 explicit slot mapping ─────────────────────
+      // ELIM match 0 (index 0) → R16 slot 3 (with Seed 1 BYE) ← gitna top
+      // ELIM match 1 (index 1) → R16 slot 4 (with Seed 2 BYE) ← gitna bottom
+      const List<int> _elim9toR16 = [3, 4]; // ELIM index → R16 slot index
+
+      final allElimResult9 = await conn.execute("""
+        SELECT m.match_id FROM tbl_match m
+        JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
+        WHERE m.bracket_type = 'elimination' AND m.category_id = :catId
+        ORDER BY s.schedule_start ASC, m.match_id ASC
+      """, {"catId": categoryId});
+      final elimMatchIds9 = allElimResult9.rows
+          .map((r) => int.tryParse(r.assoc()['match_id']?.toString() ?? '0') ?? 0)
+          .where((id) => id > 0)
+          .toList();
+      final elimIdx9 = elimMatchIds9.indexOf(matchId);
+
+      print("ℹ️  9-group ELIM matchId=$matchId → elimIdx=$elimIdx9 (all: $elimMatchIds9)");
+
+      if (elimIdx9 >= 0 && elimIdx9 < _elim9toR16.length) {
+        final r16SlotIdx = _elim9toR16[elimIdx9];
+
+        final r16MatchesResult = await conn.execute("""
+          SELECT m.match_id FROM tbl_match m
+          JOIN tbl_schedule s ON s.schedule_id = m.schedule_id
+          WHERE m.bracket_type = 'round-of-16' AND m.category_id = :catId
+          ORDER BY s.schedule_start ASC, m.match_id ASC
+        """, {"catId": categoryId});
+        final r16MatchIds = r16MatchesResult.rows
+            .map((r) => int.tryParse(r.assoc()['match_id']?.toString() ?? '0') ?? 0)
+            .where((id) => id > 0)
+            .toList();
+
+        if (r16SlotIdx < r16MatchIds.length) {
+          final targetR16MatchId = r16MatchIds[r16SlotIdx];
+          print("✅ 9-group: ELIM[$elimIdx9] winner $winnerTeamId → R16 slot $r16SlotIdx (match $targetR16MatchId)");
+          await seedIntoRound('round-of-16', winnerTeamId, forceMatchId: targetR16MatchId);
+          _advanced = true;
+        }
+      }
+    }
+
+    if (!_advanced) {
+      await seedIntoRound(nextWinnerType, winnerTeamId);
+    }
     if (nextLoserType != null) {
       await seedIntoRound(nextLoserType, loserTeamId);
     }
