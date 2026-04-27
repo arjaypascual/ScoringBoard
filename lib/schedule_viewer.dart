@@ -149,6 +149,11 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   // ── Soccer Bracket ───────────────────────────────────────────────────────
 
 
+  // ── Tiebreaker / Penalty Shootout rows from tbl_soccer_tiebreaker ────────
+  // Loaded during silent refresh. Used to show/hide the Tiebreaker tab and
+  // to display scheduled shootout matches inside _buildTiebreakerTab().
+  List<Map<String, dynamic>> _tiebreakerRows = [];
+
   // ── Soccer inner tab controller ──────────────────────────────────────────
   TabController? _soccerTabCtrl;
 
@@ -204,6 +209,91 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   bool _allGroupMatchesDone() {
     if (_groups.isEmpty) return false;
     return _groups.every((g) => g.matches.every((m) => m.isDone));
+  }
+
+  // ── Tie detection: returns true if any group has an unresolved tie ─────────
+  // PRIMARY: blocks if any tiebreaker row in tbl_soccer_tiebreaker has no winner.
+  // SECONDARY: checks standings for stat-based ties (before tiebreaker is scheduled).
+  // This blocks auto-advance until ALL Penalty Shootouts are fully scored.
+  bool _hasUnresolvedTie() {
+    // PRIMARY BLOCK: any scheduled tiebreaker match still unscored → block
+    if (_tiebreakerRows.any((r) =>
+        r['winner_id'] == null ||
+        r['winner_id'].toString().isEmpty ||
+        r['winner_id'].toString() == '0')) {
+      return true;
+    }
+
+    // Build the set of groups whose tiebreaker is FULLY resolved
+    // (every row for that group has a valid winner_id).
+    // We must skip these groups in the stat-based check below because their
+    // raw standings stats stay identical even after the penalty shootout —
+    // the shootout winner is stored separately, not in the match scores.
+    final resolvedGroups = <String>{};
+    final partialGroups  = <String>{};
+    for (final r in _tiebreakerRows) {
+      final grp      = r['group_label']?.toString() ?? '';
+      final winnerId = r['winner_id']?.toString() ?? '';
+      if (grp.isEmpty) continue;
+      if (winnerId.isNotEmpty && winnerId != '0') {
+        resolvedGroups.add(grp);
+      } else {
+        partialGroups.add(grp); // still has an unscored row
+      }
+    }
+    // A group is fully resolved only if it has winners AND no pending rows.
+    final fullyResolvedGroups = resolvedGroups.difference(partialGroups);
+
+    // Groups that HAVE tiebreaker rows scheduled (resolved or not).
+    // For these groups, we trust the tiebreaker table — skip the stats check.
+    final groupsWithTiebreakerRows = <String>{};
+    for (final r in _tiebreakerRows) {
+      final grp = r['group_label']?.toString() ?? '';
+      if (grp.isNotEmpty) groupsWithTiebreakerRows.add(grp);
+    }
+
+    // SECONDARY: stat-based tie check — catches ties that haven't been
+    // scheduled yet. Skip groups already resolved via tiebreaker OR groups
+    // that already have tiebreaker rows (even if still being played).
+    for (final g in _groups) {
+      if (fullyResolvedGroups.contains(g.label)) continue;
+      if (groupsWithTiebreakerRows.contains(g.label)) continue;
+
+      final s = _getGroupStandings(g);
+      if (s.length < 3) continue;
+
+      bool eq(GroupTeam a, GroupTeam b) =>
+          a.points == b.points &&
+          _calcGoalDiffInGroup(a, g) == _calcGoalDiffInGroup(b, g) &&
+          _calcGoalsForInGroup(a, g) == _calcGoalsForInGroup(b, g);
+
+      if (eq(s[1], s[2])) return true;
+      if (s.length >= 4 && eq(s[2], s[3])) return true;
+    }
+    return false;
+  }
+
+  // Returns which groups have a tie and how many teams are tied.
+  // Used by the Groups Tab UI to show the correct warning per group.
+  // Returns a map of groupLabel → tieType ('2-way' or '3-way').
+  Map<String, String> _getTiedGroups() {
+    final result = <String, String>{};
+    for (final g in _groups) {
+      final s = _getGroupStandings(g);
+      if (s.length < 3) continue;
+
+      bool eq(GroupTeam a, GroupTeam b) =>
+          a.points == b.points &&
+          _calcGoalDiffInGroup(a, g) == _calcGoalDiffInGroup(b, g) &&
+          _calcGoalsForInGroup(a, g) == _calcGoalsForInGroup(b, g);
+
+      if (s.length >= 4 && eq(s[1], s[2]) && eq(s[2], s[3])) {
+        result[g.label] = '3-way';
+      } else if (eq(s[1], s[2])) {
+        result[g.label] = '2-way';
+      }
+    }
+    return result;
   }
 
   Future<void> _silentRefresh() async {
@@ -265,10 +355,12 @@ class _ScheduleViewerState extends State<ScheduleViewer>
       if (_soccerCategoryId != null) {
         await _loadSoccerSchedule();
         await _loadKoScores();
-        // Auto-advance to knockout when group stage completes
+        // _loadTiebreakerRows calls _rebuildSoccerTabCtrl internally
+        // so the tab controller is always updated before the next build.
+        await _loadTiebreakerRows();
+        // Auto-schedule tiebreaker if a tie is detected and not yet scheduled
+        await _autoScheduleTiebreakerIfNeeded();
         _checkAndAutoAdvance();
-        // BUG FIX 2: also check KO advancement on every refresh tick
-        // so existing winners are re-advanced after a reload/restart
         await _checkAndAutoAdvanceKnockout();
       }
     } catch (_) {}
@@ -859,16 +951,82 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
   }
 
+  // ── Load tiebreaker / penalty shootout rows from tbl_soccer_tiebreaker ───
+  Future<void> _loadTiebreakerRows() async {
+    if (_soccerCategoryId == null) return;
+    try {
+      final rows = await DBHelper.getTiebreakerMatches(_soccerCategoryId!);
+      if (!mounted) return;
+      setState(() => _tiebreakerRows = rows);
+      // Rebuild tab controller AFTER data is updated so ctrlCount is always
+      // in sync before the next build — eliminates the blink/crash.
+      _rebuildSoccerTabCtrl();
+    } catch (e) {
+      debugPrint('_loadTiebreakerRows error: $e');
+    }
+  }
+
   void _rebuildSoccerTabCtrl() {
     if (!mounted) return;
-    final tabCount = 3;
-    if ((_soccerTabCtrl?.length ?? 0) != tabCount) {
-      final prev = _soccerTabCtrl?.index ?? 0;
-      _soccerTabCtrl?.dispose();
-      _soccerTabCtrl = TabController(
-          length: tabCount, vsync: this,
-          initialIndex: prev.clamp(0, tabCount - 1));
-      setState(() {});
+    setState(() {});
+  }
+
+  // Returns true if any penalty shootout match has been inserted into
+  // tbl_soccer_tiebreaker for this category but not yet scored (winner_id IS NULL).
+  // Keeps the Tiebreaker tab visible after the admin schedules the shootout.
+  bool _hasPendingTiebreakerMatch() {
+    return _tiebreakerRows.any((r) =>
+        r['winner_id'] == null || r['winner_id'].toString().isEmpty);
+  }
+
+  // ── Auto-schedule tiebreaker: fires silently when a tie is detected ─────────
+  // No confirmation dialog — inserts into tbl_soccer_tiebreaker automatically.
+  // Only runs if: all group matches done, tie exists, NOT yet scheduled for that group.
+  bool _isAutoSchedulingTiebreaker = false;
+  Future<void> _autoScheduleTiebreakerIfNeeded() async {
+    if (_isAutoSchedulingTiebreaker) return;
+    if (_soccerCategoryId == null) return;
+    if (!_allGroupMatchesDone() || !_groupsGenerated) return;
+
+    final tiedGroups = _getTiedGroups();
+    if (tiedGroups.isEmpty) return;
+
+    _isAutoSchedulingTiebreaker = true;
+    try {
+      for (final entry in tiedGroups.entries) {
+        final groupLabel = entry.key;
+        final tieType    = entry.value;
+
+        // Skip if already scheduled for this group
+        final alreadyScheduled = _tiebreakerRows.any(
+            (r) => r['group_label']?.toString() == groupLabel);
+        if (alreadyScheduled) continue;
+
+        final group = _groups.firstWhere(
+            (g) => g.label == groupLabel,
+            orElse: () => TournamentGroup(label: groupLabel, teams: [], matches: []));
+        final standings = _getGroupStandings(group);
+        if (standings.length < 3) continue;
+
+        final tiedTeams = tieType == '3-way'
+            ? [standings[1], standings[2], standings[3]]
+            : [standings[1], standings[2]];
+
+        await DBHelper.generateTiebreakerMatches(
+          categoryId:        _soccerCategoryId!,
+          groupLabel:        groupLabel,
+          teamIds:           tiedTeams.map((t) => t.teamId).toList(),
+          isPenaltyShootout: true,
+        );
+
+        debugPrint('✅ Auto-scheduled ${tieType} tiebreaker for Group $groupLabel');
+      }
+      await _loadTiebreakerRows();
+      _rebuildSoccerTabCtrl();
+    } catch (e) {
+      debugPrint('_autoScheduleTiebreakerIfNeeded error: $e');
+    } finally {
+      _isAutoSchedulingTiebreaker = false;
     }
   }
 
@@ -1280,12 +1438,71 @@ class _ScheduleViewerState extends State<ScheduleViewer>
   Widget _buildSoccerView(
       Map<String, dynamic> category, int catId,
       List<Map<String, dynamic>> matches) {
-    final groupsDone = _allGroupMatchesDone() && _groupsGenerated;
-    final tabCount = 3;
-    // Keep tab controller in sync with tab count
-    if ((_soccerTabCtrl?.length ?? 0) != tabCount) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _rebuildSoccerTabCtrl());
-    }
+    final groupsDone        = _allGroupMatchesDone() && _groupsGenerated;
+    final hasTie            = groupsDone && _hasUnresolvedTie();
+    final hasPending        = _hasPendingTiebreakerMatch();
+    final showTiebreakerTab = groupsDone && (hasTie || hasPending);
+
+    // Outer tab bar: GROUPS | MATCH SCHEDULE | BRACKET (always 3)
+    // TIEBREAKER lives inside Match Schedule as a sub-section.
+
+    final tabs = <Widget>[
+      // ── Tab 0: GROUPS ──────────────────────────────────────────────
+      Tab(child: Row(mainAxisSize: MainAxisSize.min, children: [
+        const Icon(Icons.grid_view, size: 15),
+        const SizedBox(width: 5),
+        const Text('GROUPS'),
+        const SizedBox(width: 5),
+        if (!_groupsGenerated)
+          _phaseBadge('SETUP', const Color(0xFFFFD700))
+        else if (!groupsDone)
+          _phaseBadge('LIVE', const Color(0xFF00CFFF))
+        else
+          _phaseBadge('DONE', Colors.green),
+      ])),
+
+      // ── Tab 1: MATCH SCHEDULE (contains GROUP STAGE / TIEBREAKER / KNOCKOUT)
+      Tab(child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.calendar_today, size: 15,
+            color: _groupsGenerated ? const Color(0xFF00FF88) : Colors.white38),
+        const SizedBox(width: 5),
+        Text('MATCH SCHEDULE',
+            style: TextStyle(
+                color: _groupsGenerated ? const Color(0xFF00FF88) : Colors.white38)),
+        if (showTiebreakerTab) ...[
+          const SizedBox(width: 5),
+          _phaseBadge('TIE!', Colors.orangeAccent),
+        ],
+      ])),
+
+      // ── Tab 2: BRACKET ─────────────────────────────────────────────
+      Tab(child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.account_tree, size: 15,
+            color: _groupsGenerated
+                ? const Color(0xFF00FF88) : const Color(0xFF00CFFF).withOpacity(0.5)),
+        const SizedBox(width: 5),
+        Text('BRACKET',
+            style: TextStyle(
+                color: _groupsGenerated
+                    ? const Color(0xFF00FF88)
+                    : const Color(0xFF00CFFF).withOpacity(0.5))),
+        const SizedBox(width: 5),
+        if (!_groupsGenerated)
+          _phaseBadge('PREVIEW', Colors.white24)
+        else if (!groupsDone)
+          _phaseBadge('PREVIEW', const Color(0xFF00CFFF))
+        else
+          _phaseBadge('LIVE', const Color(0xFF00FF88)),
+      ])),
+    ];
+
+    // Always 3 views — no more tiebreaker as separate outer tab.
+    final tabViews = <Widget>[
+      _buildGroupsTab(),
+      _buildSoccerScheduleTab(catId, matches),
+      _buildBracketTab(),
+    ];
+
     return Column(children: [
       _buildCategoryTitleBar(category, 'SOCCER', matches),
       Container(
@@ -1297,58 +1514,15 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           indicatorWeight: 3,
           labelColor: const Color(0xFF00FF88),
           unselectedLabelColor: Colors.white54,
-          labelStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 1),
-          tabs: [
-            Tab(child: Row(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.grid_view, size: 15),
-              const SizedBox(width: 5),
-              const Text('GROUPS'),
-              const SizedBox(width: 5),
-              if (!_groupsGenerated)
-                _phaseBadge('SETUP', const Color(0xFFFFD700))
-              else if (!groupsDone)
-                _phaseBadge('LIVE', const Color(0xFF00CFFF))
-              else
-                _phaseBadge('DONE', Colors.green),
-            ])),
-            Tab(child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.calendar_today, size: 15,
-                  color: _groupsGenerated ? const Color(0xFF00FF88) : Colors.white38),
-              const SizedBox(width: 5),
-              Text('MATCH SCHEDULE',
-                  style: TextStyle(
-                      color: _groupsGenerated ? const Color(0xFF00FF88) : Colors.white38)),
-            ])),
-            // BRACKET tab — always available as preview
-            Tab(child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.account_tree, size: 15,
-                  color: _groupsGenerated
-                      ? const Color(0xFF00FF88) : const Color(0xFF00CFFF).withOpacity(0.5)),
-              const SizedBox(width: 5),
-              Text('BRACKET',
-                  style: TextStyle(
-                      color: _groupsGenerated
-                          ? const Color(0xFF00FF88)
-                          : const Color(0xFF00CFFF).withOpacity(0.5))),
-              const SizedBox(width: 5),
-              if (!_groupsGenerated)
-                _phaseBadge('PREVIEW', Colors.white24)
-              else if (!groupsDone)
-                _phaseBadge('PREVIEW', const Color(0xFF00CFFF))
-              else
-                _phaseBadge('LIVE', const Color(0xFF00FF88)),
-            ])),
-          ],
+          labelStyle: const TextStyle(
+              fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 1),
+          tabs: tabs,
         ),
       ),
       Expanded(
         child: TabBarView(
           controller: _soccerTabCtrl,
-          children: [
-            _buildGroupsTab(),
-            _buildSoccerScheduleTab(catId, matches),
-            _buildBracketTab(),
-          ],
+          children: tabViews,
         ),
       ),
     ]);
@@ -1382,32 +1556,120 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
   // ── Auto-advance: fires once when groups finish and KO slots are ready ────
   void _checkAndAutoAdvance() {
-    if (_hasAutoAdvanced) return;
     if (_soccerCategoryId == null) return;
     if (!_allGroupMatchesDone() || !_groupsGenerated) return;
 
-    // Knockout slots exist (even empty ones) but no teams seeded yet → advance
+    // ── Tie guard: do NOT advance if any group still has an unresolved tie ──
+    if (_hasUnresolvedTie()) {
+      // If there are already teams seeded in KO from a previous (incorrect) advance,
+      // clear them now so the bracket shows empty TBD slots until tie is resolved.
+      final alreadySeeded = _soccerScheduleRows
+          .where((r) => (r['bracketType'] as String? ?? 'group') != 'group')
+          .any((r) =>
+              (r['team1'] as String? ?? '').isNotEmpty ||
+              (r['team2'] as String? ?? '').isNotEmpty);
+      if (alreadySeeded && _soccerCategoryId != null) {
+        DBHelper.resetKnockoutSeeding(_soccerCategoryId!).then((_) {
+          _loadSoccerSchedule();
+        }).catchError((_) {});
+      }
+      _hasAutoAdvanced = false;
+      print('ℹ️  Auto-advance blocked — unresolved tie: ${_getTiedGroups()}');
+      return;
+    }
+
+    // ── Tiebreaker rows exist but not yet all resolved → block ──────────────
+    if (_tiebreakerRows.isNotEmpty && _hasPendingTiebreakerMatch()) {
+      final alreadySeeded = _soccerScheduleRows
+          .where((r) => (r['bracketType'] as String? ?? 'group') != 'group')
+          .any((r) =>
+              (r['team1'] as String? ?? '').isNotEmpty ||
+              (r['team2'] as String? ?? '').isNotEmpty);
+      if (alreadySeeded && _soccerCategoryId != null) {
+        DBHelper.resetKnockoutSeeding(_soccerCategoryId!).then((_) {
+          _loadSoccerSchedule();
+        }).catchError((_) {});
+      }
+      _hasAutoAdvanced = false;
+      print('ℹ️  Auto-advance blocked — tiebreaker matches pending resolution.');
+      return;
+    }
+
+    if (_hasAutoAdvanced) return;
+
     final koRows = _soccerScheduleRows
         .where((r) => (r['bracketType'] as String? ?? 'group') != 'group')
         .toList();
-    final koHasTeams = koRows.any((r) =>
-        (r['team1'] as String? ?? '').isNotEmpty ||
-        (r['team2'] as String? ?? '').isNotEmpty);
 
-    if (koRows.isNotEmpty && !koHasTeams) {
+    // Count how many teams are expected to advance (top 2 per group,
+    // minus any groups that still have a tie = only Rank 1 advances).
+    // If KO slots are empty OR not all expected teams are seeded yet → advance.
+    final seededTeams = koRows
+        .where((r) =>
+            (r['team1'] as String? ?? '').isNotEmpty ||
+            (r['team2'] as String? ?? '').isNotEmpty)
+        .length;
+
+    final expectedAdvancing = _groups.fold<int>(0, (sum, g) {
+      final s = _getGroupStandings(g);
+      if (s.length < 3) return sum + (s.isNotEmpty ? 1 : 0);
+      final s2 = s[1];
+      final s3 = s[2];
+      final tied = s2.points == s3.points &&
+          _calcGoalDiffInGroup(s2, g) == _calcGoalDiffInGroup(s3, g) &&
+          _calcGoalsForInGroup(s2, g) == _calcGoalsForInGroup(s3, g);
+      // If tied: only Rank 1 advances (1 per group)
+      // If clear: Rank 1 and Rank 2 advance (2 per group)
+      return sum + (tied ? 1 : 2);
+    });
+
+    // Each advancing team gets 1 teamschedule row in KO — use that as proxy
+    final fullySeeded = seededTeams >= expectedAdvancing;
+
+    // If ANY teams are already seeded in KO slots, treat as already advanced.
+    // This handles app restarts where _hasAutoAdvanced was reset to false
+    // but the DB already has seeding data from a previous run.
+    if (seededTeams > 0) {
       _hasAutoAdvanced = true;
-      _advanceToKnockout().catchError((_) {
-        _hasAutoAdvanced = false; // retry on next refresh if it failed
+      return;
+    }
+
+    if (koRows.isNotEmpty && !fullySeeded) {
+      _hasAutoAdvanced = true;
+      _advanceToKnockout().catchError((e) {
+        // If blocked due to unresolved tie, keep _hasAutoAdvanced = true
+        // so we do NOT retry on every silent refresh tick.
+        // We reset it only when the tiebreaker is actually resolved (via score save).
+        final isTieBlock = e.toString().contains('TIE_UNRESOLVED');
+        if (!isTieBlock) {
+          _hasAutoAdvanced = false;
+        }
+        debugPrint('_advanceToKnockout error (isTieBlock=$isTieBlock): $e');
       });
     } else if (koRows.isEmpty) {
-      // KO slots not loaded yet — try again on next refresh
-      // (slots appear once the schedule has been generated)
+      // KO slots not generated yet — retry on next refresh
     }
   }
   
   // ── Reset knockout seeding and re-run with correct rankings ─────────────
   Future<void> _resetAndReseedKnockout() async {
     if (_soccerCategoryId == null) return;
+
+    // Guard: cannot re-seed while tiebreakers are still pending
+    await _loadTiebreakerRows();
+    if (_tiebreakerRows.isNotEmpty && _hasPendingTiebreakerMatch()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+            '⚠️ Resolve all tiebreaker matches first before re-seeding the bracket.',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          ),
+          backgroundColor: Colors.orange,
+          duration: Duration(seconds: 4),
+        ));
+      }
+      return;
+    }
 
     final confirm = await showDialog<bool>(
       context: context,
@@ -1472,6 +1734,22 @@ class _ScheduleViewerState extends State<ScheduleViewer>
 
   Future<void> _advanceToKnockout() async {
     if (_soccerCategoryId == null) return;
+
+    // Hard guard: reload tiebreaker rows then re-check tie before advancing.
+    // Prevents race condition where _tiebreakerRows was stale.
+    await _loadTiebreakerRows();
+    if (_hasUnresolvedTie()) {
+      debugPrint('Advance blocked - tie still unresolved after reload');
+      _hasAutoAdvanced = false;
+      return;
+    }
+    // Extra guard: tiebreaker rows exist but not all resolved
+    if (_tiebreakerRows.isNotEmpty && _hasPendingTiebreakerMatch()) {
+      debugPrint('Advance blocked - tiebreaker matches still pending');
+      _hasAutoAdvanced = false;
+      return;
+    }
+
     setState(() => _isAdvancing = true);
     try {
       // Delegate ALL group counts (including 3 groups) to DBHelper.
@@ -1662,169 +1940,423 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     }
   }
 
-  // ── Knockout match result dialog ─────────────────────────────────────────
-  Future<void> _showKoMatchDialog(Map<String, dynamic> row) async {
-    final matchId  = row['matchId']  as int? ?? 0;
-    final team1    = row['team1']    as String? ?? '';
-    final team2    = row['team2']    as String? ?? '';
-    final team1Id  = row['team1Id']  as int? ?? 0;
-    final team2Id  = row['team2Id']  as int? ?? 0;
-    if (matchId == 0 || team1Id == 0 || team2Id == 0) return;
+  // Scoring is handled by the separate scoring app.
+  // Scores flow in automatically via the 5-second silent refresh.
 
-    final existing = _koScores[matchId] ?? {};
-    int g1 = existing[team1Id] ?? 0;
-    int g2 = existing[team2Id] ?? 0;
+  // ════════════════════════════════════════════════════════════════════════════
+  // TIEBREAKER TAB — match-schedule style layout
+  // ════════════════════════════════════════════════════════════════════════════
+  Widget _buildTiebreakerTab() {
+    if (_tiebreakerRows.isEmpty) {
+      return Center(
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(Icons.sports_score, size: 48,
+              color: Colors.orangeAccent.withOpacity(0.2)),
+          const SizedBox(height: 14),
+          const Text('No penalty shootout matches yet.',
+              style: TextStyle(color: Colors.white24, fontSize: 15)),
+        ]),
+      );
+    }
 
-    final s1Ctrl = TextEditingController(text: '$g1');
-    final s2Ctrl = TextEditingController(text: '$g2');
+    // ── "All resolved" banner ─────────────────────────────────────────────────
+    final allResolved = _tiebreakerRows.every((r) =>
+        r['winner_id'] != null &&
+        r['winner_id'].toString().isNotEmpty &&
+        r['winner_id'].toString() != '0');
 
-    final result = await showDialog<bool>(
+    // ── Group rows by scheduled_time, then sort each slot by arena_number ─────
+    final Map<String, List<Map<String, dynamic>>> byTimeList = {};
+    for (final tb in _tiebreakerRows) {
+      final time = _fmt(tb['scheduled_time']?.toString() ?? '');
+      final key  = time.isNotEmpty ? time : '__notime__';
+      byTimeList.putIfAbsent(key, () => []);
+      byTimeList[key]!.add(tb);
+    }
+    for (final list in byTimeList.values) {
+      list.sort((a, b) {
+        final an = int.tryParse(a['arena_number']?.toString() ?? '1') ?? 1;
+        final bn = int.tryParse(b['arena_number']?.toString() ?? '1') ?? 1;
+        return an.compareTo(bn);
+      });
+    }
+
+    // Re-index arenas per slot sequentially (no gaps, same as match schedule)
+    final Map<String, Map<int, Map<String, dynamic>>> byTime = {};
+    for (final entry in byTimeList.entries) {
+      byTime[entry.key] = {};
+      for (int i = 0; i < entry.value.length; i++) {
+        byTime[entry.key]![i + 1] = entry.value[i];
+      }
+    }
+
+    final slots = byTime.keys.toList()
+      ..sort((a, b) {
+        if (a == '__notime__') return 1;
+        if (b == '__notime__') return -1;
+        return a.compareTo(b);
+      });
+
+    final maxPerSlot = byTime.values
+        .map((s) => s.length).fold(0, (a, b) => a > b ? a : b);
+    final arenaNums  = List.generate(maxPerSlot, (i) => i + 1);
+
+    return Column(children: [
+      // ── Arena header row (same style as match schedule) ───────────────────
+      Container(
+        decoration: const BoxDecoration(
+            gradient: LinearGradient(
+                colors: [Color(0xFF4A22AA), Color(0xFF3A1880)])),
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+        child: Row(children: [
+          const SizedBox(width: 28),
+          const SizedBox(width: 54, child: Text('TIME',
+              style: TextStyle(color: Colors.white70,
+                  fontWeight: FontWeight.bold, fontSize: 12, letterSpacing: 0.8))),
+          ...arenaNums.map((a) => Expanded(child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 4),
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFD700).withOpacity(0.12),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: const Color(0xFFFFD700).withOpacity(0.4)),
+            ),
+            child: Center(child: Text('ARENA $a',
+                style: const TextStyle(color: Color(0xFFFFD700),
+                    fontSize: 11, fontWeight: FontWeight.w900, letterSpacing: 1))),
+          ))),
+        ]),
+      ),
+
+      if (allResolved)
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.green.withOpacity(0.06),
+            border: Border(bottom: BorderSide(color: Colors.green.withOpacity(0.25))),
+          ),
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            const Icon(Icons.check_circle, color: Colors.green, size: 16),
+            const SizedBox(width: 8),
+            const Text('All ties resolved — bracket will advance automatically.',
+                style: TextStyle(color: Colors.green,
+                    fontSize: 12, fontWeight: FontWeight.w600)),
+          ]),
+        ),
+
+      // ── Time-slot rows ────────────────────────────────────────────────────
+      Expanded(
+        child: ListView.builder(
+          itemCount: slots.length,
+          itemBuilder: (_, idx) {
+            final timeKey     = slots[idx];
+            final displayTime = timeKey == '__notime__' ? '—' : timeKey;
+            final slotMatches = byTime[timeKey]!;
+            final isEven      = idx % 2 == 0;
+
+            return Container(
+              decoration: BoxDecoration(
+                color: isEven ? const Color(0xFF160C40) : const Color(0xFF100830),
+                border: const Border(
+                    bottom: BorderSide(color: Color(0xFF1A1050), width: 1)),
+              ),
+              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
+              child: IntrinsicHeight(child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  // Row number
+                  SizedBox(width: 28, child: Center(child: Text(
+                      '${idx + 1}',
+                      style: TextStyle(
+                          color: Colors.white.withOpacity(0.3),
+                          fontSize: 13, fontWeight: FontWeight.bold)))),
+                  // TIME
+                  SizedBox(width: 54, child: Text(displayTime,
+                      style: TextStyle(
+                          color: displayTime == '—'
+                              ? Colors.white.withOpacity(0.2)
+                              : const Color(0xFF00CFFF),
+                          fontSize: 13, fontWeight: FontWeight.w600))),
+                  // Arena cards
+                  ...arenaNums.map((a) {
+                    final tb = slotMatches[a];
+                    if (tb == null) {
+                      return Expanded(child: Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.01),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: Colors.white.withOpacity(0.03), width: 1),
+                        ),
+                        child: Center(child: Text('—',
+                            style: TextStyle(
+                                color: Colors.white.withOpacity(0.1), fontSize: 11))),
+                      ));
+                    }
+
+                    final isDone    = tb['winner_id'] != null &&
+                        tb['winner_id'].toString().isNotEmpty &&
+                        tb['winner_id'].toString() != '0';
+                    final t1Name    = tb['team1_name']?.toString() ?? '—';
+                    final t2Name    = tb['team2_name']?.toString() ?? '—';
+                    final t1Score   = tb['team1_score']?.toString() ?? '';
+                    final t2Score   = tb['team2_score']?.toString() ?? '';
+                    final winnerName= tb['winner_name']?.toString() ?? '';
+                    final groupLbl  = tb['group_label']?.toString() ?? '?';
+                    final gc        = _groupColor(groupLbl);
+                    final t1Wins    = isDone && winnerName == t1Name;
+                    final t2Wins    = isDone && winnerName == t2Name;
+
+                    return Expanded(child: GestureDetector(
+                      onTap: null, // view-only: scoring handled by separate app
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: isDone
+                              ? const Color(0xFF0A1A0E)
+                              : gc.withOpacity(0.07),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: isDone
+                                  ? Colors.green.withOpacity(0.4)
+                                  : Colors.orangeAccent.withOpacity(0.4),
+                              width: 1.5),
+                        ),
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          // GROUP label header
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: gc.withOpacity(0.18),
+                              borderRadius: const BorderRadius.vertical(
+                                  top: Radius.circular(8)),
+                            ),
+                            child: Center(child: Text('G$groupLbl',
+                                style: TextStyle(color: gc, fontSize: 11,
+                                    fontWeight: FontWeight.w900))),
+                          ),
+                          // Team names + VS / score
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 8),
+                            child: Row(children: [
+                              // Team 1
+                              Expanded(child: Text(t1Name,
+                                  textAlign: TextAlign.center,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      color: isDone
+                                          ? (t1Wins
+                                              ? Colors.white.withOpacity(0.9)
+                                              : Colors.white.withOpacity(0.25))
+                                          : Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: t1Wins
+                                          ? FontWeight.w900 : FontWeight.w600))),
+                              // VS / score badge
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 6),
+                                child: isDone
+                                    ? Text('$t1Score–$t2Score',
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w900))
+                                    : Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 5, vertical: 3),
+                                        decoration: BoxDecoration(
+                                          color: Colors.orangeAccent.withOpacity(0.1),
+                                          borderRadius: BorderRadius.circular(4),
+                                          border: Border.all(
+                                              color: Colors.orangeAccent.withOpacity(0.4)),
+                                        ),
+                                        child: const Text('VS',
+                                            style: TextStyle(
+                                                color: Colors.orangeAccent,
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.w900,
+                                                letterSpacing: 1))),
+                              ),
+                              // Team 2
+                              Expanded(child: Text(t2Name,
+                                  textAlign: TextAlign.center,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      color: isDone
+                                          ? (t2Wins
+                                              ? Colors.white.withOpacity(0.9)
+                                              : Colors.white.withOpacity(0.25))
+                                          : Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: t2Wins
+                                          ? FontWeight.w900 : FontWeight.w600))),
+                            ]),
+                          ),
+                          // Status footer
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(vertical: 3),
+                            decoration: BoxDecoration(
+                              color: isDone
+                                  ? Colors.green.withOpacity(0.08)
+                                  : Colors.white.withOpacity(0.03),
+                              borderRadius: const BorderRadius.vertical(
+                                  bottom: Radius.circular(8)),
+                            ),
+                            child: Center(child: isDone
+                                ? const Row(mainAxisSize: MainAxisSize.min, children: [
+                                    Icon(Icons.check_circle, color: Colors.green, size: 10),
+                                    SizedBox(width: 4),
+                                    Text('Done',
+                                        style: TextStyle(color: Colors.green,
+                                            fontSize: 9, fontWeight: FontWeight.bold)),
+                                  ])
+                                : Text('Pending',
+                                    style: TextStyle(
+                                        color: Colors.white.withOpacity(0.2),
+                                        fontSize: 9, fontWeight: FontWeight.bold))),
+                          ),
+                        ]),
+                      ),
+                    ));
+                  }),
+                ],
+              )),
+            );
+          },
+        ),
+      ),
+    ]);
+  }
+
+
+  // ── Penalty Shootout confirmation dialog + DB insert ──────────────────────
+  Future<void> _schedulePenaltyShootout({
+    required TournamentGroup group,
+    required String groupLabel,
+    required String tieType,
+    required List<GroupTeam> standings,
+    required int categoryId,
+  }) async {
+    if (standings.length < 3) return;
+
+    // Collect the tied teams:
+    // 2-way → Rank 2 vs Rank 3 (2 teams, 1 match)
+    // 3-way → Rank 2, 3, and 4 (3 teams, 3 round-robin matches)
+    final tiedTeams = tieType == '3-way'
+        ? [standings[1], standings[2], standings[3]]
+        : [standings[1], standings[2]];
+
+    final teamNames = tiedTeams.map((t) => t.teamName).join(', ');
+    final matchCount = tiedTeams.length == 3 ? 3 : 1;
+
+    final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF130742),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Set Match Result',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          Row(children: [
-            Expanded(child: Column(children: [
-              Text(team1, textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white70, fontSize: 13)),
-              const SizedBox(height: 8),
-              TextField(
-                controller: s1Ctrl,
-                keyboardType: TextInputType.number,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white, fontSize: 22,
-                    fontWeight: FontWeight.bold),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: const Color(0xFF1E0E50),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(
-                          color: const Color(0xFF00FF88).withOpacity(0.4))),
-                  enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(
-                          color: const Color(0xFF00FF88).withOpacity(0.3))),
+        title: Row(children: [
+          const Icon(Icons.sports_soccer, color: Colors.orangeAccent, size: 18),
+          const SizedBox(width: 8),
+          Text('Schedule ${tieType == '3-way' ? '3-Way ' : ''}Penalty Shootout',
+              style: const TextStyle(color: Colors.white,
+                  fontWeight: FontWeight.bold, fontSize: 15)),
+        ]),
+        content: Column(mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // Tied teams list
+          ...tiedTeams.asMap().entries.map((e) => Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Row(children: [
+              Container(
+                width: 22, height: 22,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.orangeAccent.withOpacity(0.15),
+                  border: Border.all(color: Colors.orangeAccent),
                 ),
+                child: Center(child: Text('${e.key + 2}',
+                    style: const TextStyle(color: Colors.orangeAccent,
+                        fontSize: 11, fontWeight: FontWeight.bold))),
               ),
-            ])),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
-              child: Text('–', style: TextStyle(color: Colors.white38,
-                  fontSize: 24, fontWeight: FontWeight.bold)),
-            ),
-            Expanded(child: Column(children: [
-              Text(team2, textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white70, fontSize: 13)),
-              const SizedBox(height: 8),
-              TextField(
-                controller: s2Ctrl,
-                keyboardType: TextInputType.number,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white, fontSize: 22,
-                    fontWeight: FontWeight.bold),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: const Color(0xFF1E0E50),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(
-                          color: const Color(0xFF00FF88).withOpacity(0.4))),
-                  enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(
-                          color: const Color(0xFF00FF88).withOpacity(0.3))),
-                ),
-              ),
-            ])),
-          ]),
+              const SizedBox(width: 10),
+              Text(e.value.teamName,
+                  style: const TextStyle(color: Colors.white,
+                      fontSize: 13, fontWeight: FontWeight.w600)),
+            ]),
+          )),
           const SizedBox(height: 12),
-          const Text(
-            'Winner advances to the next round automatically.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white38, fontSize: 11),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.orangeAccent.withOpacity(0.06),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.orangeAccent.withOpacity(0.2)),
+            ),
+            child: Text(
+              tieType == '3-way'
+                  ? '$matchCount round-robin matches will be created.\n'
+                    'The team with the most wins advances as Rank 2.'
+                  : '1 match will be created.\n'
+                    'The winner takes Rank 2 and advances to knockout.',
+              style: const TextStyle(color: Colors.white54, fontSize: 11,
+                  height: 1.5)),
           ),
         ]),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel', style: TextStyle(color: Colors.white38)),
+            child: const Text('Cancel',
+                style: TextStyle(color: Colors.white38)),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF00FF88),
-              foregroundColor: Colors.black,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8)),
-            ),
+                backgroundColor: Colors.orangeAccent,
+                foregroundColor: Colors.black),
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('CONFIRM', style: TextStyle(fontWeight: FontWeight.bold)),
+            child: Text('Schedule $matchCount Match${matchCount > 1 ? 'es' : ''}',
+                style: const TextStyle(fontWeight: FontWeight.bold)),
           ),
         ],
       ),
     );
 
-    if (result != true) return;
-
-    final goals1 = int.tryParse(s1Ctrl.text.trim()) ?? 0;
-    final goals2 = int.tryParse(s2Ctrl.text.trim()) ?? 0;
-    if (goals1 == goals2) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('⚠️ Draw not allowed in knockout — enter a decisive score.'),
-        backgroundColor: Colors.orange,
-      ));
-      return;
-    }
-
-    final winnerTeamId = goals1 > goals2 ? team1Id : team2Id;
-    final loserTeamId  = goals1 > goals2 ? team2Id : team1Id;
-
-    // Get default referee id
-    int refId = 1;
-    try {
-      final refResult = await DBHelper.getConnection().then(
-          (c) => c.execute("SELECT referee_id FROM tbl_referee ORDER BY referee_id LIMIT 1"));
-      if (refResult.rows.isNotEmpty) {
-        refId = int.tryParse(
-                refResult.rows.first.assoc()['referee_id']?.toString() ?? '1') ??
-            1;
-      }
-    } catch (_) {}
+    if (confirmed != true || !mounted) return;
 
     try {
-      // Save scores
-      await DBHelper.saveKnockoutScore(
-          matchId: matchId, teamId: team1Id, goals: goals1, refereeId: refId);
-      await DBHelper.saveKnockoutScore(
-          matchId: matchId, teamId: team2Id, goals: goals2, refereeId: refId);
-
-      // Advance winner (and loser to 3rd place if semi-final)
-      await DBHelper.advanceKnockoutWinner(
-        matchId:       matchId,
-        winnerTeamId:  winnerTeamId,
-        loserTeamId:   loserTeamId,
-        categoryId:    _soccerCategoryId!,
+      await DBHelper.generateTiebreakerMatches(
+        categoryId:        categoryId,
+        groupLabel:        groupLabel,
+        teamIds:           tiedTeams.map((t) => t.teamId).toList(),
+        isPenaltyShootout: true,
       );
-
-      await _silentRefresh();
-      // Auto-advance if this round is now fully complete
-      await _checkAndAutoAdvanceKnockout();
-
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('✅ Result saved! Winner advances to next round.',
-            style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-        backgroundColor: const Color(0xFF00FF88),
-        duration: const Duration(seconds: 3),
-      ));
+      await _loadTiebreakerRows();
+      _rebuildSoccerTabCtrl();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            '✅ $matchCount Penalty Shootout match${matchCount > 1 ? 'es' : ''} scheduled!',
+            style: const TextStyle(color: Colors.black,
+                fontWeight: FontWeight.bold)),
+          backgroundColor: Colors.orangeAccent,
+          duration: const Duration(seconds: 3),
+        ));
+      }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Error saving result: $e',
-            style: const TextStyle(color: Colors.white)),
-        backgroundColor: Colors.redAccent,
-      ));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('❌ Failed to schedule: $e',
+              style: const TextStyle(color: Colors.white)),
+          backgroundColor: Colors.redAccent,
+          duration: const Duration(seconds: 4),
+        ));
+      }
     }
   }
 
@@ -1837,6 +2369,8 @@ class _ScheduleViewerState extends State<ScheduleViewer>
         (r['team2'] as String? ?? '').isNotEmpty);
     final advancing  = _getAdvancingTeams();
     final groupsDone = _allGroupMatchesDone() && _groupsGenerated;
+    final hasTie     = groupsDone && _hasUnresolvedTie();
+    final tiedGroups = hasTie ? _getTiedGroups() : <String, String>{};
 
     return Column(children: [
       // ── Bracket flow preview panel ───────────────────────────────────────
@@ -1860,23 +2394,32 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 style: TextStyle(color: Color(0xFF00FF88),
                     fontSize: 12, fontWeight: FontWeight.bold)),
           ] else ...[
-            Icon(Icons.emoji_events,
-                color: const Color(0xFFFFD700).withOpacity(0.7), size: 14),
+            Icon(
+                hasTie ? Icons.warning_amber_rounded : Icons.emoji_events,
+                color: hasTie
+                    ? Colors.orangeAccent.withOpacity(0.9)
+                    : const Color(0xFFFFD700).withOpacity(0.7),
+                size: 14),
             const SizedBox(width: 8),
             Expanded(child: Text(
               !groupsDone
                   ? 'Complete all group matches to unlock the bracket.'
-                  : koHasTeams
-                      ? 'Bracket live — top 2 per group advanced. Tap a match to enter scores.'
-                      : koRows.isEmpty
-                          ? 'Generating schedule… bracket will appear shortly.'
-                          : 'Seeding teams into bracket…',
+                  : hasTie
+                      ? 'Tie detected in Group${tiedGroups.length > 1 ? 's' : ''} '
+                        '${tiedGroups.keys.join(', ')} — resolve Penalty Shootout first.'
+                      : koHasTeams
+                          ? 'Bracket live — top 2 per group advanced. Tap a match to enter scores.'
+                          : koRows.isEmpty
+                              ? 'Generating schedule… bracket will appear shortly.'
+                              : 'Seeding teams into bracket…',
               style: TextStyle(
-                  color: koHasTeams
-                      ? const Color(0xFF00FF88)
-                      : Colors.white.withOpacity(0.5),
+                  color: hasTie
+                      ? Colors.orangeAccent
+                      : koHasTeams
+                          ? const Color(0xFF00FF88)
+                          : Colors.white.withOpacity(0.5),
                   fontSize: 12,
-                  fontWeight: koHasTeams ? FontWeight.bold : FontWeight.normal),
+                  fontWeight: (koHasTeams || hasTie) ? FontWeight.bold : FontWeight.normal),
             )),
             if (koHasTeams)
               Container(
@@ -2863,9 +3406,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
           width:  cardW,
           height: slotH,
           child: GestureDetector(
-            onTap: (team1.isNotEmpty && team2.isNotEmpty)
-                ? () => _showKoMatchDialog(row)
-                : null,
+            onTap: null, // view-only: scoring handled by separate app
             child: _buildBracketCard(
               team1: team1, team2: team2,
               grp1:  grp1,  grp2:  grp2,
@@ -2985,8 +3526,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                 final win1    = hasScore && g1! > g2!;
                 final win2    = hasScore && g2! > g1!;
                 return GestureDetector(
-                  onTap: (team1.isNotEmpty && team2.isNotEmpty)
-                      ? () => _showKoMatchDialog(row) : null,
+                  onTap: null, // view-only: scoring handled by separate app
                   child: SizedBox(
                     width: cardW,
                     height: slotH,
@@ -3425,7 +3965,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     return _buildFifaFullView(groupRows, koRows, useSingleColumn: false);
   }
 
-  // ── FIFA Full View: Group Stage tab + Knockout tab ──────────────────────────
+  // ── FIFA Full View: Group Stage tab + Tiebreaker tab + Knockout tab ────────
   Widget _buildFifaFullView(
     List<Map<String, dynamic>> groupRows,
     List<Map<String, dynamic>> koRows, {
@@ -3435,28 +3975,60 @@ class _ScheduleViewerState extends State<ScheduleViewer>
     final arenaCount = arenaSet.isEmpty ? 1
         : arenaSet.reduce((a, b) => a > b ? a : b);
 
+    final groupsDone        = _allGroupMatchesDone() && _groupsGenerated;
+    final hasTie            = groupsDone && _hasUnresolvedTie();
+    final hasPending        = _hasPendingTiebreakerMatch();
+    // Keep tiebreaker tab visible as long as any rows exist (pending OR resolved).
+    final hasAnyTiebreaker  = _tiebreakerRows.isNotEmpty;
+    final allTiebreakerDone = hasAnyTiebreaker && _tiebreakerRows.every((r) =>
+        r['winner_id'] != null &&
+        r['winner_id'].toString().isNotEmpty &&
+        r['winner_id'].toString() != '0');
+    final showTiebreakerSection = groupsDone && (hasTie || hasPending || hasAnyTiebreaker);
+
+    // Tab count: always include GROUP STAGE; add TIEBREAKER and KNOCKOUT
+    // only when they have content.
+    final tabCount = 1
+        + (showTiebreakerSection ? 1 : 0)
+        + (koRows.isNotEmpty ? 1 : 0);
+
     return DefaultTabController(
-      length: koRows.isEmpty ? 1 : 2,
+      length: tabCount,
       child: Column(children: [
-        if (koRows.isNotEmpty)
-          Container(
-            color: const Color(0xFF0F0A2A),
-            child: TabBar(
-              indicatorColor: const Color(0xFF00FF88),
-              indicatorWeight: 3,
-              labelColor: const Color(0xFF00FF88),
-              unselectedLabelColor: Colors.white38,
-              labelStyle: const TextStyle(
-                  fontWeight: FontWeight.bold, fontSize: 12),
-              tabs: const [
-                Tab(text: '⚽  GROUP STAGE'),
-                Tab(text: '🏆  KNOCKOUT'),
-              ],
-            ),
+        Container(
+          color: const Color(0xFF0F0A2A),
+          child: TabBar(
+            indicatorColor: const Color(0xFF00FF88),
+            indicatorWeight: 3,
+            labelColor: const Color(0xFF00FF88),
+            unselectedLabelColor: Colors.white38,
+            labelStyle: const TextStyle(
+                fontWeight: FontWeight.bold, fontSize: 12),
+            tabs: [
+              const Tab(text: '⚽  GROUP STAGE'),
+              if (showTiebreakerSection)
+                Tab(child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.sports_score, size: 13,
+                      color: allTiebreakerDone ? Colors.green : Colors.orangeAccent),
+                  const SizedBox(width: 5),
+                  Text('TIEBREAKER',
+                      style: TextStyle(
+                          color: allTiebreakerDone ? Colors.green : Colors.orangeAccent)),
+                  const SizedBox(width: 5),
+                  allTiebreakerDone
+                      ? _phaseBadge('DONE', Colors.green)
+                      : _phaseBadge('PENDING', Colors.orangeAccent),
+                ])),
+              if (koRows.isNotEmpty)
+                const Tab(text: '🏆  KNOCKOUT'),
+            ],
           ),
+        ),
         Expanded(child: TabBarView(
           children: [
             _buildGroupScheduleView(groupRows, arenaCount, useSingleColumn),
+            if (showTiebreakerSection)
+              _buildTiebreakerTab(),
             if (koRows.isNotEmpty)
               _buildKnockoutView(koRows, arenaCount: arenaCount),
           ],
@@ -3667,23 +4239,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                           : FontWeight.w600,
                                     ),
                                   ),
-                                  if (isDone && t1Wins) ...[
-                                    const SizedBox(height: 3),
-                                    Row(mainAxisSize: MainAxisSize.min,
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        children: [
-                                      const Icon(Icons.emoji_events,
-                                          color: Color(0xFFFFD700), size: 10),
-                                      const SizedBox(width: 3),
-                                      Flexible(child: Text('Winner',
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                              color: const Color(0xFFFFD700)
-                                                  .withOpacity(0.8),
-                                              fontSize: 9,
-                                              fontWeight: FontWeight.bold))),
-                                    ]),
-                                  ],
+
                                 ],
                               )),
                               Padding(
@@ -3734,23 +4290,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                                           : FontWeight.w600,
                                     ),
                                   ),
-                                  if (isDone && t2Wins) ...[
-                                    const SizedBox(height: 3),
-                                    Row(mainAxisSize: MainAxisSize.min,
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        children: [
-                                      const Icon(Icons.emoji_events,
-                                          color: Color(0xFFFFD700), size: 10),
-                                      const SizedBox(width: 3),
-                                      Flexible(child: Text('Winner',
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                              color: const Color(0xFFFFD700)
-                                                  .withOpacity(0.8),
-                                              fontSize: 9,
-                                              fontWeight: FontWeight.bold))),
-                                    ]),
-                                  ],
+
                                 ],
                               )),
                             ]),
@@ -4076,8 +4616,7 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                   final win2    = hasScore && g2! > g1!;
 
                   return Expanded(child: GestureDetector(
-                    onTap: (team1.isNotEmpty && team2.isNotEmpty)
-                        ? () => _showKoMatchDialog(row) : null,
+                    onTap: null, // view-only: scoring handled by separate app
                     child: Container(
                       margin: const EdgeInsets.symmetric(
                           horizontal: 3, vertical: 2),
@@ -4410,8 +4949,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
                     child: Column(mainAxisAlignment: MainAxisAlignment.center,
                         crossAxisAlignment: CrossAxisAlignment.center, children: [
-                      if (t1Wins) const Icon(Icons.emoji_events,
-                          color: Color(0xFFFFD700), size: 18),
                       Text(team1.isNotEmpty ? team1 : '—',
                           textAlign: TextAlign.center, maxLines: 2,
                           overflow: TextOverflow.ellipsis,
@@ -4446,8 +4983,6 @@ class _ScheduleViewerState extends State<ScheduleViewer>
                     padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
                     child: Column(mainAxisAlignment: MainAxisAlignment.center,
                         crossAxisAlignment: CrossAxisAlignment.center, children: [
-                      if (t2Wins) const Icon(Icons.emoji_events,
-                          color: Color(0xFFFFD700), size: 18),
                       Text(team2.isNotEmpty ? team2 : '—',
                           textAlign: TextAlign.center, maxLines: 2,
                           overflow: TextOverflow.ellipsis,

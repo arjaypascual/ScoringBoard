@@ -1473,7 +1473,32 @@ class DBHelper {
   static Future<void> advanceToKnockout(int categoryId) async {
     final conn = await getConnection();
 
-    // ── 0. Clear any stale KO seeding so INSERT IGNORE never produces duplicates ──
+    // ── EARLIEST GUARD: check tiebreaker table before ANY DB writes ──────────
+    // If any tiebreaker match for this category has no winner yet, abort now.
+    // This prevents the step-0 DELETE from wiping KO seeding before we know
+    // the tie is resolved, which caused partial bracket state in the UI.
+    try {
+      final tbCheck = await conn.execute(
+        'SELECT COUNT(*) AS pending FROM tbl_soccer_tiebreaker '
+        'WHERE category_id = :cat '
+        '  AND (winner_id IS NULL OR winner_id = 0)',
+        {'cat': categoryId},
+      );
+      final pending = int.tryParse(
+          tbCheck.rows.first.assoc()['pending']?.toString() ?? '0') ?? 0;
+      if (pending > 0) {
+        throw Exception(
+          'TIE_UNRESOLVED:pending_tiebreaker'
+          '|$pending tiebreaker match(es) still unresolved. '
+          'Score all tiebreaker matches before advancing to knockout.',
+        );
+      }
+    } catch (e) {
+      if (e.toString().contains('TIE_UNRESOLVED')) rethrow;
+      // Table may not exist yet — safe to proceed
+    }
+
+
     // advanceToKnockout is idempotent: calling it again always re-seeds from scratch.
     // Deletes tbl_teamschedule + tbl_score rows for all KO matches of this category.
     const koTypesToClear = [
@@ -1668,12 +1693,105 @@ class DBHelper {
       }
     }
 
-    // Collect all advancing teams: top 2 from each group
+    // ── Load resolved tiebreaker winners from tbl_soccer_tiebreaker ────────────
+    // If a group's Rank 2 vs Rank 3 stat tie was decided by a penalty shootout,
+    // the winner is stored here. We use this to bypass the hard-block below for
+    // groups that are already resolved.
+    // Structure: tiebreakerWinner[groupLabel] = winnerId  (only if ALL tiebreaker
+    // rows for that group have a non-null winner_id).
+    final Map<String, int> tiebreakerWinner = {};
+    try {
+      final tbResult = await conn.execute(
+        'SELECT group_label, winner_id '
+        'FROM tbl_soccer_tiebreaker '
+        'WHERE category_id = :cat '
+        'ORDER BY group_label, tiebreaker_id',
+        {'cat': categoryId},
+      );
+      // Group rows by label; a group is resolved only when ALL its rows have a winner.
+      final Map<String, List<int>> tbByGroup = {};
+      for (final row in tbResult.rows) {
+        final r      = row.assoc();
+        final grp    = r['group_label']?.toString() ?? '';
+        final wIdStr = r['winner_id']?.toString() ?? '';
+        final wId    = int.tryParse(wIdStr) ?? 0;
+        if (grp.isEmpty) continue;
+        tbByGroup.putIfAbsent(grp, () => []);
+        tbByGroup[grp]!.add(wId);
+      }
+      for (final entry in tbByGroup.entries) {
+        final winners = entry.value;
+        // All rows must have a valid winner (> 0) for the group to be resolved.
+        if (winners.isNotEmpty && winners.every((w) => w > 0)) {
+          // For a 2-way tie there is 1 match → 1 winner.
+          // For a 3-way tie there are 3 matches; use the team that won the most
+          // (appears most often as winner_id).
+          final freq = <int, int>{};
+          for (final w in winners) freq[w] = (freq[w] ?? 0) + 1;
+          final best = freq.entries.reduce((a, b) => a.value >= b.value ? a : b);
+          tiebreakerWinner[entry.key] = best.key;
+        }
+      }
+      if (tiebreakerWinner.isNotEmpty) {
+        print('ℹ️  advanceToKnockout: tiebreaker winners loaded: $tiebreakerWinner');
+      }
+    } catch (e) {
+      print('ℹ️  advanceToKnockout: could not load tiebreaker winners — $e');
+    }
+
+    // Collect all advancing teams: Rank 1 always advances.
+    // Rank 2 only advances if NOT tied with Rank 3 (or Rank 4 in a 3-way tie),
+    // OR if the tie was already resolved via penalty shootout.
+    // If ANY group has an UNRESOLVED tie, we ABORT the entire bracket seeding.
     final List<int> allAdvancing = [];
+    final List<String> tiedGroups = [];   // groups with unresolved cut-line ties
+
     for (final label in labels) {
       final ranked = groupRanked[label] ?? [];
-      if (ranked.isNotEmpty) allAdvancing.add(ranked[0]);
-      if (ranked.length > 1) allAdvancing.add(ranked[1]);
+      if (ranked.isEmpty) continue;
+
+      // Rank 1 — always advances, clear winner
+      allAdvancing.add(ranked[0]);
+
+      // Rank 2 — only advances if clearly ahead of Rank 3,
+      // OR if the tiebreaker was already resolved.
+      if (ranked.length > 1) {
+        bool rank2IsTied = false;
+        if (ranked.length >= 3) {
+          final s2 = teamStats[ranked[1]] ?? {'pts': 0, 'gd': 0, 'gf': 0};
+          final s3 = teamStats[ranked[2]] ?? {'pts': 0, 'gd': 0, 'gf': 0};
+          rank2IsTied = s2['pts'] == s3['pts'] &&
+                        s2['gd']  == s3['gd']  &&
+                        s2['gf']  == s3['gf'];
+        }
+
+        if (rank2IsTied) {
+          // Check if this group's tie was already decided by a penalty shootout.
+          final resolvedWinner = tiebreakerWinner[label] ?? 0;
+          if (resolvedWinner > 0) {
+            // Use the tiebreaker winner as Rank 2.
+            allAdvancing.add(resolvedWinner);
+            print('ℹ️  advanceToKnockout: Group $label tie resolved by tiebreaker — '
+                  'Rank 2 = team $resolvedWinner');
+          } else {
+            tiedGroups.add(label);
+            print('⚠️  advanceToKnockout: Group $label Rank 2 is tied with Rank 3 — '
+                  'aborting bracket seeding until tie-breaker is resolved.');
+          }
+        } else {
+          allAdvancing.add(ranked[1]);
+        }
+      }
+    }
+
+    // ── HARD BLOCK: if any group has an unresolved tie, abort completely ──────
+    // This prevents partial seeding that causes duplicate teams in the bracket.
+    if (tiedGroups.isNotEmpty) {
+      throw Exception(
+        'TIE_UNRESOLVED:${tiedGroups.join(",")}'
+        '|Resolve the tie-breaker for Group${tiedGroups.length > 1 ? "s" : ""} '
+        '${tiedGroups.join(", ")} before advancing to the knockout stage.',
+      );
     }
 
     // Sort all advancing teams by OVERALL standings: PTS → GD → GF (desc)
@@ -2790,9 +2908,10 @@ class DBHelper {
   /// Each tiebreaker match is assigned a scheduled_time immediately after the
   /// last group-stage match (one slot per arena, sequentially).
   static Future<void> generateTiebreakerMatches({
-    required int categoryId,
+    required int    categoryId,
     required String groupLabel,
     required List<int> teamIds,
+    bool isPenaltyShootout = false,
   }) async {
     final conn = await getConnection();
     // Ensure table exists (migration may not have run on older installs)
@@ -2882,28 +3001,180 @@ class DBHelper {
       }
     }
 
-    // Assign time slots: pack up to [arenaCount] matches per slot, then advance.
-    int cursor = lastGroupMinutes + 5; // 5-min buffer after last group match
-    int arena  = 1;
-    for (int pi = 0; pi < pairs.length; pi++) {
-      await conn.execute(
-        'INSERT INTO tbl_soccer_tiebreaker '
-        '(category_id, group_label, team1_id, team2_id, scheduled_time, arena_number) '
-        'VALUES (:cat, :grp, :t1, :t2, :stime, :arenaNum)',
-        {
-          'cat':      categoryId,
-          'grp':      groupLabel,
-          't1':       pairs[pi][0],
-          't2':       pairs[pi][1],
-          'stime':    fmtTime(cursor),
-          'arenaNum': arena,
-        },
+    // Find the latest scheduled_time already inserted for this category.
+    // Prevents two groups from getting the same timeslot when 1 arena is used.
+    int earliestCursor = lastGroupMinutes + 5;
+    try {
+      final lastTbResult = await conn.execute(
+        'SELECT TIME_TO_SEC(MAX(scheduled_time)) AS last_sec '
+        'FROM tbl_soccer_tiebreaker '
+        'WHERE category_id = :cat AND scheduled_time IS NOT NULL',
+        {'cat': categoryId},
       );
-      arena++;
-      if (arena > arenaCount) {
-        arena   = 1;
-        cursor += matchDuration + 5;
+      if (lastTbResult.rows.isNotEmpty) {
+        final secStr = lastTbResult.rows.first.assoc()['last_sec']?.toString() ?? '';
+        final secs   = int.tryParse(secStr) ?? 0;
+        if (secs > 0) {
+          final lastMinutes = secs ~/ 60;
+          final afterLast   = lastMinutes + matchDuration + 5;
+          if (afterLast > earliestCursor) earliestCursor = afterLast;
+        }
       }
+    } catch (e) {
+      print('Info: could not read last tiebreaker time: \$e');
+    }
+
+    // ── Build the FULL cross-group pair pool before inserting ─────────────────
+    // We need all pending tiebreaker pairs across ALL groups for this category
+    // so we can cross-fill arenas (e.g. Arena 1 = Group A match, Arena 2 = Group B match).
+    //
+    // Step 1: Load already-scheduled pairs for OTHER groups in this category
+    //         (pairs we inserted in previous calls to this function).
+    // Step 2: Combine with the NEW pairs we are about to schedule for [groupLabel].
+    // Step 3: Use queue-based slot assignment:
+    //         - Per slot, greedily fill each arena with the next pair that has
+    //           NO team already booked in the current slot.
+    //         - Teams from different groups never conflict with each other.
+    //         - Pairs from the same group may conflict (shared team) — those
+    //           are deferred to the next slot automatically.
+    //         - This guarantees:
+    //             ✅ No team appears twice in the same time slot
+    //             ✅ Arenas are filled as densely as possible
+    //             ✅ No empty slot if a valid match from ANY group can fill it
+
+    // Load existing pending pairs from other groups (not yet scored)
+    final List<Map<String, dynamic>> existingPairs = [];
+    try {
+      final existResult = await conn.execute(
+        'SELECT tiebreaker_id, group_label, team1_id, team2_id '
+        'FROM tbl_soccer_tiebreaker '
+        'WHERE category_id = :cat '
+        '  AND group_label != :grp '
+        '  AND winner_id IS NULL '
+        'ORDER BY tiebreaker_id',
+        {'cat': categoryId, 'grp': groupLabel},
+      );
+      for (final row in existResult.rows) {
+        existingPairs.add({
+          'id':    int.tryParse(row.assoc()['tiebreaker_id']?.toString() ?? '0') ?? 0,
+          'grp':   row.assoc()['group_label']?.toString() ?? '',
+          't1':    int.tryParse(row.assoc()['team1_id']?.toString()     ?? '0') ?? 0,
+          't2':    int.tryParse(row.assoc()['team2_id']?.toString()     ?? '0') ?? 0,
+          'isNew': false,
+        });
+      }
+    } catch (_) {}
+
+    // Build the new pairs for this group (not yet in DB)
+    final List<Map<String, dynamic>> newPairs = pairs.map((p) => {
+      'id':    -1,   // not in DB yet
+      'grp':   groupLabel,
+      't1':    p[0],
+      't2':    p[1],
+      'isNew': true,
+    }).toList();
+
+    // Full pool: existing (other groups) + new (this group)
+    // We interleave them so cross-group filling works naturally.
+    // Simple round-robin interleave: alternate between existing and new lists.
+    final List<Map<String, dynamic>> pool = [];
+    int ei = 0, ni = 0;
+    while (ei < existingPairs.length || ni < newPairs.length) {
+      if (ni < newPairs.length)      pool.add(newPairs[ni++]);
+      if (ei < existingPairs.length) pool.add(existingPairs[ei++]);
+    }
+
+    // ── Queue-based slot assignment ────────────────────────────────────────────
+    // Track which DB rows (existing) need their time/arena updated.
+    // New rows get inserted fresh; existing rows get UPDATE.
+    int cursor = earliestCursor;
+    final remaining = List<Map<String, dynamic>>.from(pool);
+
+    while (remaining.isNotEmpty) {
+      final Set<int> bookedTeams = {};
+      final List<int> placedIndices = [];
+      int arena = 1;
+
+      for (int qi = 0; qi < remaining.length && arena <= arenaCount; qi++) {
+        final t1 = remaining[qi]['t1'] as int;
+        final t2 = remaining[qi]['t2'] as int;
+        if (bookedTeams.contains(t1) || bookedTeams.contains(t2)) continue;
+
+        final isNew = remaining[qi]['isNew'] as bool;
+        final grp   = remaining[qi]['grp']   as String;
+
+        if (isNew) {
+          // Insert new tiebreaker row
+          await conn.execute(
+            'INSERT INTO tbl_soccer_tiebreaker '
+            '(category_id, group_label, team1_id, team2_id, scheduled_time, arena_number, is_penalty_shootout) '
+            'VALUES (:cat, :grp, :t1, :t2, :stime, :arenaNum, :isPenalty)',
+            {
+              'cat':       categoryId,
+              'grp':       grp,
+              't1':        t1,
+              't2':        t2,
+              'stime':     fmtTime(cursor),
+              'arenaNum':  arena,
+              'isPenalty': isPenaltyShootout ? 1 : 0,
+            },
+          );
+        } else {
+          // Update existing row's time and arena
+          final id = remaining[qi]['id'] as int;
+          await conn.execute(
+            'UPDATE tbl_soccer_tiebreaker '
+            'SET scheduled_time = :stime, arena_number = :arenaNum '
+            'WHERE tiebreaker_id = :id',
+            {'stime': fmtTime(cursor), 'arenaNum': arena, 'id': id},
+          );
+        }
+
+        bookedTeams.add(t1);
+        bookedTeams.add(t2);
+        placedIndices.add(qi);
+        arena++;
+      }
+
+      // Remove placed entries (reverse order to preserve indices)
+      for (final idx in placedIndices.reversed) {
+        remaining.removeAt(idx);
+      }
+
+      // Safety guard: if nothing placed (all pairs conflict), force-place first
+      if (placedIndices.isEmpty && remaining.isNotEmpty) {
+        final entry = remaining[0];
+        final t1    = entry['t1'] as int;
+        final t2    = entry['t2'] as int;
+        final isNew = entry['isNew'] as bool;
+        final grp   = entry['grp']   as String;
+        if (isNew) {
+          await conn.execute(
+            'INSERT INTO tbl_soccer_tiebreaker '
+            '(category_id, group_label, team1_id, team2_id, scheduled_time, arena_number, is_penalty_shootout) '
+            'VALUES (:cat, :grp, :t1, :t2, :stime, :arenaNum, :isPenalty)',
+            {
+              'cat':       categoryId,
+              'grp':       grp,
+              't1':        t1,
+              't2':        t2,
+              'stime':     fmtTime(cursor),
+              'arenaNum':  1,
+              'isPenalty': isPenaltyShootout ? 1 : 0,
+            },
+          );
+        } else {
+          await conn.execute(
+            'UPDATE tbl_soccer_tiebreaker '
+            'SET scheduled_time = :stime, arena_number = 1 '
+            'WHERE tiebreaker_id = :id',
+            {'stime': fmtTime(cursor), 'id': entry['id']},
+          );
+        }
+        remaining.removeAt(0);
+      }
+
+      cursor += matchDuration + 5;
     }
 
     print('✅ Tiebreaker matches generated: group $groupLabel, teams $teamIds, '

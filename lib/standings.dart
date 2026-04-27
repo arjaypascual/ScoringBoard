@@ -40,6 +40,9 @@ class _StandingsState extends State<Standings>
   int?   _soccerCategoryId;
   List<_SoccerGroup> _soccerGroups = [];
 
+  // Resolved tiebreaker winners: groupLabel → winner teamId
+  Map<String, int> _tiebreakerWinners = {};
+
   // ── Final Ranking (from knockout results) ─────────────────────────────────
   // null = not yet determined, empty list = tournament not started
   List<_FinalRankEntry> _finalRanking = [];
@@ -965,10 +968,68 @@ class _StandingsState extends State<Standings>
         return _SoccerGroup(label: label, teams: teams);
       }).toList();
 
-      if (mounted) setState(() => _soccerGroups = groups);
+      // ── Load resolved tiebreaker winners ──────────────────────────────────
+      Map<String, int> tbWinners = {};
+      try {
+        final tbCheck = await conn.execute(
+          "SELECT COUNT(*) AS cnt FROM information_schema.tables "
+          "WHERE table_schema = DATABASE() AND table_name = 'tbl_soccer_tiebreaker'",
+        );
+        final tbExists = (int.tryParse(
+                tbCheck.rows.first.assoc()['cnt']?.toString() ?? '0') ?? 0) > 0;
+        if (tbExists) {
+          final tbResult = await conn.execute(
+            'SELECT group_label, winner_id FROM tbl_soccer_tiebreaker '
+            'WHERE category_id = $id ORDER BY group_label, tiebreaker_id',
+          );
+          final Map<String, List<int>> byGroup = {};
+          for (final row in tbResult.rows) {
+            final grp = row.assoc()['group_label']?.toString() ?? '';
+            final wId = int.tryParse(row.assoc()['winner_id']?.toString() ?? '0') ?? 0;
+            if (grp.isEmpty) continue;
+            byGroup.putIfAbsent(grp, () => []);
+            byGroup[grp]!.add(wId);
+          }
+          for (final entry in byGroup.entries) {
+            final winners = entry.value;
+            if (winners.isNotEmpty && winners.every((w) => w > 0)) {
+              final freq = <int, int>{};
+              for (final w in winners) freq[w] = (freq[w] ?? 0) + 1;
+              final best = freq.entries.reduce((a, b) => a.value >= b.value ? a : b);
+              tbWinners[entry.key] = best.key;
+            }
+          }
+        }
+      } catch (_) {}
+
+      if (mounted) setState(() {
+        _soccerGroups      = groups;
+        _tiebreakerWinners = tbWinners;
+      });
     } catch (e) {
       print('loadSoccerGroups error: $e');
     }
+  }
+
+  // ── Comparator used for group-stage sorting (points → GD → GF → W → name) ─
+  int _cmpGroupStat(_SoccerTeamStat a, _SoccerTeamStat b) {
+    if (b.points   != a.points)   return b.points.compareTo(a.points);
+    if (b.goalDiff != a.goalDiff) return b.goalDiff.compareTo(a.goalDiff);
+    if (b.goalsFor != a.goalsFor) return b.goalsFor.compareTo(a.goalsFor);
+    if (b.wins     != a.wins)     return b.wins.compareTo(a.wins);
+    return a.teamName.compareTo(b.teamName);
+  }
+
+  // ── Returns true when rank-2 and rank-3 teams in [sortedTeams] are tied ──
+  // i.e. the 2nd-place slot cannot be determined yet → tie-breaker needed.
+  bool _hasCutLineTie(List<_SoccerTeamStat> sortedTeams) {
+    if (sortedTeams.length < 3) return false;
+    final second = sortedTeams[1];
+    final third  = sortedTeams[2];
+    return second.points   == third.points   &&
+           second.goalDiff == third.goalDiff &&
+           second.goalsFor == third.goalsFor &&
+           second.wins     == third.wins;
   }
 
   // ── Load final ranking from knockout results ──────────────────────────────
@@ -1122,24 +1183,24 @@ class _StandingsState extends State<Standings>
       if (mounted) setState(() => _finalRanking = ranking);
 
       // ── Append group-stage eliminated teams (rank 3+ per group) ─────────
-      // Only add if the knockout ranking already has at least 1 entry (tournament started)
+      // Only add if the knockout ranking already has at least 1 entry (tournament started).
+      // If a group still has an unresolved cut-line tie (rank 2 == rank 3 on all criteria),
+      // skip that group entirely — we cannot determine who is eliminated until tie-breaker
+      // is played or resolved.
       if (ranking.isNotEmpty && _soccerGroups.isNotEmpty) {
         // Collect all teams that already appear in the ranking (qualified to KO)
         final rankedIds = ranking.map((e) => e.teamId).toSet();
 
-        // Sort comparator matching group stage standings logic
-        int cmpGroup(_SoccerTeamStat a, _SoccerTeamStat b) {
-          if (b.points   != a.points)   return b.points.compareTo(a.points);
-          if (b.goalDiff != a.goalDiff) return b.goalDiff.compareTo(a.goalDiff);
-          if (b.goalsFor != a.goalsFor) return b.goalsFor.compareTo(a.goalsFor);
-          if (b.wins     != a.wins)     return b.wins.compareTo(a.wins);
-          return a.teamName.compareTo(b.teamName);
-        }
-
-        // Gather eliminated (rank 3+) from every group
+        // Gather eliminated (rank 3+) from every group, skipping groups with
+        // an unresolved cut-line tie between rank 2 and rank 3.
         final List<_SoccerTeamStat> eliminatedTeams = [];
         for (final g in _soccerGroups) {
-          final sorted = List<_SoccerTeamStat>.from(g.teams)..sort(cmpGroup);
+          final sorted = List<_SoccerTeamStat>.from(g.teams)..sort(_cmpGroupStat);
+
+          // If rank 2 and rank 3 are still perfectly equal → tie-breaker pending.
+          // Do NOT mark anyone from this group as eliminated yet.
+          if (_hasCutLineTie(sorted)) continue;
+
           for (int i = 2; i < sorted.length; i++) {
             if (!rankedIds.contains(sorted[i].teamId)) {
               eliminatedTeams.add(sorted[i]);
@@ -1148,13 +1209,7 @@ class _StandingsState extends State<Standings>
         }
 
         // Sort the eliminated pool by overall performance
-        eliminatedTeams.sort((a, b) {
-          if (b.points   != a.points)   return b.points.compareTo(a.points);
-          if (b.goalDiff != a.goalDiff) return b.goalDiff.compareTo(a.goalDiff);
-          if (b.goalsFor != a.goalsFor) return b.goalsFor.compareTo(a.goalsFor);
-          if (b.wins     != a.wins)     return b.wins.compareTo(a.wins);
-          return a.teamName.compareTo(b.teamName);
-        });
+        eliminatedTeams.sort(_cmpGroupStat);
 
         final List<_FinalRankEntry> full = List.from(ranking);
         int nextRank = (ranking.map((e) => e.rank).fold(0, (a, b) => a > b ? a : b)) + 1;
@@ -1272,11 +1327,13 @@ class _StandingsState extends State<Standings>
     }
 
     // ── Build per-group team lists, pick top 2 vs eliminated ──────────────
-    final qualifiers  = <Map<String, dynamic>>[];  // top 2 per group
-    final eliminated  = <Map<String, dynamic>>[];  // rest
+    final qualifiers  = <Map<String, dynamic>>[];
+    final pending     = <Map<String, dynamic>>[];
+    final eliminated  = <Map<String, dynamic>>[];
 
     for (final g in _soccerGroups) {
       final groupTeams = g.teams.map((t) => {
+        'teamId':       t.teamId,
         'teamName':     t.teamName,
         'group':        g.label,
         'wins':         t.wins,
@@ -1292,17 +1349,42 @@ class _StandingsState extends State<Standings>
         'groupColor':   _groupColor(g.label),
       }).toList()..sort(_cmp);
 
+      final statsSorted  = List<_SoccerTeamStat>.from(g.teams)..sort(_cmpGroupStat);
+      final tieAtCut     = _hasCutLineTie(statsSorted);
+      final tbWinnerId   = _tiebreakerWinners[g.label] ?? 0;
+      final tieResolved  = tieAtCut && tbWinnerId > 0;
+      final tiePending   = tieAtCut && tbWinnerId == 0;
+
       for (int gi = 0; gi < groupTeams.length; gi++) {
-        if (gi < 2) {
-          qualifiers.add(groupTeams[gi]);
+        final teamId = groupTeams[gi]['teamId'] as int;
+        if (tiePending) {
+          // Tie not yet resolved — rank 1 confirmed, rest in pending
+          if (gi == 0) {
+            qualifiers.add(groupTeams[gi]);
+          } else {
+            pending.add(groupTeams[gi]);
+          }
+        } else if (tieResolved) {
+          // Tiebreaker done — rank 1 and TB winner advance, rest eliminated
+          if (gi == 0 || teamId == tbWinnerId) {
+            qualifiers.add(groupTeams[gi]);
+          } else {
+            eliminated.add(groupTeams[gi]);
+          }
         } else {
-          eliminated.add(groupTeams[gi]);
+          // No tie — normal top 2 advance
+          if (gi < 2) {
+            qualifiers.add(groupTeams[gi]);
+          } else {
+            eliminated.add(groupTeams[gi]);
+          }
         }
       }
     }
 
-    // Sort qualifiers and eliminated independently by points/goal diff etc.
+    // Sort each bucket
     qualifiers.sort(_cmp);
+    pending.sort(_cmp);
     eliminated.sort(_cmp);
 
     // ── Header ─────────────────────────────────────────────────────────────
@@ -1545,9 +1627,170 @@ class _StandingsState extends State<Standings>
       ]),
     );
 
+    // ── Divider for tie-breaker pending section ────────────────────────────
+    Widget _tieBreakerDivider() => Container(
+      color: const Color(0xFF110830),
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+      child: Row(children: [
+        Expanded(child: Container(height: 1,
+            color: const Color(0xFFFFAA00).withOpacity(0.35))),
+        Container(
+          margin: const EdgeInsets.symmetric(horizontal: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFAA00).withOpacity(0.10),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+                color: const Color(0xFFFFAA00).withOpacity(0.45), width: 1),
+          ),
+          child: const Row(mainAxisSize: MainAxisSize.min, children: [
+            Text('⚔️', style: TextStyle(fontSize: 11)),
+            SizedBox(width: 6),
+            Text('TIE-BREAKER PENDING',
+                style: TextStyle(
+                    color: Color(0xFFFFAA00),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1.5)),
+          ]),
+        ),
+        Expanded(child: Container(height: 1,
+            color: const Color(0xFFFFAA00).withOpacity(0.35))),
+      ]),
+    );
+
+    // ── Row for a pending (tie-breaker) team ─────────────────────────────
+    Widget _buildPendingRow(Map<String, dynamic> team, int idx) {
+      final isEven = idx % 2 == 0;
+      final gc     = team['groupColor']    as Color;
+      final name   = team['teamName']      as String;
+      final group  = team['group']         as String;
+      final mp     = team['matchesPlayed'] as int;
+      final w      = team['wins']          as int;
+      final d      = team['draws']         as int;
+      final l      = team['losses']        as int;
+      final pts    = team['points']        as int;
+      final gf     = team['goalsFor']      as int;
+      final ga     = team['goalsAgainst']  as int;
+      final gd     = team['goalDiff']      as int;
+      final gdStr  = gd > 0 ? '+$gd' : '$gd';
+      final gdColor = gd > 0
+          ? const Color(0xFF00FF88)
+          : gd < 0 ? Colors.redAccent : Colors.white38;
+
+      Widget cell(String v, {int flex = 1, Color? color, bool bold = false}) =>
+          Expanded(flex: flex, child: Text(v,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  color: color ?? const Color(0xFFFFCC55),
+                  fontSize: 16,
+                  fontWeight: bold ? FontWeight.w900 : FontWeight.w600)));
+
+      return Container(
+        decoration: BoxDecoration(
+          color: isEven
+              ? const Color(0xFF180F08).withOpacity(0.85)
+              : const Color(0xFF130C06).withOpacity(0.85),
+          border: const Border(
+              left: BorderSide(color: Color(0xFFFFAA00), width: 3)),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+        child: Row(children: [
+          // ⚔️ icon instead of rank number
+          SizedBox(width: 36, child: Container(
+            width: 32, height: 32,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: const Color(0xFFFFAA00).withOpacity(0.12),
+              border: Border.all(
+                  color: const Color(0xFFFFAA00).withOpacity(0.45), width: 1.5),
+            ),
+            child: const Center(child: Text('⚔️',
+                style: TextStyle(fontSize: 13))),
+          )),
+
+          // Group badge + team name
+          Expanded(flex: 5, child: Row(children: [
+            Container(
+              width: 20, height: 20,
+              margin: const EdgeInsets.only(right: 8),
+              decoration: BoxDecoration(
+                color: gc.withOpacity(0.25),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: gc.withOpacity(0.6), width: 1),
+              ),
+              child: Center(child: Text(group,
+                  style: TextStyle(
+                      color: gc, fontSize: 10, fontWeight: FontWeight.w900))),
+            ),
+            Expanded(child: Text(name.toUpperCase(),
+                style: const TextStyle(
+                    color: Color(0xFFFFCC55),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800))),
+            Container(
+              margin: const EdgeInsets.only(left: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFAA00).withOpacity(0.12),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                    color: const Color(0xFFFFAA00).withOpacity(0.45), width: 1),
+              ),
+              child: const Text('TIE',
+                  style: TextStyle(
+                      color: Color(0xFFFFAA00),
+                      fontSize: 9,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 1)),
+            ),
+          ])),
+
+          cell('$mp', flex: 1, color: Colors.white54),
+          cell('$w',  flex: 1, color: w > 0 ? const Color(0xFF00FF88) : Colors.white24,
+              bold: w > 0),
+          cell('$d',  flex: 1, color: d > 0 ? Colors.orange : Colors.white24),
+          cell('$l',  flex: 1, color: l > 0 ? Colors.redAccent : Colors.white24),
+          Expanded(flex: 2, child: Text('$gf:$ga',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  color: Color(0xFFFFCC55), fontSize: 16,
+                  fontWeight: FontWeight.w600, letterSpacing: 0.5))),
+          cell(gdStr, flex: 1, color: gdColor, bold: gd != 0),
+          Expanded(flex: 1, child: Container(
+            height: 30,
+            decoration: BoxDecoration(
+              color: pts > 0
+                  ? const Color(0xFFFFAA00).withOpacity(0.12)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(5),
+              border: pts > 0
+                  ? Border.all(
+                      color: const Color(0xFFFFAA00).withOpacity(0.35))
+                  : null,
+            ),
+            child: Center(child: Text('$pts',
+                style: TextStyle(
+                    color: pts > 0
+                        ? const Color(0xFFFFAA00)
+                        : Colors.white24,
+                    fontSize: 16, fontWeight: FontWeight.w900))),
+          )),
+        ]),
+      );
+    }
+
     // ── Build the full item list ───────────────────────────────────────────
-    // Items: qualifiers rows + divider + eliminated rows
-    final totalItems = qualifiers.length + 1 + eliminated.length;
+    // Layout: qualifier rows
+    //         [tie-breaker divider]  ← only if pending.isNotEmpty
+    //         pending rows
+    //         [eliminated divider]   ← only if eliminated.isNotEmpty
+    //         eliminated rows
+    final hasPending  = pending.isNotEmpty;
+    final hasElim     = eliminated.isNotEmpty;
+    int totalItems = qualifiers.length;
+    if (hasPending)  totalItems += 1 + pending.length;
+    if (hasElim)     totalItems += 1 + eliminated.length;
 
     return Column(children: [
       // Column header row
@@ -1576,17 +1819,33 @@ class _StandingsState extends State<Standings>
       Expanded(child: ListView.builder(
         itemCount: totalItems,
         itemBuilder: (_, i) {
-          // Qualifier rows
+          // ── Qualifier rows ──────────────────────────────────────────
           if (i < qualifiers.length) {
             return _buildRow(qualifiers[i], i + 1, false);
           }
-          // Eliminated divider
-          if (i == qualifiers.length) {
-            return _eliminatedDivider();
+
+          // ── Tie-breaker pending section ─────────────────────────────
+          if (hasPending) {
+            final pendingStart = qualifiers.length;
+            if (i == pendingStart) return _tieBreakerDivider();
+            final pi = i - pendingStart - 1;
+            if (pi < pending.length) {
+              return _buildPendingRow(pending[pi], pi + 1);
+            }
           }
-          // Eliminated rows
-          final elimIndex = i - qualifiers.length - 1;
-          return _buildRow(eliminated[elimIndex], elimIndex + 1, true);
+
+          // ── Eliminated section ──────────────────────────────────────
+          if (hasElim) {
+            final elimStart = qualifiers.length
+                + (hasPending ? 1 + pending.length : 0);
+            if (i == elimStart) return _eliminatedDivider();
+            final ei = i - elimStart - 1;
+            if (ei < eliminated.length) {
+              return _buildRow(eliminated[ei], ei + 1, true);
+            }
+          }
+
+          return const SizedBox.shrink();
         },
       )),
     ]);
@@ -2226,15 +2485,14 @@ class _StandingsState extends State<Standings>
   }
 
   Widget _buildGroupStandingCard(_SoccerGroup group) {
-    final groupCol = _groupColor(group.label);
-    final sorted   = List<_SoccerTeamStat>.from(group.teams)
-      ..sort((a, b) {
-        if (b.points   != a.points)   return b.points.compareTo(a.points);
-        if (b.goalDiff != a.goalDiff) return b.goalDiff.compareTo(a.goalDiff);
-        if (b.goalsFor != a.goalsFor) return b.goalsFor.compareTo(a.goalsFor);
-        if (b.wins     != a.wins)     return b.wins.compareTo(a.wins);
-        return a.teamName.compareTo(b.teamName);
-      });
+    final groupCol    = _groupColor(group.label);
+    final sorted      = List<_SoccerTeamStat>.from(group.teams)
+      ..sort(_cmpGroupStat);
+
+    final tieAtCut    = _hasCutLineTie(sorted);
+    final tbWinnerId  = _tiebreakerWinners[group.label] ?? 0;
+    final tieResolved = tieAtCut && tbWinnerId > 0;
+    final tiePending  = tieAtCut && tbWinnerId == 0;
 
     // FIFA-style column header helper
     Widget col(String t, {Color color = Colors.white38}) =>
@@ -2247,8 +2505,22 @@ class _StandingsState extends State<Standings>
       decoration: BoxDecoration(
         color: const Color(0xFF0F0A2A),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: groupCol.withOpacity(0.4), width: 1.5),
-        boxShadow: [BoxShadow(color: groupCol.withOpacity(0.08), blurRadius: 12)],
+        border: Border.all(
+          color: tiePending
+              ? const Color(0xFFFFAA00).withOpacity(0.55)
+              : tieResolved
+                  ? const Color(0xFF00FF88).withOpacity(0.50)
+                  : groupCol.withOpacity(0.4),
+          width: (tiePending || tieResolved) ? 2 : 1.5,
+        ),
+        boxShadow: [BoxShadow(
+          color: tiePending
+              ? const Color(0xFFFFAA00).withOpacity(0.12)
+              : tieResolved
+                  ? const Color(0xFF00FF88).withOpacity(0.10)
+                  : groupCol.withOpacity(0.08),
+          blurRadius: 12,
+        )],
       ),
       child: Column(children: [
         // ── Group header ────────────────────────────────────────────
@@ -2273,6 +2545,41 @@ class _StandingsState extends State<Standings>
             Text('GROUP ${group.label}',
                 style: const TextStyle(color: Colors.white, fontSize: 14,
                     fontWeight: FontWeight.w900, letterSpacing: 1.5)),
+            if (tiePending) ...[
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFAA00).withOpacity(0.18),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(
+                      color: const Color(0xFFFFAA00).withOpacity(0.6), width: 1),
+                ),
+                child: const Text('⚔️ TIE',
+                    style: TextStyle(
+                        color: Color(0xFFFFAA00),
+                        fontSize: 9,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.8)),
+              ),
+            ] else if (tieResolved) ...[
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF00FF88).withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(
+                      color: const Color(0xFF00FF88).withOpacity(0.55), width: 1),
+                ),
+                child: const Text('✓ RESOLVED',
+                    style: TextStyle(
+                        color: Color(0xFF00FF88),
+                        fontSize: 9,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.8)),
+              ),
+            ],
           ]),
         ),
         // ── Column headers: P W D L GD PTS ─────────────────────────
@@ -2298,19 +2605,32 @@ class _StandingsState extends State<Standings>
         ),
         // ── Team rows ───────────────────────────────────────────────
         ...sorted.asMap().entries.map((e) {
-          final rank     = e.key + 1;
-          final team     = e.value;
-          final advances = rank <= 2;
-          final isFirst  = rank == 1;
-          final badgeCol = isFirst
-              ? const Color(0xFFFFD700)
-              : advances
-                  ? const Color(0xFF00FF88)
-                  : Colors.white12;
-          final textCol  = advances ? Colors.white : Colors.white54;
-          final gd       = team.goalDiff;
-          final gdStr    = gd > 0 ? '+$gd' : '$gd';
-          final gdColor  = gd > 0
+          final rank   = e.key + 1;
+          final team   = e.value;
+
+          final bool isPendingTie = tiePending && rank >= 2;
+          final bool isEliminated = tieResolved
+              ? (rank == 1 ? false : team.teamId != tbWinnerId)
+              : (!tiePending && rank > 2);
+          final bool advances    = !isEliminated && !isPendingTie;
+          final bool isFirst     = rank == 1;
+          final bool isTbWinner  = tieResolved && team.teamId == tbWinnerId;
+
+          final badgeCol = isPendingTie
+              ? const Color(0xFFFFAA00)
+              : isEliminated
+                  ? Colors.white12
+                  : isFirst
+                      ? const Color(0xFFFFD700)
+                      : const Color(0xFF00FF88);
+          final textCol = isPendingTie
+              ? const Color(0xFFFFCC55)
+              : isEliminated
+                  ? Colors.white24
+                  : Colors.white;
+          final gd    = team.goalDiff;
+          final gdStr = gd > 0 ? '+$gd' : '$gd';
+          final gdColor = gd > 0
               ? const Color(0xFF00FF88)
               : gd < 0
                   ? Colors.redAccent
@@ -2319,7 +2639,7 @@ class _StandingsState extends State<Standings>
           return Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
             decoration: BoxDecoration(
-              gradient: advances
+              gradient: (advances || isPendingTie)
                   ? LinearGradient(
                       begin: Alignment.centerLeft,
                       end: Alignment.centerRight,
@@ -2329,12 +2649,14 @@ class _StandingsState extends State<Standings>
                       ],
                     )
                   : null,
+              color: isEliminated ? const Color(0xFF080415) : null,
               border: Border(
-                bottom: BorderSide(
-                    color: Colors.white.withOpacity(0.04), width: 1),
-                left: advances
+                bottom: BorderSide(color: Colors.white.withOpacity(0.04), width: 1),
+                left: (advances || isPendingTie)
                     ? BorderSide(color: badgeCol.withOpacity(0.7), width: 2.5)
-                    : BorderSide.none,
+                    : isEliminated
+                        ? const BorderSide(color: Color(0xFF3A1A1A), width: 2.5)
+                        : BorderSide.none,
               ),
             ),
             child: Row(children: [
@@ -2343,29 +2665,46 @@ class _StandingsState extends State<Standings>
                 width: 28, height: 28,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  gradient: advances
+                  gradient: (advances || isPendingTie)
                       ? RadialGradient(colors: [
                           badgeCol.withOpacity(0.3),
                           badgeCol.withOpacity(0.06),
                         ])
                       : null,
-                  color: advances ? null : Colors.white.withOpacity(0.03),
+                  color: (advances || isPendingTie)
+                      ? null
+                      : isEliminated
+                          ? Colors.red.withOpacity(0.08)
+                          : Colors.white.withOpacity(0.03),
                   border: Border.all(
-                      color: advances ? badgeCol : Colors.white12, width: 1),
-                  boxShadow: advances
-                      ? [BoxShadow(
-                          color: badgeCol.withOpacity(0.35),
-                          blurRadius: 6)]
+                      color: (advances || isPendingTie)
+                          ? badgeCol
+                          : isEliminated
+                              ? Colors.red.withOpacity(0.25)
+                              : Colors.white12,
+                      width: 1),
+                  boxShadow: (advances || isPendingTie)
+                      ? [BoxShadow(color: badgeCol.withOpacity(0.35), blurRadius: 6)]
                       : null,
                 ),
                 child: Center(
-                  child: advances && isFirst
-                      ? const Text('★', style: TextStyle(color: Color(0xFFFFD700), fontSize: 11))
-                      : advances
-                          ? const Icon(Icons.arrow_upward_rounded, size: 12, color: Color(0xFF00FF88))
-                          : Text('$rank',
-                              style: TextStyle(color: Colors.white54,
-                                  fontSize: 14, fontWeight: FontWeight.w900)),
+                  child: isPendingTie
+                      ? const Text('⚔️', style: TextStyle(fontSize: 11))
+                      : isEliminated
+                          ? const Text('💀', style: TextStyle(fontSize: 11))
+                          : isTbWinner
+                              ? const Text('✓', style: TextStyle(
+                                  color: Color(0xFF00FF88),
+                                  fontSize: 13, fontWeight: FontWeight.w900))
+                              : advances && isFirst
+                                  ? const Text('★', style: TextStyle(
+                                      color: Color(0xFFFFD700), fontSize: 11))
+                                  : advances
+                                      ? const Icon(Icons.arrow_upward_rounded,
+                                          size: 12, color: Color(0xFF00FF88))
+                                      : Text('$rank',
+                                          style: const TextStyle(color: Colors.white54,
+                                              fontSize: 14, fontWeight: FontWeight.w900)),
                 ),
               ),
               const SizedBox(width: 6),
@@ -2374,8 +2713,12 @@ class _StandingsState extends State<Standings>
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     color: textCol,
-                    fontSize: advances ? 14 : 13,
-                    fontWeight: advances ? FontWeight.w900 : FontWeight.w400,
+                    fontSize: (advances || isPendingTie) ? 14 : 13,
+                    fontWeight: (advances || isPendingTie)
+                        ? FontWeight.w900
+                        : FontWeight.w400,
+                    decoration: isEliminated ? TextDecoration.lineThrough : null,
+                    decorationColor: Colors.white24,
                     shadows: advances && isFirst
                         ? [const Shadow(color: Color(0x66FFD700), blurRadius: 8)]
                         : null,
@@ -2437,36 +2780,67 @@ class _StandingsState extends State<Standings>
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
           decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [
-                const Color(0xFF00FF88).withOpacity(0.08),
-                Colors.transparent,
-              ],
-            ),
+            gradient: LinearGradient(colors: [
+              tieResolved
+                  ? const Color(0xFF00FF88).withOpacity(0.08)
+                  : tiePending
+                      ? const Color(0xFFFFAA00).withOpacity(0.08)
+                      : const Color(0xFF00FF88).withOpacity(0.08),
+              Colors.transparent,
+            ]),
             borderRadius: const BorderRadius.vertical(bottom: Radius.circular(11)),
             border: Border(top: BorderSide(color: groupCol.withOpacity(0.2))),
           ),
           child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(10),
-                color: const Color(0xFF00FF88).withOpacity(0.10),
-                border: Border.all(
-                    color: const Color(0xFF00FF88).withOpacity(0.3), width: 1),
+            if (tieResolved)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  color: const Color(0xFF00FF88).withOpacity(0.10),
+                  border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.4), width: 1),
+                ),
+                child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                  Text('✓', style: TextStyle(color: Color(0xFF00FF88),
+                      fontSize: 10, fontWeight: FontWeight.w900)),
+                  SizedBox(width: 4),
+                  Text('TIEBREAKER RESOLVED', style: TextStyle(
+                      color: Color(0xFF00FF88), fontSize: 9,
+                      fontWeight: FontWeight.w900, letterSpacing: 0.8)),
+                ]),
+              )
+            else if (tiePending)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  color: const Color(0xFFFFAA00).withOpacity(0.10),
+                  border: Border.all(color: const Color(0xFFFFAA00).withOpacity(0.35), width: 1),
+                ),
+                child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                  Text('⚔️', style: TextStyle(fontSize: 9)),
+                  SizedBox(width: 4),
+                  Text('TIE-BREAKER PENDING', style: TextStyle(
+                      color: Color(0xFFFFAA00), fontSize: 9,
+                      fontWeight: FontWeight.w900, letterSpacing: 0.8)),
+                ]),
+              )
+            else
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  color: const Color(0xFF00FF88).withOpacity(0.10),
+                  border: Border.all(color: const Color(0xFF00FF88).withOpacity(0.3), width: 1),
+                ),
+                child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.arrow_upward_rounded, color: Color(0xFF00FF88), size: 10),
+                  SizedBox(width: 4),
+                  Text('TOP 2 ADVANCE', style: TextStyle(
+                      color: Color(0xFF00FF88), fontSize: 9,
+                      fontWeight: FontWeight.w900, letterSpacing: 0.8)),
+                ]),
               ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.arrow_upward_rounded,
-                    color: Color(0xFF00FF88), size: 10),
-                const SizedBox(width: 4),
-                Text('TOP 2 ADVANCE',
-                    style: TextStyle(
-                        color: const Color(0xFF00FF88).withOpacity(0.85),
-                        fontSize: 9,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 0.8)),
-              ]),
-            ),
           ]),
         ),
       ]),
